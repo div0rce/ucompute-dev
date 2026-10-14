@@ -9,6 +9,19 @@ members = [
   "crates/common-api",
   "crates/common-cli",
   "tests/integration",
+  "apps/desktop/src-tauri",
+]
+# `cargo build` / `cargo test` with no -p builds the daemon crates only; the Tauri shell is heavy and built explicitly
+# with `cargo build -p common-desktop` or `pnpm tauri build` inside apps/desktop.
+default-members = [
+  "crates/common-core",
+  "crates/common-hardware",
+  "crates/common-models",
+  "crates/common-artifacts",
+  "crates/common-runtime",
+  "crates/common-api",
+  "crates/common-cli",
+  "tests/integration",
 ]
 
 [workspace.package]
@@ -48,3 +61,11 @@ tar = "0.4"
 flate2 = "1"
 prometheus = { version = "0.14", default-features = false }
 tempfile = "3"
+
+# Release profile (Tauri size guideline): applies to the whole workspace, including the `common` sidecar.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
