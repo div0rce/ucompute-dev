@@ -140,3 +140,29 @@ All entries below: Host = owner's MacBook Air (Apple M2, 8 GB unified, 10-core G
 - Run: launched `Common.app` with no daemon running and an empty default data dir (`~/Library/Application Support/Common`). The app spawned the sidecar (`common serve --host 127.0.0.1 --port 8192`), which auto-downloaded and verified the pinned llama.cpp b11609 archive (12.1 MB) and reported healthy. Through that sidecar: `POST /api/models/stories15M-q4_0/pull` (19,077,344 bytes, verified), `POST /api/models/stories15M-q4_0/load` → `MTL0 (Apple M2)`, 7/6 layers offloaded, and `/v1/completions` returned the golden continuation " named Benny was hopping in a field. He saw a big, red" at 376 tok/s decode. The same steps are what the Models/Chat views call (DESKTOP-E2E).
 - Defects found: (1) the sidecar name passed to Tauri had to be the basename (fixed in 18d936b); (2) a fresh data dir refused to serve without `common setup` (fixed in 8dac23e: first run self-provisions); (3) killing the app with SIGTERM left the sidecar daemon running (fixed: `common serve --exit-with-parent`, see next commit).
 - Status: IMPLEMENTED_UNVERIFIED until the install → select → first-token flow is repeated from a fresh macOS user account through the UI alone, and until artifacts are checksummed in a release process (Gate G).
+
+## M3 evidence, interim (2026-10-14, commits 5034fb6 + 107b34b)
+
+Everything in this section is **SINGLE-HOST**: two or more Common nodes running on the owner's one Mac over loopback. It proves protocol and policy behaviour, not two-machine operation (B-002). Suites: `cargo test -p common-identity -p common-policy -p common-observability -p common-network` with `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1` → 35 + 57 tests pass; clippy clean.
+
+### F-06-01 — device identity
+- `keygen_persist_load`, `file_permissions_0600` (dir 0700, key 0600), `private_key_never_logged` (Debug/Display of every type scanned for the secret), compile_fail doctest proves `DeviceIdentity` has no `Serialize`.
+
+### F-02-03 / F-06-03 — encrypted, mutually authenticated transport
+- rustls 0.23 raw public keys (RFC 7250) over quinn 0.11, TLS 1.3 only: `handshake_pinned_keys_succeeds_single_host`, `unpinned_key_rejected` (alert inside the handshake, no stream ever opens), `revoked_key_rejected`, `wrong_alpn_fails`, `tls12_downgrade_attempt_fails`, `no_plaintext_mode_exists` (source scan: the quinn Endpoint is the only socket), `packet_capture_contains_no_plaintext_prompt_single_host` (test-only UDP relay records every datagram of a remote generation; canary prompt and golden completion absent in UTF-8 and UTF-16; positive control finds the canary in the plaintext frame).
+- Limitation: reqwest's feature unification compiles rustls `tls12` into the binary; no Common config enables it.
+
+### F-02-04 / F-02-05 / F-08-10 — capabilities, liveness, versioning
+- `capabilities_exchanged_after_handshake` (received `hardware_json` equals the sender's probe), `oversized_capability_message_rejected` (64 KiB + 1 → `frame_too_large`), `protocol_major_mismatch_is_typed`, `minor_negotiation_is_min`, prost unknown-field tolerance; `kill_peer_detected_within_bound_single_host`: 6.50 s observed (bound 7 s; keep-alive 2 s, idle 6 s).
+
+### F-02-01 — LAN discovery
+- Signed TXT record (id, pair flag, proto, ts, Ed25519 sig; no hostnames/models), tampered and expired records ignored, pinned peers flagged trusted; `two_instances_discover_within_5s_single_host` passes on this Mac (mdns-sd two instances on one host).
+
+### F-02-02 — pairing
+- `correct_code_pairs_and_pins_both_sides_single_host` (QUIC/TLS RPK + SPAKE2 + HMAC confirmation over `export_keying_material` and both peer ids): 20–44 ms end to end on loopback; `wrong_code_fails_and_pins_nothing`; `brute_force_rate_limited` (6 wrong codes → `pairing_locked`, 7th connection refused); `mitm_relay_detected` (relay terminating TLS on both legs fails confirmation on both sides); QR payload parse.
+
+### F-06-02 / F-06-07 / F-02-09 — policy and groups (unit + property)
+- `default_deny` and `local_only_never_leaves_device_fuzz`: 2 × 2,000 random (config, store, request) combinations, zero violations; `workload_only_to_group_members`, `non_member_rejected`; remote path: `local_only_privacy_never_leaves_device` (policy denies before any stream opens), `unauthorized_peer_is_refused` (no load happens on the server).
+
+### Mode B — remote execution (spec section 7 B; not pooled inference)
+- `remote_golden_text_single_host` (greedy 32 tokens on the peer equal the golden text and a local run), `remote_streaming_delivers_before_done`, `remote_cancel_stops_server_generation_within_500ms`, `peer_lost_mid_stream_is_typed`; server verifies the requested model hash against its manifest and the loaded model (no substitution); audit entries carry ids, sizes and durations only.
