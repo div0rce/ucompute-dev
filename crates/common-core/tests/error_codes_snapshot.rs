@@ -30,6 +30,14 @@ fn error_codes_are_stable() {
             ("unauthorized", 401, "authentication_error"),
             ("io", 500, "server_error"),
             ("internal", 500, "server_error"),
+            // M3 (ADR-0003), appended
+            ("peer_unauthorized", 403, "permission_error"),
+            ("peer_revoked", 403, "permission_error"),
+            ("pairing_locked", 429, "rate_limit_error"),
+            ("pairing_failed", 401, "authentication_error"),
+            ("peer_lost", 502, "server_error"),
+            ("protocol_incompatible", 426, "invalid_request_error"),
+            ("frame_too_large", 413, "invalid_request_error"),
         ]
     );
 }

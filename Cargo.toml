@@ -8,6 +8,10 @@ members = [
   "crates/common-runtime",
   "crates/common-api",
   "crates/common-cli",
+  "crates/common-identity",
+  "crates/common-policy",
+  "crates/common-observability",
+  "crates/common-network",
   "tests/integration",
   "apps/desktop/src-tauri",
 ]
@@ -21,6 +25,10 @@ default-members = [
   "crates/common-runtime",
   "crates/common-api",
   "crates/common-cli",
+  "crates/common-identity",
+  "crates/common-policy",
+  "crates/common-observability",
+  "crates/common-network",
   "tests/integration",
 ]
 
@@ -38,6 +46,10 @@ common-models = { path = "crates/common-models" }
 common-artifacts = { path = "crates/common-artifacts" }
 common-runtime = { path = "crates/common-runtime" }
 common-api = { path = "crates/common-api" }
+common-identity = { path = "crates/common-identity" }
+common-policy = { path = "crates/common-policy" }
+common-observability = { path = "crates/common-observability" }
+common-network = { path = "crates/common-network" }
 
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "net", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -61,6 +73,16 @@ tar = "0.4"
 flate2 = "1"
 prometheus = { version = "0.14", default-features = false }
 tempfile = "3"
+# M3 peer networking (ADR-0003): QUIC + TLS 1.3 raw public keys, Ed25519 via ring, SPAKE2 pairing, mDNS, protobuf framing
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pki-types = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+spake2 = "0.4"
+hmac = "0.12"
+mdns-sd = "0.21"
+prost = "0.14"
+libc = "0.2"
 
 # Release profile (Tauri size guideline): applies to the whole workspace, including the `common` sidecar.
 [profile.release]

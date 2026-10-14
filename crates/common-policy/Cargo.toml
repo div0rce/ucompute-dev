@@ -1,0 +1,17 @@
+[package]
+name = "common-policy"
+description = "Privacy policy engine, execution authorization (default deny), per-peer quotas (F-06-02, F-06-04, F-06-07)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+common-core = { workspace = true }
+common-identity = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

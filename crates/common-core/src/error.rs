@@ -48,6 +48,21 @@ pub enum ErrorCode {
     Io,
     /// Catch-all for unexpected internal failures. Message is still user-safe.
     Internal,
+    // --- M3 peer networking (ADR-0003). Appended; never reorder.
+    /// The peer is not paired/authorized for this workload (default deny).
+    PeerUnauthorized,
+    /// The peer's key has been revoked.
+    PeerRevoked,
+    /// Too many failed pairing attempts; pairing is locked for the window.
+    PairingLocked,
+    /// Pairing failed (wrong code, MITM detected, or timeout).
+    PairingFailed,
+    /// The peer connection was lost mid-operation.
+    PeerLost,
+    /// Protocol major versions are incompatible.
+    ProtocolIncompatible,
+    /// A protocol frame exceeded its size bound.
+    FrameTooLarge,
 }
 
 impl ErrorCode {
@@ -73,6 +88,13 @@ impl ErrorCode {
         ErrorCode::Unauthorized,
         ErrorCode::Io,
         ErrorCode::Internal,
+        ErrorCode::PeerUnauthorized,
+        ErrorCode::PeerRevoked,
+        ErrorCode::PairingLocked,
+        ErrorCode::PairingFailed,
+        ErrorCode::PeerLost,
+        ErrorCode::ProtocolIncompatible,
+        ErrorCode::FrameTooLarge,
     ];
 
     /// Stable snake_case string form, identical to the serde representation.
@@ -97,6 +119,13 @@ impl ErrorCode {
             ErrorCode::Unauthorized => "unauthorized",
             ErrorCode::Io => "io",
             ErrorCode::Internal => "internal",
+            ErrorCode::PeerUnauthorized => "peer_unauthorized",
+            ErrorCode::PeerRevoked => "peer_revoked",
+            ErrorCode::PairingLocked => "pairing_locked",
+            ErrorCode::PairingFailed => "pairing_failed",
+            ErrorCode::PeerLost => "peer_lost",
+            ErrorCode::ProtocolIncompatible => "protocol_incompatible",
+            ErrorCode::FrameTooLarge => "frame_too_large",
         }
     }
 
@@ -104,8 +133,12 @@ impl ErrorCode {
     pub fn http_status(self) -> u16 {
         match self {
             ErrorCode::InvalidRequest | ErrorCode::ContextTooLong => 400,
-            ErrorCode::Unauthorized => 401,
-            ErrorCode::PolicyDenied => 403,
+            ErrorCode::Unauthorized | ErrorCode::PairingFailed => 401,
+            ErrorCode::PolicyDenied | ErrorCode::PeerUnauthorized | ErrorCode::PeerRevoked => 403,
+            ErrorCode::FrameTooLarge => 413,
+            ErrorCode::PairingLocked => 429,
+            ErrorCode::PeerLost => 502,
+            ErrorCode::ProtocolIncompatible => 426,
             ErrorCode::ModelNotFound | ErrorCode::ModelNotDownloaded => 404,
             ErrorCode::Cancelled => 499,
             ErrorCode::InsufficientMemory | ErrorCode::ModelFileInvalid | ErrorCode::IntegrityMismatch => 422,
@@ -125,6 +158,8 @@ impl ErrorCode {
             403 => "permission_error",
             404 => "not_found_error",
             429 => "rate_limit_error",
+            413 => "invalid_request_error",
+            426 => "invalid_request_error",
             _ => "server_error",
         }
     }
@@ -201,6 +236,31 @@ impl ErrorCode {
             ErrorCode::Internal => (
                 "Something went wrong inside Common.",
                 "Try again. If it keeps failing, open Diagnostics and share the log.",
+            ),
+            ErrorCode::PeerUnauthorized => (
+                "This computer is not authorized to run that on the selected device.",
+                "Pair the device and add it to a trusted group in Peers.",
+            ),
+            ErrorCode::PeerRevoked => ("That device's access was revoked.", "Pair it again if you trust it."),
+            ErrorCode::PairingLocked => (
+                "Too many failed pairing attempts.",
+                "Wait a minute, then start pairing again with a fresh code.",
+            ),
+            ErrorCode::PairingFailed => (
+                "Pairing did not complete.",
+                "Check the code and that both devices are on the same network, then try again.",
+            ),
+            ErrorCode::PeerLost => (
+                "The connection to the other device was lost.",
+                "Check that it is awake and on the network, then retry.",
+            ),
+            ErrorCode::ProtocolIncompatible => (
+                "The other device runs an incompatible version of Common.",
+                "Update Common on both devices.",
+            ),
+            ErrorCode::FrameTooLarge => (
+                "A message from the other device was too large and was rejected.",
+                "Update Common on both devices; if this persists, revoke the device.",
             ),
         }
     }

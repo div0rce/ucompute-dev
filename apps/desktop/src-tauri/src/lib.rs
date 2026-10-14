@@ -77,7 +77,17 @@ pub fn run() {
                 // The sidecar may be absent in `pnpm dev` without a packaged binary; the UI then shows
                 // "service not running" and the developer starts `common serve` by hand.
                 match app.shell().sidecar(SIDECAR) {
-                    Ok(cmd) => match cmd.args(["serve", "--host", HOST, "--port", &PORT.to_string()]).spawn() {
+                    Ok(cmd) => match cmd
+                        .args([
+                            "serve",
+                            "--host",
+                            HOST,
+                            "--port",
+                            &PORT.to_string(),
+                            "--exit-with-parent",
+                        ])
+                        .spawn()
+                    {
                         Ok((mut rx, c)) => {
                             child = Some(c);
                             spawned = true;

@@ -77,6 +77,9 @@ pub struct ServeArgs {
     pub api_key: Option<String>,
     #[arg(long, default_value_t = 4)]
     pub max_concurrent: usize,
+    /// Shut down when the parent process exits (used by the desktop app's sidecar spawn).
+    #[arg(long, default_value_t = false)]
+    exit_with_parent: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -362,6 +365,29 @@ pub fn hardware_text(r: &HardwareReport) -> String {
     s
 }
 
+/// Resolves when the parent process goes away (ppid changes, typically to 1). Never resolves when
+/// `enabled` is false. Polling once a second is enough for a sidecar that must not outlive its app.
+async fn parent_exited(enabled: bool) {
+    if !enabled {
+        std::future::pending::<()>().await;
+    }
+    #[cfg(unix)]
+    {
+        let original = unsafe { libc::getppid() };
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let now = unsafe { libc::getppid() };
+            if now != original || now == 1 {
+                return;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn serve(a: &ServeArgs) -> Result<()> {
     let m = context().await?;
     let config = common_api::ApiConfig {
@@ -381,8 +407,14 @@ async fn serve(a: &ServeArgs) -> Result<()> {
         Arc::new(m),
     );
     // serve() unloads the model (stops the engine) once this future resolves.
-    common_api::serve(Arc::new(state), async {
-        shutdown_signal().await;
+    let exit_with_parent = a.exit_with_parent;
+    common_api::serve(Arc::new(state), async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = parent_exited(exit_with_parent) => {
+                eprintln!("parent process exited; shutting down");
+            }
+        }
     })
     .await
 }

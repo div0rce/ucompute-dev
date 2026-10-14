@@ -29,6 +29,13 @@ export const ERROR_CODES: Record<string, Explanation> = {
   unauthorized: { title: "This computer is not authorized to use the API.", next_step: "Provide the API key configured on the server." },
   io: { title: "Common could not read or write a file.", next_step: "Check disk space and permissions." },
   internal: { title: "Something went wrong inside Common.", next_step: "Try again. If it keeps failing, open Diagnostics and share the log." },
+  peer_unauthorized: { title: "This computer is not authorized to run that on the selected device.", next_step: "Pair the device and add it to a trusted group in Peers." },
+  peer_revoked: { title: "That device's access was revoked.", next_step: "Pair it again if you trust it." },
+  pairing_locked: { title: "Too many failed pairing attempts.", next_step: "Wait a minute, then start pairing again with a fresh code." },
+  pairing_failed: { title: "Pairing did not complete.", next_step: "Check the code and that both devices are on the same network, then try again." },
+  peer_lost: { title: "The connection to the other device was lost.", next_step: "Check that it is awake and on the network, then retry." },
+  protocol_incompatible: { title: "The other device runs an incompatible version of Common.", next_step: "Update Common on both devices." },
+  frame_too_large: { title: "A message from the other device was too large and was rejected.", next_step: "Update Common on both devices; if this persists, revoke the device." },
 };
 
 /** Desktop-only condition, not a daemon code: fetch itself failed. */

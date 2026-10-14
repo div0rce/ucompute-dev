@@ -21,7 +21,7 @@ function asStr(): Record<string, string> {
 
 /** Variant -> (title, next_step) from `user_message`. */
 function userMessages(): Record<string, [string, string]> {
-  return Object.fromEntries([...rs.matchAll(/ErrorCode::(\w+)\s*=>\s*\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)/g)].map((m) => [m[1], [m[2], m[3]]]));
+  return Object.fromEntries([...rs.matchAll(/ErrorCode::(\w+)\s*=>\s*\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)/g)].map((m) => [m[1], [m[2], m[3]]]));
 }
 
 describe("error code table matches error.rs", () => {
