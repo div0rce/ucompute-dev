@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 common-core = { workspace = true }
 common-models = { workspace = true }
+common-hardware = { workspace = true }
 common-artifacts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +21,8 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+# SIGTERM for graceful engine stop (tokio only offers SIGKILL); already a transitive dep of tokio/mio.
+libc = "0.2.190"
 
 [dev-dependencies]
 tempfile = { workspace = true }

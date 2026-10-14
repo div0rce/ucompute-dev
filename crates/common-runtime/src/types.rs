@@ -30,6 +30,9 @@ pub struct LoadRequest {
     /// Concurrent sequences the engine should serve.
     pub parallel_slots: u32,
     pub kv_type: common_models::KvType,
+    /// Start the engine in embeddings mode (pooling enabled, generation disabled).
+    #[serde(default)]
+    pub embeddings: bool,
     pub timeouts: Timeouts,
     /// Extra engine-specific args (e.g. `--rpc host:port` for M4). Validated by the adapter.
     #[serde(default)]
@@ -47,6 +50,8 @@ pub struct LoadedModelInfo {
     pub device_actual: String,
     pub offloaded_layers: u32,
     pub total_layers: u32,
+    /// Context one request can use (the engine's per-slot n_ctx, parsed from its log), not the
+    /// total across `parallel_slots`.
     pub n_ctx: u32,
     pub threads: u32,
     pub parallel_slots: u32,
