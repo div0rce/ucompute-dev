@@ -238,7 +238,8 @@ export const api = {
     try {
       res = await send("/v1/chat/completions", {
         method: "POST",
-        body: JSON.stringify({ ...req, stream: true }),
+        // stream_options.include_usage makes the daemon append a final chunk with usage + timings (OpenAI semantics).
+        body: JSON.stringify({ ...req, stream: true, stream_options: { include_usage: true } }),
         signal,
       });
     } catch (err) {

@@ -62,3 +62,10 @@ A row in `docs/REQUIREMENTS.csv` may be marked `VERIFIED` only when its `observe
 - Date: 2026-10-14 · label: REAL
 - Command: `curl -s http://127.0.0.1:18192/metrics > metrics.txt && promtool check metrics < metrics.txt` (promtool from Homebrew `prometheus`)
 - Result: PASS — exit 0, no lint output; 42 lines incl. `common_requests_total{route,status}`, `common_tokens_generated_total`, `common_ttft_seconds` histogram, `common_queue_depth`, `common_inflight`; the scrape taken right after chat requests contains no prompt text (grep for the prompt string: 0 matches).
+
+### DESKTOP-E2E — desktop UI against the real daemon (dev loop, browser)
+- Date: 2026-10-14 · label: REAL (Vite dev server + `common serve`; not the packaged Tauri app)
+- Host: owner's MacBook Air (Apple M2, 8 GB, macOS 26.2)
+- Command: `COMMON_HOME=.common common serve` then `pnpm --dir apps/desktop dev`; opened `http://localhost:1420` in the Claude desktop built-in browser
+- Result: PASS — Home shows "Common is running… Apple M2, 8.0 GB memory, metal" and the recommended model with its memory fit bar; Models lists all 8 catalog models with size, license (never blank) and fits / "Needs X, you have Y" from `/api/models`; Hardware view values equal `common hardware --json`; Chat: selected `smollm2-360m-instruct-q8_0`, Load model → "Talking to smollm2-360m-instruct-q8_0 on MTL0 (Apple M2), 4,096 token context", a question streamed a reply from the real engine (Metal). Observed defect: the reply footer showed "tokens unknown" (usage/timings not surfaced in the streaming path) — fixed in the follow-up commit referenced below.
+- Note: `available` memory during this run was ~1.0 GB because several build agents and test engines were running; the 0.5B models were therefore reported as not fitting. Calibration of the estimate and the available-memory formula is tracked under F-01-03.
