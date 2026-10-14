@@ -12,8 +12,8 @@ use tauri_plugin_shell::ShellExt;
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 8192;
-/// Must match `bundle.externalBin` in tauri.conf.json.
-const SIDECAR: &str = "binaries/common";
+/// Basename of the `bundle.externalBin` entry in tauri.conf.json (`binaries/common`).
+const SIDECAR: &str = "common"; // tauri resolves sidecars by basename next to the app executable
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Daemon {
@@ -33,7 +33,9 @@ fn health_ok(addr: SocketAddr) -> bool {
         return false;
     };
     let _ = s.set_read_timeout(Some(Duration::from_millis(800)));
-    if s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").is_err() {
+    if s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
         return false;
     }
     let mut buf = Vec::new();
@@ -54,7 +56,10 @@ fn wait_for_health(addr: SocketAddr, timeout: Duration) -> bool {
 
 #[tauri::command]
 fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
-    DaemonInfo { base_url: format!("http://{HOST}:{PORT}"), spawned: state.spawned }
+    DaemonInfo {
+        base_url: format!("http://{HOST}:{PORT}"),
+        spawned: state.spawned,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -93,7 +98,9 @@ pub fn run() {
                                 if wait_for_health(addr, HEALTH_TIMEOUT) {
                                     eprintln!("common-desktop: daemon healthy on {addr}");
                                 } else {
-                                    eprintln!("common-desktop: daemon did not become healthy within {HEALTH_TIMEOUT:?}");
+                                    eprintln!(
+                                        "common-desktop: daemon did not become healthy within {HEALTH_TIMEOUT:?}"
+                                    );
                                 }
                             });
                         }
@@ -102,7 +109,10 @@ pub fn run() {
                     Err(e) => eprintln!("common-desktop: daemon sidecar not available: {e}"),
                 }
             }
-            app.manage(Daemon { child: Mutex::new(child), spawned });
+            app.manage(Daemon {
+                child: Mutex::new(child),
+                spawned,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![daemon_info])

@@ -1,0 +1,132 @@
+{
+  "command": [
+    "./target/debug/common",
+    "bench",
+    "stories15M-q4_0",
+    "--device",
+    "gpu",
+    "--runs",
+    "3",
+    "-n",
+    "64"
+  ],
+  "common_version": "0.1.0",
+  "hardware": {
+    "backends": [
+      {
+        "available": true,
+        "name": "cpu",
+        "reason": null
+      },
+      {
+        "available": true,
+        "name": "metal",
+        "reason": null
+      },
+      {
+        "available": false,
+        "name": "cuda",
+        "reason": "the pinned llama.cpp build ships only: cpu, metal"
+      },
+      {
+        "available": false,
+        "name": "vulkan",
+        "reason": "the pinned llama.cpp build ships only: cpu, metal"
+      }
+    ],
+    "cpu": {
+      "arch": "aarch64",
+      "features": [
+        "neon",
+        "fp16",
+        "dotprod",
+        "i8mm",
+        "bf16"
+      ],
+      "logical_cores": 8,
+      "model": "Apple M2",
+      "physical_cores": 8
+    },
+    "disk_free_bytes": 1208176640,
+    "gpus": [
+      {
+        "backend": "metal",
+        "cores": 10,
+        "memory_bytes": 8589934592,
+        "name": "Apple M2",
+        "vendor": "Apple"
+      }
+    ],
+    "host": {
+      "arch": "aarch64",
+      "chip": "Apple M2",
+      "memory_bytes": 8589934592,
+      "os": "macos",
+      "os_version": "26.2"
+    },
+    "memory": {
+      "available_bytes": 1751433216,
+      "total_bytes": 8589934592,
+      "unified": true
+    },
+    "probe_ms": 42.748667
+  },
+  "max_tokens": 64,
+  "median": {
+    "decode_tok_s": 402.7926960257788,
+    "prefill_tok_s": 14819.205690574983,
+    "ttft_ms": 4.4417919999999995
+  },
+  "model": {
+    "backend_name": "llama.cpp",
+    "backend_version": "0.6.0-dev (build 11609, commit fcac19079)",
+    "context_note": null,
+    "device_actual": "MTL0 (Apple M2)",
+    "device_requested": "gpu",
+    "fallback_reason": null,
+    "load_ms": 357.561916,
+    "model_id": "stories15M-q4_0",
+    "model_sha256": "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739",
+    "n_ctx": 128,
+    "offloaded_layers": 7,
+    "parallel_slots": 1,
+    "pid": 97877,
+    "threads": 4,
+    "total_layers": 6
+  },
+  "peak_rss_bytes": 113065984,
+  "prompt_sha256": "02a8de8a07e542b03b80a9bbb50fef17c6591899685c03ac7ee99aa2ce199ea4",
+  "runs": [
+    {
+      "completion_tokens": 64,
+      "decode_tok_s": 522.1672427083074,
+      "prefill_tok_s": 9516.558812333462,
+      "prompt_tokens": 50,
+      "rss_bytes": 113065984,
+      "total_ms": 128.28637500000002,
+      "ttft_ms": 6.636625
+    },
+    {
+      "completion_tokens": 64,
+      "decode_tok_s": 402.7926960257788,
+      "prefill_tok_s": 16061.676839062,
+      "prompt_tokens": 50,
+      "rss_bytes": 92684288,
+      "total_ms": 160.841625,
+      "ttft_ms": 4.4417919999999995
+    },
+    {
+      "completion_tokens": 64,
+      "decode_tok_s": 325.97897176918616,
+      "prefill_tok_s": 14819.205690574983,
+      "prompt_tokens": 50,
+      "rss_bytes": 92766208,
+      "total_ms": 197.77670799999999,
+      "ttft_ms": 4.264375
+    }
+  ],
+  "schema_version": 1,
+  "seed": 42,
+  "temperature": 0.0,
+  "timestamp_utc": "2026-10-14T16:38:28Z"
+}

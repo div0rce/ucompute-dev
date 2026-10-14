@@ -60,12 +60,19 @@ class ValidatorTests(unittest.TestCase):
 
     def test_verified_with_unverified_dependency_rejected(self):
         f, rows = self.rows()
-        r = next(x for x in rows if x["id"] == "F-01-03")  # depends on F-01-01, F-01-02
+        # Pick any row whose first dependency is not VERIFIED (the ledger evolves; do not hardcode ids).
+        by_id = {x["id"]: x for x in rows}
+        r, dep = next(
+            (x, d)
+            for x in rows
+            for d in x["dependencies"].split(";")
+            if d and by_id[d]["status"] != "VERIFIED"
+        )
         r.update(status="VERIFIED", observed_evidence="docs/VERIFICATION.md#x", last_verified_commit="abc1234")
         self.write(f, rows)
         code, out = self.run_validator()
         self.assertEqual(code, 1)
-        self.assertIn("VERIFIED but dependency F-01-01", out)
+        self.assertIn(f"VERIFIED but dependency {dep}", out)
 
     def test_missing_row_rejected(self):
         f, rows = self.rows()
