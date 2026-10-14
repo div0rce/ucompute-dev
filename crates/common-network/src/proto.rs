@@ -1,7 +1,11 @@
-//! Control protocol messages (ADR-0003 D5): length-prefixed protobuf, 1 MiB bound. STUB.
+//! Control protocol messages (ADR-0003 D5): length-prefixed protobuf, 1 MiB bound.
 //! Mirrors `proto/common/v1/control.proto`; hand-maintained prost structs (no protoc at build time).
-//! Unknown fields are tolerated by prost decoding (F-08-10).
-use common_core::Result;
+//! Unknown fields and unknown `oneof` variants are skipped by prost decoding (F-08-10), see
+//! `unknown_field_tolerated` and `unknown_oneof_variant_tolerated`.
+use crate::MAX_CONTROL_FRAME;
+use common_core::{CommonError, ErrorCode, Result};
+use prost::Message;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Hello {
@@ -134,22 +138,221 @@ pub struct Cancel {
     pub request_id: String,
 }
 
-/// `u32 BE length || protobuf`. Rejects frames over `bound` with FrameTooLarge before allocating.
+impl From<control_message::Body> for ControlMessage {
+    fn from(body: control_message::Body) -> Self {
+        ControlMessage { body: Some(body) }
+    }
+}
+
+/// `u32 BE length || protobuf`.
 pub fn encode_frame(msg: &ControlMessage) -> Vec<u8> {
-    let _ = msg;
-    Vec::new()
+    let body = msg.encode_to_vec();
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    out
 }
+
+fn too_large(len: usize, bound: usize) -> CommonError {
+    CommonError::new(
+        ErrorCode::FrameTooLarge,
+        format!("control frame of {len} bytes exceeds the {bound}-byte bound"),
+    )
+}
+
+fn lost(e: std::io::Error) -> CommonError {
+    CommonError::new(ErrorCode::PeerLost, format!("control stream: {e}"))
+}
+
+/// Reads one frame. `Ok(None)` on a clean end of stream before a length prefix. A length over
+/// `bound` is rejected with `FrameTooLarge` before any body allocation.
 pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut R, bound: usize) -> Result<Option<ControlMessage>> {
-    let _ = (r, bound);
-    Err(common_core::CommonError::new(
-        common_core::ErrorCode::NotImplemented,
-        "proto",
-    ))
+    let mut len = [0u8; 4];
+    match r.read_exact(&mut len).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(lost(e)),
+    }
+    let len = u32::from_be_bytes(len) as usize;
+    if len > bound {
+        return Err(too_large(len, bound));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await.map_err(lost)?;
+    ControlMessage::decode(buf.as_slice())
+        .map(Some)
+        .map_err(|e| CommonError::invalid(format!("undecodable control frame: {e}")))
 }
+
+/// Writes one frame; refuses to send anything the peer would reject (`MAX_CONTROL_FRAME`).
 pub async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &ControlMessage) -> Result<()> {
-    let _ = (w, msg);
-    Err(common_core::CommonError::new(
-        common_core::ErrorCode::NotImplemented,
-        "proto",
-    ))
+    let frame = encode_frame(msg);
+    if frame.len() - 4 > MAX_CONTROL_FRAME {
+        return Err(too_large(frame.len() - 4, MAX_CONTROL_FRAME));
+    }
+    w.write_all(&frame).await.map_err(lost)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::control_message::Body;
+    use super::*;
+
+    async fn round_trip(body: Body) {
+        let msg = ControlMessage::from(body);
+        let bytes = encode_frame(&msg);
+        assert_eq!(
+            u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize,
+            bytes.len() - 4
+        );
+        let mut r = bytes.as_slice();
+        let back = read_frame(&mut r, MAX_CONTROL_FRAME).await.unwrap().unwrap();
+        assert_eq!(back, msg);
+        assert!(r.is_empty());
+        // The same through write_frame.
+        let mut w = Vec::new();
+        write_frame(&mut w, &msg).await.unwrap();
+        assert_eq!(w, bytes);
+    }
+
+    #[tokio::test]
+    async fn every_message_round_trips() {
+        round_trip(Body::Hello(Hello {
+            major: 1,
+            minor: 3,
+            common_version: "0.1.0".into(),
+            peer_id: vec![7; 32],
+            nonce: vec![1, 2, 3],
+        }))
+        .await;
+        round_trip(Body::Capabilities(Capabilities {
+            schema_version: 1,
+            peer_id: vec![9; 32],
+            common_version: "0.1.0".into(),
+            hardware_json: "{\"host\":{}}".into(),
+            free_memory_bytes: 1 << 30,
+            engines: vec!["llama.cpp b11609 macos-arm64".into()],
+            cached_model_sha256: vec!["ab".into(), "cd".into()],
+            groups: vec!["home".into()],
+            issued_at: 1_760_000_000,
+            signature: vec![0xAA; 64],
+        }))
+        .await;
+        round_trip(Body::Status(Status {
+            free_memory_bytes: 5,
+            active_sessions: 1,
+            queue_depth: 2,
+            loaded_model_id: Some("stories15M-q4_0".into()),
+        }))
+        .await;
+        round_trip(Body::Status(Status::default())).await;
+        round_trip(Body::Error(ErrorMsg {
+            code: "peer_lost".into(),
+            message: "gone".into(),
+        }))
+        .await;
+        round_trip(Body::Revocation(RevocationMsg {
+            seq: 4,
+            peer_id: vec![1; 32],
+            revoked_by: vec![2; 32],
+            at_utc: "2026-10-14T00:00:00Z".into(),
+            signature: vec![3; 64],
+        }))
+        .await;
+        round_trip(Body::RemoteRequest(RemoteRequest {
+            request_id: "r1".into(),
+            model_id: "m".into(),
+            model_sha256: "66".into(),
+            request_json: "{}".into(),
+            privacy: "trusted_group".into(),
+        }))
+        .await;
+        round_trip(Body::RemoteChunk(RemoteChunk {
+            request_id: "r1".into(),
+            event_json: "{\"token\":\"x\"}".into(),
+            done: true,
+        }))
+        .await;
+        round_trip(Body::Cancel(Cancel {
+            request_id: "r1".into(),
+        }))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn frame_bound_checked_before_allocation() {
+        let mut empty: &[u8] = &[];
+        assert!(read_frame(&mut empty, 16).await.unwrap().is_none());
+        // A length prefix claiming 4 GiB-1 with no body: rejected on the prefix alone.
+        let mut huge: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
+        let e = read_frame(&mut huge, MAX_CONTROL_FRAME).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::FrameTooLarge);
+        // bound + 1 is rejected, bound exactly is read.
+        let msg = ControlMessage::from(Body::Cancel(Cancel {
+            request_id: "x".repeat(100),
+        }));
+        let bytes = encode_frame(&msg);
+        let body_len = bytes.len() - 4;
+        assert_eq!(
+            read_frame(&mut bytes.as_slice(), body_len - 1).await.unwrap_err().code,
+            ErrorCode::FrameTooLarge
+        );
+        assert!(read_frame(&mut bytes.as_slice(), body_len).await.unwrap().is_some());
+        // Truncated body is a lost peer, not a panic.
+        assert_eq!(
+            read_frame(&mut &bytes[..bytes.len() - 1], body_len)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::PeerLost
+        );
+        // write_frame refuses an over-bound frame.
+        let big = ControlMessage::from(Body::RemoteChunk(RemoteChunk {
+            request_id: String::new(),
+            event_json: "y".repeat(MAX_CONTROL_FRAME + 1),
+            done: false,
+        }));
+        let mut sink = Vec::new();
+        assert_eq!(
+            write_frame(&mut sink, &big).await.unwrap_err().code,
+            ErrorCode::FrameTooLarge
+        );
+        assert!(sink.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_field_tolerated() {
+        // Hello { major = 1 (tag 1 varint), common_version = "x" (tag 3), <tag 99 varint = 7> }
+        // encoded by hand; tag 99 wire type 0 → key 792 → varint 0x98 0x06.
+        let hello = [0x08, 0x01, 0x1a, 0x01, b'x', 0x98, 0x06, 0x07];
+        let mut frame_body = vec![0x0a, hello.len() as u8];
+        frame_body.extend_from_slice(&hello);
+        let mut frame = (frame_body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&frame_body);
+        let msg = read_frame(&mut frame.as_slice(), MAX_CONTROL_FRAME)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            msg.body,
+            Some(Body::Hello(Hello {
+                major: 1,
+                common_version: "x".into(),
+                ..Default::default()
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_oneof_variant_tolerated() {
+        // ControlMessage with only field 42 (length-delimited): key 338 → varint 0xd2 0x02.
+        let body = [0xd2, 0x02, 0x02, 0x01, 0x00];
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        let msg = read_frame(&mut frame.as_slice(), MAX_CONTROL_FRAME)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.body, None);
+    }
 }

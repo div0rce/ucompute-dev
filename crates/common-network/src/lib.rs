@@ -1,9 +1,26 @@
-//! Peer networking (ADR-0003). STUB — implementation pending.
+//! Peer networking (ADR-0003).
 //!
 //! Invariants (tested): the only socket this crate owns is the quinn `Endpoint` (no plaintext
-//! path); TLS 1.3 only; raw public keys both ways; the workload endpoint accepts only pinned,
-//! non-revoked peers inside the TLS handshake; the pairing endpoint exists only during a pairing
-//! window; nothing listens unless `NetworkConfig.enabled`.
+//! path; `tests/invariants.rs::no_plaintext_mode_exists` greps `src/` for any TCP or raw UDP
+//! socket type); TLS 1.3 only; raw public keys both ways; the workload endpoint accepts only
+//! pinned, non-revoked peers inside the TLS handshake; the pairing endpoint exists only during a
+//! pairing window; nothing listens unless `NetworkConfig.enabled`.
+//!
+//! # Validating a packet capture (ADR-0003 D3, F-02-03 acceptance)
+//!
+//! QUIC has no cleartext mode, but "no plaintext" is demonstrated, not assumed:
+//! 1. Run a remote inference whose prompt and expected completion contain unique canaries
+//!    (`CANARY-<random>`), capturing every UDP datagram on the path (`tcpdump -i lo0 -w` for the
+//!    SINGLE-HOST test, the LAN interface for the two-machine session; `/dev/bpf*` needs root).
+//! 2. Feed the captured datagram payloads and the canaries to [`scan_for_plaintext`]: it must
+//!    return no indices. It searches UTF-8 and UTF-16LE, so neither encoding leaks.
+//! 3. Positive control in the same test: the identical scan over a capture of the loopback
+//!    `llama-server` HTTP hop **must** find the canaries, proving the search works.
+//! 4. QUIC Initial packets are only obfuscated: they carry the ClientHello (ALPN `common/1`, server
+//!    name `common`, no secrets). The scan covers them too.
+//!
+//! Debug-only `rustls::KeyLogFile` + Wireshark may show the ciphertext did carry the canaries;
+//! never in release builds.
 
 pub mod discovery;
 pub mod health;
@@ -74,5 +91,45 @@ impl Default for NetworkConfig {
             idle_timeout_ms: 6000,
             pairing_window_secs: 120,
         }
+    }
+}
+
+/// Indices of the datagrams that contain any canary, as UTF-8 or UTF-16LE. Empty means clean.
+/// Used by the relay/packet-capture tests (see the crate docs).
+pub fn scan_for_plaintext(datagrams: &[Vec<u8>], canaries: &[&str]) -> Vec<usize> {
+    let needles: Vec<Vec<u8>> = canaries
+        .iter()
+        .flat_map(|c| {
+            let utf16le: Vec<u8> = c.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            [c.as_bytes().to_vec(), utf16le]
+        })
+        .filter(|n| !n.is_empty())
+        .collect();
+    datagrams
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| needles.iter().any(|n| d.windows(n.len()).any(|w| w == n.as_slice())))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_default_is_off_and_scan_finds_both_encodings() {
+        assert!(!NetworkConfig::default().enabled);
+        let canary = "CANARY-7f3a";
+        let utf16: Vec<u8> = canary.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let datagrams = vec![
+            b"\x00\x01ciphertext-looking bytes".to_vec(),
+            format!("GET /?q={canary} HTTP/1.1").into_bytes(),
+            [vec![0xC0], utf16, vec![0xFF]].concat(),
+            canary.as_bytes()[..5].to_vec(),
+        ];
+        assert_eq!(scan_for_plaintext(&datagrams, &[canary]), vec![1, 2]);
+        assert!(scan_for_plaintext(&datagrams, &["absent"]).is_empty());
+        assert!(scan_for_plaintext(&datagrams, &[""]).is_empty());
     }
 }

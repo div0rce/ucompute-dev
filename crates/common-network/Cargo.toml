@@ -12,6 +12,7 @@ common-identity = { workspace = true }
 common-policy = { workspace = true }
 common-observability = { workspace = true }
 common-hardware = { workspace = true }
+common-artifacts = { workspace = true }
 common-runtime = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }

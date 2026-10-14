@@ -801,6 +801,7 @@ dependencies = [
 name = "common-network"
 version = "0.1.0"
 dependencies = [
+ "common-artifacts",
  "common-core",
  "common-hardware",
  "common-identity",
@@ -831,6 +832,7 @@ name = "common-observability"
 version = "0.1.0"
 dependencies = [
  "common-core",
+ "common-hardware",
  "serde",
  "serde_json",
  "tempfile",
