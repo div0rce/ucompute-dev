@@ -50,3 +50,15 @@ A row in `docs/REQUIREMENTS.csv` may be marked `VERIFIED` only when its `observe
 - Date: 2026-10-14 · label: REAL
 - Command: `llama-server -m stories15M-q4_0.gguf --host 127.0.0.1 --port 18081 -c 128 -ngl 99 --no-webui --metrics --offline -t 4`; `curl /health`, `/v1/models`, `/v1/completions` (temperature 0, seed 42, max_tokens 32), streaming variant, `/metrics`, `/props`
 - Result: PASS — `/health` = `{"status":"ok"}`; completion text identical to the Codex golden output; usage prompt_tokens 10 / completion_tokens 32; timings prompt 868 tok/s, decode 442 tok/s; 18 SSE `data:` chunks for a 16-token stream; `/metrics` serves Prometheus text (`llamacpp:*`).
+
+### F-09-01 (JS half) — official OpenAI JS client against `common serve`
+- Date / commit: 2026-10-14 / working tree after wave 2 (API `common-api`, CLI `common-cli`)
+- Host: owner's MacBook Air (Apple M2, 8 GB, macOS 26.2) · label: REAL
+- Command: `common serve --port 18192` then `cd examples/clients/openai-js && COMMON_BASE_URL=http://127.0.0.1:18192/v1 COMMON_MODEL=stories15M-q4_0 node smoke.mjs` (openai npm 6.49.0, unmodified; only `baseURL` set)
+- Result: PASS — `models.list` 8 models; `completions.create` (temperature 0, seed 42) returns the golden prefix " named Benny was hopping in a field. He "; `chat.completions.create` usage {prompt 16, completion 16}; streaming delivered 16 content chunks and a finish chunk; unknown model → HTTP 404 with code `model_not_found`.
+- Python half: `crates/common-api/tests/openai_client_smoke.py` (openai 3.31.0) runs inside `cargo test -p common-api` (real_engine.rs) and printed "ALL CHECKS PASSED".
+
+### F-09-03 — Prometheus exposition validated with promtool
+- Date: 2026-10-14 · label: REAL
+- Command: `curl -s http://127.0.0.1:18192/metrics > metrics.txt && promtool check metrics < metrics.txt` (promtool from Homebrew `prometheus`)
+- Result: PASS — exit 0, no lint output; 42 lines incl. `common_requests_total{route,status}`, `common_tokens_generated_total`, `common_ttft_seconds` histogram, `common_queue_depth`, `common_inflight`; the scrape taken right after chat requests contains no prompt text (grep for the prompt string: 0 matches).
