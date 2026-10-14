@@ -176,7 +176,7 @@ async fn stream(model: &dyn LoadedModel, req: GenerateRequest, echo: bool) -> Re
 /// Load, generate, unload, write the manifest. Shared by `run` and `replay`.
 async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outcome)> {
     let started = Instant::now();
-    let m = context()?;
+    let m = context().await?;
     let model = load(
         &m,
         &a.model,
@@ -445,7 +445,7 @@ fn random_seed() -> u64 {
 }
 
 pub async fn chat(a: &ChatArgs) -> Result<()> {
-    let m = context()?;
+    let m = context().await?;
     let model = load(&m, &a.model, opts(a.device, a.ctx)).await?;
     let info = model.info();
     eprintln!(
@@ -503,7 +503,7 @@ struct Sample {
 }
 
 pub async fn bench(a: &BenchArgs, json: bool) -> Result<()> {
-    let m = context()?;
+    let m = context().await?;
     let model = load(&m, &a.model, opts(a.device, None)).await?;
     let mut samples = Vec::new();
     for i in 1..=a.runs.max(1) {

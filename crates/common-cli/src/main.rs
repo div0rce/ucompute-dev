@@ -260,12 +260,23 @@ pub fn pin() -> Result<BackendPin> {
 }
 
 /// Everything a model-running command needs: paths, hardware probe, verified engine, manager.
-pub fn context() -> Result<ModelManager> {
+pub async fn context() -> Result<ModelManager> {
     let paths = Paths::from_env();
     paths.ensure_dirs()?;
     let hardware = common_hardware::probe()?;
-    let engine_dir = backend::verify_backend(&paths, &pin()?)
-        .map_err(|e| CommonError::new(ErrorCode::BackendUnavailable, e.message).with_hint("common setup"))?;
+    let pin = pin()?;
+    // First run (fresh data dir, e.g. the packaged desktop app): provision the pinned engine automatically.
+    // Download is hash-verified; nothing else is fetched without the user asking (models stay opt-in).
+    let engine_dir = if backend::archive_path(&paths, &pin).exists() {
+        backend::verify_backend(&paths, &pin)
+            .map_err(|e| CommonError::new(ErrorCode::BackendUnavailable, e.message).with_hint("common setup"))?
+    } else {
+        eprintln!(
+            "engine {} {} is not installed yet; downloading the pinned release",
+            pin.name, pin.release
+        );
+        backend::ensure_backend(&paths, &pin, &mut progress("engine")).await?
+    };
     reap_orphaned_engines(&backend::binary(&engine_dir, "llama-server"));
     let backend = common_runtime::backend_by_name("llama.cpp", engine_dir, paths.clone())
         .ok_or_else(|| CommonError::internal("llama.cpp adapter missing"))?;
@@ -352,7 +363,7 @@ pub fn hardware_text(r: &HardwareReport) -> String {
 }
 
 async fn serve(a: &ServeArgs) -> Result<()> {
-    let m = context()?;
+    let m = context().await?;
     let config = common_api::ApiConfig {
         host: a.host.clone(),
         port: a.port,
