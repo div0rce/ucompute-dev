@@ -24,15 +24,33 @@ pub struct Recommendation {
 
 /// Rank by bits per weight (descending, ties broken by larger file) and recommend the first
 /// candidate whose estimate fits `available_bytes` after keeping `headroom_fraction` spare.
+///
+/// Building candidates for a family (same `family` + `parameters` in the catalog): `quant` parses
+/// from the catalog string (`"Q4_K_M".parse::<QuantType>()`), `file_size` is the catalog `bytes`,
+/// and `estimated_total_bytes` is `estimate(&meta, bytes, n_ctx, kv).total_bytes` where `meta` is
+/// the GGUF header of *any downloaded sibling*: the shape (layers, heads, embedding, ff) is shared
+/// across quantizations and only the weights term, which is taken from `bytes`, differs.
 pub fn recommend(mut candidates: Vec<QuantCandidate>, available_bytes: u64, headroom_fraction: f32) -> Recommendation {
     let budget = budget_bytes(available_bytes, headroom_fraction);
     candidates.sort_by(|a, b| {
-        b.quant.bits_per_weight().total_cmp(&a.quant.bits_per_weight()).then(b.file_size.cmp(&a.file_size))
+        b.quant
+            .bits_per_weight()
+            .total_cmp(&a.quant.bits_per_weight())
+            .then(b.file_size.cmp(&a.file_size))
     });
-    let ranked: Vec<(QuantCandidate, bool)> =
-        candidates.into_iter().map(|c| { let fits = c.estimated_total_bytes <= budget; (c, fits) }).collect();
+    let ranked: Vec<(QuantCandidate, bool)> = candidates
+        .into_iter()
+        .map(|c| {
+            let fits = c.estimated_total_bytes <= budget;
+            (c, fits)
+        })
+        .collect();
     let recommended = ranked.iter().find(|(_, fits)| *fits).map(|(c, _)| c.clone());
-    Recommendation { recommended, ranked, requires_confirmation: true }
+    Recommendation {
+        recommended,
+        ranked,
+        requires_confirmation: true,
+    }
 }
 
 #[cfg(test)]
@@ -40,7 +58,12 @@ mod tests {
     use super::*;
 
     fn c(id: &str, quant: QuantType, file_size: u64, total: u64) -> QuantCandidate {
-        QuantCandidate { id: id.into(), quant, file_size, estimated_total_bytes: total }
+        QuantCandidate {
+            id: id.into(),
+            quant,
+            file_size,
+            estimated_total_bytes: total,
+        }
     }
     fn three() -> Vec<QuantCandidate> {
         vec![
@@ -55,7 +78,10 @@ mod tests {
         let r = recommend(three(), 1000, 0.10); // budget 900
         let ids: Vec<&str> = r.ranked.iter().map(|(c, _)| c.id.as_str()).collect();
         assert_eq!(ids, ["q8", "q4", "q2"]);
-        assert_eq!(r.ranked.iter().map(|(_, f)| *f).collect::<Vec<_>>(), [false, true, true]);
+        assert_eq!(
+            r.ranked.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+            [false, true, true]
+        );
         assert_eq!(r.recommended.as_ref().map(|c| c.id.as_str()), Some("q4"));
         assert!(r.requires_confirmation);
         // 1100 fits in 1300 only without headroom: 1300 * 0.9 = 1170 >= 1100
@@ -69,7 +95,14 @@ mod tests {
         assert_eq!(r.recommended, None);
         assert!(r.ranked.iter().all(|(_, f)| !f));
         assert!(r.requires_confirmation);
-        let r = recommend(vec![c("small", QuantType::Q4KM, 100, 100), c("large", QuantType::Q4KM, 200, 200)], 10_000, 0.0);
+        let r = recommend(
+            vec![
+                c("small", QuantType::Q4KM, 100, 100),
+                c("large", QuantType::Q4KM, 200, 200),
+            ],
+            10_000,
+            0.0,
+        );
         assert_eq!(r.ranked[0].0.id, "large");
         assert_eq!(r.recommended.unwrap().id, "large");
         assert_eq!(recommend(vec![], 10_000, 0.1).recommended, None);

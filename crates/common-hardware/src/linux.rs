@@ -46,27 +46,50 @@ fn parse_cpuinfo(cpuinfo: &str) -> CpuInfo {
             (pkg, core) = (None, None);
         }
     }
-    let flags = field(cpuinfo, "flags").or_else(|| field(cpuinfo, "Features")).unwrap_or("");
+    let flags = field(cpuinfo, "flags")
+        .or_else(|| field(cpuinfo, "Features"))
+        .unwrap_or("");
     let have: std::collections::HashSet<&str> = flags.split_whitespace().collect();
     CpuInfo {
-        model: field(cpuinfo, "model name").or_else(|| field(cpuinfo, "Model")).or_else(|| field(cpuinfo, "Hardware")).unwrap_or("").to_string(),
+        model: field(cpuinfo, "model name")
+            .or_else(|| field(cpuinfo, "Model"))
+            .or_else(|| field(cpuinfo, "Hardware"))
+            .unwrap_or("")
+            .to_string(),
         physical_cores: if cores.is_empty() { logical } else { cores.len() as u32 },
         logical_cores: logical,
-        features: FEATURES.iter().filter(|(f, _)| have.contains(f)).map(|(_, n)| n.to_string()).collect(),
+        features: FEATURES
+            .iter()
+            .filter(|(f, _)| have.contains(f))
+            .map(|(_, n)| n.to_string())
+            .collect(),
         ..Default::default()
     }
 }
 
 /// `(MemTotal, MemAvailable)` in bytes from `/proc/meminfo` (values are in kB).
 fn parse_meminfo(meminfo: &str) -> Option<(u64, u64)> {
-    let kb = |key: &str| -> Option<u64> { field(meminfo, key)?.split_whitespace().next()?.parse::<u64>().ok()?.checked_mul(1024) };
+    let kb = |key: &str| -> Option<u64> {
+        field(meminfo, key)?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    };
     Some((kb("MemTotal")?, kb("MemAvailable")?))
 }
 
 /// `PRETTY_NAME` (or `VERSION_ID`) from `/etc/os-release`, quotes stripped.
 fn parse_os_release(s: &str) -> Option<String> {
-    let get = |key: &str| s.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(|v| v.trim().trim_matches('"').to_string());
-    get("PRETTY_NAME").or_else(|| get("VERSION_ID")).filter(|v| !v.is_empty())
+    let get = |key: &str| {
+        s.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .map(|v| v.trim().trim_matches('"').to_string())
+    };
+    get("PRETTY_NAME")
+        .or_else(|| get("VERSION_ID"))
+        .filter(|v| !v.is_empty())
 }
 
 /// GPU lines from `lspci` (VGA, 3D and Display controllers). Vendor from the description.
@@ -87,7 +110,13 @@ fn parse_lspci(out: &str) -> Vec<GpuInfo> {
             } else {
                 (desc.split_whitespace().next().unwrap_or(""), "vulkan")
             };
-            Some(GpuInfo { name: desc.trim().to_string(), vendor: vendor.into(), backend: backend.into(), memory_bytes: None, cores: None })
+            Some(GpuInfo {
+                name: desc.trim().to_string(),
+                vendor: vendor.into(),
+                backend: backend.into(),
+                memory_bytes: None,
+                cores: None,
+            })
         })
         .collect()
 }
@@ -99,15 +128,23 @@ pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
 
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| CommonError::io(format!("{p}: {e}")));
     let cpu = parse_cpuinfo(&read("/proc/cpuinfo")?);
-    let (total, available) = parse_meminfo(&read("/proc/meminfo")?).ok_or_else(|| CommonError::io("/proc/meminfo: MemTotal/MemAvailable missing"))?;
+    let (total, available) = parse_meminfo(&read("/proc/meminfo")?)
+        .ok_or_else(|| CommonError::io("/proc/meminfo: MemTotal/MemAvailable missing"))?;
     Ok(HardwareReport {
         host: HostSummary {
-            os_version: std::fs::read_to_string("/etc/os-release").ok().and_then(|s| parse_os_release(&s)).unwrap_or_default(),
+            os_version: std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|s| parse_os_release(&s))
+                .unwrap_or_default(),
             chip: cpu.model.clone(),
             ..Default::default()
         },
         cpu,
-        memory: MemoryInfo { total_bytes: total, available_bytes: available, unified: false },
+        memory: MemoryInfo {
+            total_bytes: total,
+            available_bytes: available,
+            unified: false,
+        },
         gpus: cmd("lspci", &[]).map(|o| parse_lspci(&o)).unwrap_or_default(),
         ..Default::default()
     })
@@ -135,7 +172,10 @@ mod tests {
         let c = parse_cpuinfo(&x86_cpuinfo());
         assert_eq!(c.model, "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz");
         assert_eq!((c.physical_cores, c.logical_cores), (4, 8));
-        assert_eq!(c.features, ["avx", "avx2", "avx512f", "avx512_vnni", "fma", "f16c", "amx"]);
+        assert_eq!(
+            c.features,
+            ["avx", "avx2", "avx512f", "avx512_vnni", "fma", "f16c", "amx"]
+        );
     }
 
     #[test]
@@ -157,7 +197,10 @@ mod tests {
 
     #[test]
     fn os_release_pretty_name() {
-        assert_eq!(parse_os_release("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n").as_deref(), Some("Ubuntu 24.04.1 LTS"));
+        assert_eq!(
+            parse_os_release("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n").as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
         assert_eq!(parse_os_release("VERSION_ID=12\n").as_deref(), Some("12"));
         assert_eq!(parse_os_release(""), None);
     }
@@ -167,7 +210,15 @@ mod tests {
         let out = "00:00.0 Host bridge: Intel Corporation Device 4660 (rev 02)\n00:02.0 VGA compatible controller: Intel Corporation Alder Lake-S GT1 [UHD Graphics 770] (rev 0c)\n01:00.0 VGA compatible controller: NVIDIA Corporation GA102 [GeForce RTX 3090] (rev a1)\n01:00.1 Audio device: NVIDIA Corporation GA102 High Definition Audio Controller (rev a1)\n03:00.0 Display controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX]\n04:00.0 3D controller: NVIDIA Corporation GH100 [H100 SXM5 80GB] (rev a1)\n";
         let g = parse_lspci(out);
         let v: Vec<(&str, &str)> = g.iter().map(|g| (g.vendor.as_str(), g.backend.as_str())).collect();
-        assert_eq!(v, [("Intel", "vulkan"), ("NVIDIA", "cuda"), ("AMD", "rocm"), ("NVIDIA", "cuda")]);
+        assert_eq!(
+            v,
+            [
+                ("Intel", "vulkan"),
+                ("NVIDIA", "cuda"),
+                ("AMD", "rocm"),
+                ("NVIDIA", "cuda")
+            ]
+        );
         assert_eq!(g[1].name, "NVIDIA Corporation GA102 [GeForce RTX 3090] (rev a1)");
         assert!(parse_lspci("").is_empty());
     }

@@ -1,0 +1,293 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Common local API",
+    "version": "1.0.0",
+    "description": "OpenAI-compatible inference endpoints under /v1 plus Common extensions under /api. Binds 127.0.0.1 by default. Every error body has the OpenAI shape with a stable Common `code` (see Error). When the server was started with an API key, every route except /health requires `Authorization: Bearer <key>`. Browser requests (an `Origin` header) are accepted only from the allow-listed desktop origins; any other origin, a cross-site fetch, or (without an API key) a non-loopback `Host` gets 403 `policy_denied` before the route runs.",
+    "license": { "name": "Apache-2.0" }
+  },
+  "servers": [{ "url": "http://127.0.0.1:8192" }],
+  "security": [{}, { "bearer": [] }],
+  "tags": [
+    { "name": "ops", "description": "Liveness, readiness, metrics, this document." },
+    { "name": "openai", "description": "OpenAI-compatible endpoints; official OpenAI clients work with only base_url changed." },
+    { "name": "common", "description": "Common extensions used by the CLI and the desktop app." }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "Liveness",
+        "description": "Always 200 while the process runs. Never requires authentication.",
+        "security": [{}],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "ok" }, "version": { "type": "string" } }, "required": ["status", "version"] } } } } }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "Readiness",
+        "description": "200 when a request could be served now: no model is loaded (the server can accept a load), or the loaded engine answers a tokenize round-trip within 2 s. 503 while a load holds the slot or the engine is unresponsive.",
+        "responses": {
+          "200": { "description": "Ready", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "ready" }, "model": { "type": ["string", "null"] } } } } } },
+          "503": { "description": "Not ready", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "not_ready" }, "reason": { "type": "string" } } } } } }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "Prometheus metrics",
+        "description": "Text exposition format. Metrics: common_requests_total{route,status}, common_requests_rejected_total{reason}, common_tokens_generated_total, common_prompt_tokens_total, common_ttft_seconds (histogram), common_decode_tokens_per_second, common_queue_depth, common_inflight. Never contains prompt or completion text.",
+        "responses": { "200": { "description": "Metrics", "content": { "text/plain": { "schema": { "type": "string" } } } } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "This document",
+        "responses": { "200": { "description": "OpenAPI 3.1 document", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": ["openai"],
+        "summary": "List models",
+        "description": "Every model in the local store plus catalog entries not downloaded yet. Each object carries a `common` extension with download/load state.",
+        "responses": { "200": { "description": "Model list", "content": { "application/json": { "schema": { "type": "object", "properties": { "object": { "const": "list" }, "data": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } } } } } } } }
+      }
+    },
+    "/v1/models/{id}": {
+      "get": {
+        "tags": ["openai"],
+        "summary": "Retrieve a model",
+        "parameters": [{ "$ref": "#/components/parameters/ModelId" }],
+        "responses": { "200": { "description": "Model", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Model" } } } }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": ["openai"],
+        "summary": "Chat completion",
+        "description": "Loads `model` on demand (single slot). Models whose GGUF has a chat template get the template applied by the engine; models without one (e.g. the stories15M fixture) are prompted with plain `role: content` lines. `response_format` of type json_schema/json_object enables constrained decoding. With `stream: true` the response is text/event-stream: OpenAI chat chunks, a final chunk with finish_reason, a usage chunk when stream_options.include_usage is set, then `data: [DONE]`. Closing the connection cancels generation.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatRequest" } } } },
+        "responses": {
+          "200": { "description": "Completion (JSON) or SSE stream", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatResponse" } }, "text/event-stream": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "tags": ["openai"],
+        "summary": "Text completion",
+        "description": "Raw prompt (string or single-element array), no chat template. Same sampling, streaming and admission rules as chat.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompletionRequest" } } } },
+        "responses": {
+          "200": { "description": "Completion (JSON) or SSE stream", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompletionResponse" } }, "text/event-stream": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "tags": ["openai"],
+        "summary": "Embeddings",
+        "description": "Loads `model` in embeddings mode (reloading the slot if it was loaded for generation).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EmbeddingsRequest" } } } },
+        "responses": {
+          "200": { "description": "Embeddings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EmbeddingsResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/hardware": {
+      "get": {
+        "tags": ["common"],
+        "summary": "Hardware probe",
+        "description": "Fresh `common_hardware::probe()` report: cpu, memory, gpus, backends, disk.",
+        "responses": { "200": { "description": "Hardware report", "content": { "application/json": { "schema": { "type": "object" } } } }, "500": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/status": {
+      "get": {
+        "tags": ["common"],
+        "summary": "Daemon status",
+        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "type": "object", "properties": { "version": { "type": "string" }, "uptime_seconds": { "type": "integer" }, "loaded": { "oneOf": [{ "$ref": "#/components/schemas/LoadedModelInfo" }, { "type": "null" }] }, "queue": { "type": "object", "properties": { "inflight": { "type": "integer" }, "queued": { "type": "integer" }, "max_concurrent": { "type": "integer" }, "max_queue": { "type": "integer" } } } } } } } } }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": ["common"],
+        "summary": "Model library with fit estimates",
+        "description": "Store manifests plus catalog entries not downloaded, each with a memory estimate and a fit verdict for this device (GGUF-based when the blob is present, file-size-only otherwise).",
+        "responses": { "200": { "description": "Models", "content": { "application/json": { "schema": { "type": "object", "properties": { "models": { "type": "array", "items": { "$ref": "#/components/schemas/LibraryModel" } } } } } } } }
+      }
+    },
+    "/api/models/{id}/pull": {
+      "post": {
+        "tags": ["common"],
+        "summary": "Download a catalog model",
+        "description": "text/event-stream of progress objects; the last one has `done: true`. A failure is sent as an Error object and ends the stream. Re-running resumes a partial download.",
+        "parameters": [{ "$ref": "#/components/parameters/ModelId" }],
+        "responses": { "200": { "description": "Progress stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } }, "404": { "$ref": "#/components/responses/Error" }, "429": { "description": "Two downloads are already in progress", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/api/models/{id}/load": {
+      "post": {
+        "tags": ["common"],
+        "summary": "Load a model into the single slot",
+        "parameters": [{ "$ref": "#/components/parameters/ModelId" }],
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "device": { "type": "string", "enum": ["auto", "cpu", "gpu"] }, "n_ctx": { "type": "integer", "minimum": 1 } } } } } },
+        "responses": { "200": { "description": "Loaded model with proof fields", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoadedModelInfo" } } } }, "404": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/unload": {
+      "post": {
+        "tags": ["common"],
+        "summary": "Unload the loaded model",
+        "responses": { "204": { "description": "Unloaded (or nothing was loaded)" } }
+      }
+    },
+    "/api/models/{id}": {
+      "delete": {
+        "tags": ["common"],
+        "summary": "Remove a downloaded model",
+        "description": "Unloads it first if loaded; deletes the manifest and the blob when no other manifest shares it.",
+        "parameters": [{ "$ref": "#/components/parameters/ModelId" }],
+        "responses": { "204": { "description": "Removed" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/models/import": {
+      "post": {
+        "tags": ["common"],
+        "summary": "Import a local GGUF file",
+        "description": "Hashes and links the file into the store; the file is not moved. `path` must be absolute.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "path": { "type": "string" }, "id": { "type": "string" }, "license": { "type": "string" } }, "required": ["path"] } } } },
+        "responses": { "200": { "description": "Manifest", "content": { "application/json": { "schema": { "type": "object" } } } }, "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer" } },
+    "parameters": {
+      "ModelId": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$" }, "description": "Catalog or store id." }
+    },
+    "responses": {
+      "Error": { "description": "Error in the OpenAI shape with a stable Common code", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": { "type": "string" },
+              "type": { "type": "string", "enum": ["invalid_request_error", "authentication_error", "permission_error", "not_found_error", "rate_limit_error", "server_error"] },
+              "code": { "type": "string", "enum": ["invalid_request", "model_not_found", "model_not_downloaded", "model_file_invalid", "integrity_mismatch", "insufficient_memory", "context_too_long", "backend_unavailable", "backend_failed", "gpu_unavailable", "timeout", "cancelled", "overloaded", "download_failed", "not_implemented", "policy_denied", "unauthorized", "io", "internal"] },
+              "param": { "type": "null" },
+              "hint": { "type": ["string", "null"] }
+            },
+            "required": ["message", "type", "code"]
+          }
+        },
+        "required": ["error"]
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "const": "model" },
+          "created": { "type": "integer" },
+          "owned_by": { "type": "string" },
+          "common": { "type": "object", "properties": { "downloaded": { "type": "boolean" }, "license": { "type": "string" }, "bytes": { "type": "integer" }, "redistribution": { "type": "string" }, "loaded": { "type": "boolean" } } }
+        }
+      },
+      "LibraryModel": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" }, "bytes": { "type": "integer" }, "license": { "type": "string" }, "license_url": { "type": ["string", "null"] }, "source": { "type": "string" }, "family": { "type": ["string", "null"] }, "parameters": { "type": ["string", "null"] }, "quantization": { "type": ["string", "null"] }, "chat": { "type": "boolean" }, "redistribution": { "type": "string" }, "tags": { "type": "array", "items": { "type": "string" } }, "downloaded": { "type": "boolean" }, "loaded": { "type": "boolean" },
+          "fit": { "type": "object", "properties": { "verdict": { "type": "string", "enum": ["fits", "too_large"] }, "headroom_bytes": { "type": "integer" }, "needed_bytes": { "type": "integer" }, "available_bytes": { "type": "integer" }, "reason": { "type": "string" } } },
+          "estimate": { "type": "object", "properties": { "weights_bytes": { "type": "integer" }, "kv_cache_bytes": { "type": "integer" }, "compute_buffer_bytes": { "type": "integer" }, "overhead_bytes": { "type": "integer" }, "total_bytes": { "type": "integer" }, "n_ctx": { "type": "integer" } } },
+          "estimate_basis": { "type": "string", "enum": ["gguf", "file_size"] }
+        }
+      },
+      "LoadedModelInfo": {
+        "type": "object",
+        "properties": {
+          "model_id": { "type": "string" }, "model_sha256": { "type": "string" }, "backend_name": { "type": "string" }, "backend_version": { "type": "string" }, "device_requested": { "type": "string" }, "device_actual": { "type": "string" }, "offloaded_layers": { "type": "integer" }, "total_layers": { "type": "integer" }, "n_ctx": { "type": "integer" }, "threads": { "type": "integer" }, "parallel_slots": { "type": "integer" }, "fallback_reason": { "type": ["string", "null"] }, "load_ms": { "type": "number" }, "pid": { "type": ["integer", "null"] }
+        }
+      },
+      "Sampling": {
+        "type": "object",
+        "properties": {
+          "model": { "type": "string", "description": "Catalog or store id. Required." },
+          "max_tokens": { "type": "integer", "minimum": 1, "default": 256 },
+          "max_completion_tokens": { "type": "integer", "minimum": 1 },
+          "temperature": { "type": "number", "minimum": 0, "maximum": 2, "default": 0.8 },
+          "top_p": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.95 },
+          "seed": { "type": "integer" },
+          "stop": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+          "stream": { "type": "boolean", "default": false },
+          "stream_options": { "type": "object", "properties": { "include_usage": { "type": "boolean" } } },
+          "response_format": { "type": "object", "properties": { "type": { "type": "string", "enum": ["text", "json_object", "json_schema"] }, "json_schema": { "type": "object", "properties": { "name": { "type": "string" }, "schema": { "type": "object" } } } } },
+          "n": { "type": "integer", "const": 1 }
+        },
+        "required": ["model"]
+      },
+      "ChatRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Sampling" },
+          { "type": "object", "properties": { "messages": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "role": { "type": "string", "enum": ["system", "user", "assistant", "tool", "developer"] }, "content": { "oneOf": [{ "type": "string" }, { "type": "null" }, { "type": "array", "items": { "type": "object", "properties": { "type": { "const": "text" }, "text": { "type": "string" } } } }] } }, "required": ["role"] } }, "tools": { "type": "array", "items": { "type": "object" } }, "tool_choice": {} }, "required": ["messages"] }
+        ]
+      },
+      "Usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "completion_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } },
+      "Timings": { "type": "object", "description": "Common extension: engine timings.", "properties": { "time_to_first_token_ms": { "type": ["number", "null"] }, "prompt_ms": { "type": ["number", "null"] }, "prompt_tokens_per_second": { "type": ["number", "null"] }, "decode_ms": { "type": ["number", "null"] }, "decode_tokens_per_second": { "type": ["number", "null"] } } },
+      "ChatResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "object": { "const": "chat.completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
+          "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "message": { "type": "object", "properties": { "role": { "const": "assistant" }, "content": { "type": ["string", "null"] }, "tool_calls": { "type": "array", "items": { "type": "object" } } } }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
+          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" }
+        }
+      },
+      "CompletionRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Sampling" },
+          { "type": "object", "properties": { "prompt": { "oneOf": [{ "type": "string" }, { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "string" } }] } }, "required": ["prompt"] }
+        ]
+      },
+      "CompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "object": { "const": "text_completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
+          "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "text": { "type": "string" }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
+          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" }
+        }
+      },
+      "EmbeddingsRequest": {
+        "type": "object",
+        "properties": { "model": { "type": "string" }, "input": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] }, "encoding_format": { "type": "string", "enum": ["float", "base64"] } },
+        "required": ["model", "input"]
+      },
+      "EmbeddingsResponse": {
+        "type": "object",
+        "properties": {
+          "object": { "const": "list" },
+          "data": { "type": "array", "items": { "type": "object", "properties": { "object": { "const": "embedding" }, "index": { "type": "integer" }, "embedding": { "oneOf": [{ "type": "array", "items": { "type": "number" } }, { "type": "string" }] } } } },
+          "model": { "type": "string" },
+          "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } }
+        }
+      }
+    }
+  }
+}

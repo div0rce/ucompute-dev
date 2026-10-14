@@ -22,11 +22,18 @@ const FEATURES: &[(&str, &str)] = &[
 
 /// `key: value` lines from `sysctl <keys>` (without `-n`).
 fn parse_sysctl(out: &str) -> HashMap<&str, &str> {
-    out.lines().filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim(), v.trim())).collect()
+    out.lines()
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect()
 }
 
 fn features(m: &HashMap<&str, &str>) -> Vec<String> {
-    FEATURES.iter().filter(|(k, _)| m.get(k) == Some(&"1")).map(|(_, n)| n.to_string()).collect()
+    FEATURES
+        .iter()
+        .filter(|(k, _)| m.get(k) == Some(&"1"))
+        .map(|(_, n)| n.to_string())
+        .collect()
 }
 
 /// Available memory from `vm_stat`: (free + inactive + speculative pages) x page size.
@@ -34,7 +41,15 @@ fn features(m: &HashMap<&str, &str>) -> Vec<String> {
 /// read-ahead, so both count as usable without swapping. Wired, active and compressor
 /// pages do not.
 fn parse_vm_stat(out: &str) -> Option<u64> {
-    let page: u64 = out.lines().next()?.split("page size of ").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    let page: u64 = out
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
     let pages = |label: &str| -> Option<u64> {
         let line = out.lines().find(|l| l.starts_with(label))?;
         line.split_once(':')?.1.trim().trim_end_matches('.').parse().ok()
@@ -45,7 +60,9 @@ fn parse_vm_stat(out: &str) -> Option<u64> {
 
 /// GPU core count from `ioreg -rc AGXAccelerator -d 1` (`"gpu-core-count" = 10`).
 fn parse_gpu_cores(ioreg: &str) -> Option<u32> {
-    ioreg.lines().find_map(|l| l.trim().strip_prefix("\"gpu-core-count\" = ")?.trim().parse().ok())
+    ioreg
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("\"gpu-core-count\" = ")?.trim().parse().ok())
 }
 
 #[cfg(target_os = "macos")]
@@ -54,11 +71,22 @@ pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
     use common_core::{CommonError, HostSummary};
 
     // Absolute paths: system tools, never whatever PATH points at.
-    let out = cmd("/usr/sbin/sysctl", &["machdep.cpu.brand_string", "hw.physicalcpu", "hw.logicalcpu", "hw.memsize", "hw.optional"])
-        .ok_or_else(|| CommonError::io("sysctl failed"))?;
+    let out = cmd(
+        "/usr/sbin/sysctl",
+        &[
+            "machdep.cpu.brand_string",
+            "hw.physicalcpu",
+            "hw.logicalcpu",
+            "hw.memsize",
+            "hw.optional",
+        ],
+    )
+    .ok_or_else(|| CommonError::io("sysctl failed"))?;
     let m = parse_sysctl(&out);
     fn num<T: std::str::FromStr>(m: &HashMap<&str, &str>, k: &str) -> common_core::Result<T> {
-        m.get(k).and_then(|v| v.parse().ok()).ok_or_else(|| CommonError::io(format!("sysctl {k}: missing or not a number")))
+        m.get(k)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| CommonError::io(format!("sysctl {k}: missing or not a number")))
     }
     let chip = m.get("machdep.cpu.brand_string").unwrap_or(&"").to_string();
     let total: u64 = num(&m, "hw.memsize")?;
@@ -92,7 +120,9 @@ pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
         },
         memory: MemoryInfo {
             total_bytes: total,
-            available_bytes: cmd("/usr/bin/vm_stat", &[]).and_then(|o| parse_vm_stat(&o)).unwrap_or(0),
+            available_bytes: cmd("/usr/bin/vm_stat", &[])
+                .and_then(|o| parse_vm_stat(&o))
+                .unwrap_or(0),
             unified: apple_silicon,
         },
         gpus,
@@ -113,7 +143,10 @@ mod tests {
         assert_eq!(m["hw.memsize"], "8589934592");
         assert_eq!(features(&m), ["neon", "fp16", "dotprod", "i8mm", "bf16"]);
         let intel = parse_sysctl("machdep.cpu.brand_string: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\nhw.optional.avx2_0: 1\nhw.optional.avx512f: 0\nhw.optional.fma: 1\n");
-        assert_eq!(intel["machdep.cpu.brand_string"], "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz");
+        assert_eq!(
+            intel["machdep.cpu.brand_string"],
+            "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"
+        );
         assert_eq!(features(&intel), ["avx2", "fma"]);
     }
 
@@ -122,7 +155,10 @@ mod tests {
         let out = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                3964.\nPages active:                             99041.\nPages inactive:                           97570.\nPages speculative:                          475.\nPages throttled:                              0.\nPages wired down:                        155166.\n";
         assert_eq!(parse_vm_stat(out), Some((3964 + 97570 + 475) * 16384));
         assert_eq!(parse_vm_stat("garbage"), None);
-        assert_eq!(parse_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\n"), None);
+        assert_eq!(
+            parse_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\n"),
+            None
+        );
     }
 
     #[test]

@@ -82,8 +82,14 @@ mod tests {
         let mut p = SseParser::default();
         assert!(p.push(b"data: {\"a\":1}").is_empty());
         assert!(p.push(b"\n").is_empty());
-        assert_eq!(p.push(b"\ndata: x\r\ndata: y\r\n\r\n\n"), vec!["{\"a\":1}".to_string(), "x\ny".into()]);
-        assert_eq!(p.push(b"error: {\"code\":500}\n\n: comment\n\n"), vec!["{\"code\":500}".to_string()]);
+        assert_eq!(
+            p.push(b"\ndata: x\r\ndata: y\r\n\r\n\n"),
+            vec!["{\"a\":1}".to_string(), "x\ny".into()]
+        );
+        assert_eq!(
+            p.push(b"error: {\"code\":500}\n\n: comment\n\n"),
+            vec!["{\"code\":500}".to_string()]
+        );
         let split_utf8 = "data: \u{e9}\n\n".as_bytes();
         assert!(p.push(&split_utf8[..7]).is_empty());
         assert_eq!(p.push(&split_utf8[7..]), vec!["\u{e9}".to_string()]);

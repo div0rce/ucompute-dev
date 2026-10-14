@@ -2,13 +2,13 @@
 //! (F-05-04), download + integrity + cache (F-01-05), resumable downloads (F-05-02), pinned
 //! backend provisioning (ADR-0002).
 
+pub mod backend;
 pub mod catalog;
+pub mod download;
 pub mod hash;
 pub mod store;
-pub mod download;
-pub mod backend;
 
+pub use backend::{ensure_backend, verify_backend, BackendPin};
 pub use catalog::{Catalog, ModelEntry};
-pub use store::{ModelManifest, Store};
 pub use download::{pull, Progress};
-pub use backend::{BackendPin, ensure_backend, verify_backend};
+pub use store::{ModelManifest, Store};

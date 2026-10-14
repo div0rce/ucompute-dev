@@ -57,6 +57,10 @@ pub struct LoadedModelInfo {
     pub parallel_slots: u32,
     /// Set when the adapter fell back from GPU to CPU (F-01-04). Never silent.
     pub fallback_reason: Option<String>,
+    /// Set by the planner when the requested context was capped to the trained context, reduced
+    /// to fit memory, or the KV cache was downgraded to Q8_0 (F-01-08). Never silent.
+    #[serde(default)]
+    pub context_note: Option<String>,
     pub load_ms: f64,
     /// Engine process id for memory measurement.
     pub pid: Option<u32>,
@@ -137,10 +141,18 @@ pub struct Timings {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GenerateEvent {
     /// A piece of generated text (one or more tokens).
-    Token { text: String, #[serde(default)] token_ids: Vec<u32> },
+    Token {
+        text: String,
+        #[serde(default)]
+        token_ids: Vec<u32>,
+    },
     /// Streamed tool-call delta for chat requests (raw OpenAI delta JSON).
     ToolCallDelta { delta: serde_json::Value },
-    Done { finish_reason: String, usage: Usage, timings: Timings },
+    Done {
+        finish_reason: String,
+        usage: Usage,
+        timings: Timings,
+    },
 }
 
 pub type GenerateStream = BoxStream<'static, Result<GenerateEvent>>;
@@ -181,6 +193,11 @@ pub trait LoadedModel: Send + Sync {
     fn memory_rss_bytes(&self) -> Option<u64>;
     /// Stop the engine and free everything. Idempotent.
     async fn unload(&self) -> Result<()>;
+    /// Requests (streams or calls) currently using this model. The `ModelManager` refuses to
+    /// unload or replace a model while this is non-zero (F-08-08). Backends may leave the default.
+    fn in_flight(&self) -> usize {
+        0
+    }
 }
 
 /// Collect a whole generation into text (+ ids) — convenience for tests and the CLI.
@@ -194,9 +211,20 @@ pub async fn collect(stream: GenerateStream) -> Result<(String, Vec<u32>, Usage,
     let mut s = stream;
     while let Some(ev) = s.next().await {
         match ev? {
-            GenerateEvent::Token { text: t, token_ids } => { text.push_str(&t); ids.extend(token_ids); }
+            GenerateEvent::Token { text: t, token_ids } => {
+                text.push_str(&t);
+                ids.extend(token_ids);
+            }
             GenerateEvent::ToolCallDelta { .. } => {}
-            GenerateEvent::Done { finish_reason, usage: u, timings: t } => { usage = u; timings = t; finish = finish_reason; }
+            GenerateEvent::Done {
+                finish_reason,
+                usage: u,
+                timings: t,
+            } => {
+                usage = u;
+                timings = t;
+                finish = finish_reason;
+            }
         }
     }
     Ok((text, ids, usage, timings, finish))

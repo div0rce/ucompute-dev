@@ -35,12 +35,20 @@ pub async fn pull(store: &Store, entry: &ModelEntry, progress: &mut dyn FnMut(Pr
     pull_inner(store, entry, progress, true).await
 }
 
-async fn pull_inner(store: &Store, entry: &ModelEntry, progress: &mut dyn FnMut(Progress), https_only: bool) -> Result<ModelManifest> {
+async fn pull_inner(
+    store: &Store,
+    entry: &ModelEntry,
+    progress: &mut dyn FnMut(Progress),
+    https_only: bool,
+) -> Result<ModelManifest> {
     if !safe_name(&entry.id) {
         return Err(CommonError::invalid(format!("invalid model id {:?}", entry.id)));
     }
     if !is_sha256_hex(&entry.sha256) {
-        return Err(CommonError::invalid(format!("model {} has a malformed sha256", entry.id)));
+        return Err(CommonError::invalid(format!(
+            "model {} has a malformed sha256",
+            entry.id
+        )));
     }
     let blob = store.blob_path(&entry.sha256);
     if blob.is_file() {
@@ -49,10 +57,19 @@ async fn pull_inner(store: &Store, entry: &ModelEntry, progress: &mut dyn FnMut(
             tokio::fs::remove_file(&blob).await?;
             return Err(CommonError::new(
                 ErrorCode::IntegrityMismatch,
-                format!("cached blob for {} hashed to {actual}, expected {}; deleted", entry.id, entry.sha256),
+                format!(
+                    "cached blob for {} hashed to {actual}, expected {}; deleted",
+                    entry.id, entry.sha256
+                ),
             ));
         }
-        progress(Progress { downloaded_bytes: entry.bytes, total_bytes: entry.bytes, network_bytes: 0, resumed_from: 0, done: true });
+        progress(Progress {
+            downloaded_bytes: entry.bytes,
+            total_bytes: entry.bytes,
+            network_bytes: 0,
+            resumed_from: 0,
+            done: true,
+        });
         if let Some(m) = store.get(&entry.id)?.filter(|m| m.sha256 == entry.sha256) {
             return Ok(m);
         }
@@ -64,7 +81,16 @@ async fn pull_inner(store: &Store, entry: &ModelEntry, progress: &mut dyn FnMut(
         require_https(&entry.url)?;
     }
     let partial = store.paths.partial().join(format!("{}.part", entry.sha256));
-    fetch(&entry.url, &entry.sha256, entry.bytes, &partial, &blob, https_only, progress).await?;
+    fetch(
+        &entry.url,
+        &entry.sha256,
+        entry.bytes,
+        &partial,
+        &blob,
+        https_only,
+        progress,
+    )
+    .await?;
     let m = manifest_from(entry);
     store.write_manifest(&m)?;
     Ok(m)
@@ -74,7 +100,10 @@ pub(crate) fn require_https(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         Ok(())
     } else {
-        Err(CommonError::new(ErrorCode::PolicyDenied, "downloads require an https:// URL"))
+        Err(CommonError::new(
+            ErrorCode::PolicyDenied,
+            "downloads require an https:// URL",
+        ))
     }
 }
 
@@ -111,9 +140,16 @@ pub(crate) async fn fetch(
     let mut resp = req.send().await.map_err(net)?;
     let mut file = match resp.status().as_u16() {
         206 if have > 0 => {
-            let range = resp.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let range = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
             if !range.starts_with(&format!("bytes {have}-")) {
-                return Err(CommonError::new(ErrorCode::DownloadFailed, format!("server resumed at the wrong offset (Content-Range {range:?})")));
+                return Err(CommonError::new(
+                    ErrorCode::DownloadFailed,
+                    format!("server resumed at the wrong offset (Content-Range {range:?})"),
+                ));
             }
             tokio::fs::OpenOptions::new().append(true).open(partial).await?
         }
@@ -121,12 +157,23 @@ pub(crate) async fn fetch(
             have = 0;
             tokio::fs::File::create(partial).await?
         }
-        s => return Err(CommonError::new(ErrorCode::DownloadFailed, format!("server returned HTTP {s}"))),
+        s => {
+            return Err(CommonError::new(
+                ErrorCode::DownloadFailed,
+                format!("server returned HTTP {s}"),
+            ))
+        }
     };
     let resumed_from = have;
     let mut downloaded = have;
     let mut network = 0u64;
-    let report = |downloaded, network, done| Progress { downloaded_bytes: downloaded, total_bytes: bytes, network_bytes: network, resumed_from, done };
+    let report = |downloaded, network, done| Progress {
+        downloaded_bytes: downloaded,
+        total_bytes: bytes,
+        network_bytes: network,
+        resumed_from,
+        done,
+    };
     loop {
         let chunk = match resp.chunk().await {
             Ok(Some(c)) => c,
@@ -141,7 +188,10 @@ pub(crate) async fn fetch(
         if downloaded > bytes {
             drop(file);
             tokio::fs::remove_file(partial).await?;
-            return Err(CommonError::new(ErrorCode::DownloadFailed, format!("body exceeds the pinned size of {bytes} bytes; partial deleted")));
+            return Err(CommonError::new(
+                ErrorCode::DownloadFailed,
+                format!("body exceeds the pinned size of {bytes} bytes; partial deleted"),
+            ));
         }
         file.write_all(&chunk).await?;
         progress(report(downloaded, network, false));
@@ -150,13 +200,19 @@ pub(crate) async fn fetch(
     file.sync_all().await?;
     drop(file);
     if downloaded < bytes {
-        return Err(CommonError::new(ErrorCode::DownloadFailed, format!("connection closed after {downloaded} of {bytes} bytes"))
-            .with_hint("run the same command again to resume"));
+        return Err(CommonError::new(
+            ErrorCode::DownloadFailed,
+            format!("connection closed after {downloaded} of {bytes} bytes"),
+        )
+        .with_hint("run the same command again to resume"));
     }
     let actual = hash_blocking(partial.to_path_buf()).await?;
     if actual != sha256 {
         tokio::fs::remove_file(partial).await?;
-        return Err(CommonError::new(ErrorCode::IntegrityMismatch, format!("downloaded file hashed to {actual}, expected {sha256}; partial deleted")));
+        return Err(CommonError::new(
+            ErrorCode::IntegrityMismatch,
+            format!("downloaded file hashed to {actual}, expected {sha256}; partial deleted"),
+        ));
     }
     tokio::fs::rename(partial, dest).await?;
     progress(report(downloaded, network, true));
@@ -164,12 +220,18 @@ pub(crate) async fn fetch(
 }
 
 async fn hash_blocking(path: PathBuf) -> Result<String> {
-    tokio::task::spawn_blocking(move || sha256_file(&path)).await.map_err(|e| CommonError::internal(e.to_string()))?
+    tokio::task::spawn_blocking(move || sha256_file(&path))
+        .await
+        .map_err(|e| CommonError::internal(e.to_string()))?
 }
 
 /// reqwest errors without the URL (which may carry access tokens).
 fn net(e: reqwest::Error) -> CommonError {
-    let code = if e.is_timeout() { ErrorCode::Timeout } else { ErrorCode::DownloadFailed };
+    let code = if e.is_timeout() {
+        ErrorCode::Timeout
+    } else {
+        ErrorCode::DownloadFailed
+    };
     CommonError::new(code, e.without_url().to_string())
 }
 
@@ -248,7 +310,10 @@ mod tests {
                             total - start, start, total - 1, total
                         )
                     } else {
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", total)
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            total
+                        )
                     };
                     sock.write_all(header.as_bytes()).await.unwrap();
                     let end = (cut.load(Ordering::SeqCst).min(total as u64) as usize).max(start);
@@ -262,7 +327,12 @@ mod tests {
                 });
             }
         });
-        Server { url, served, cut, ignore_range }
+        Server {
+            url,
+            served,
+            cut,
+            ignore_range,
+        }
     }
 
     fn data(len: usize) -> Arc<Vec<u8>> {
@@ -317,7 +387,15 @@ mod tests {
         assert_eq!(m.tags, e.tags);
         let last = events.last().unwrap();
         assert!(last.done);
-        assert_eq!((last.downloaded_bytes, last.total_bytes, last.network_bytes, last.resumed_from), (e.bytes, e.bytes, e.bytes, 0));
+        assert_eq!(
+            (
+                last.downloaded_bytes,
+                last.total_bytes,
+                last.network_bytes,
+                last.resumed_from
+            ),
+            (e.bytes, e.bytes, e.bytes, 0)
+        );
         assert_eq!(srv.served.load(Ordering::SeqCst), e.bytes);
         assert!(events.iter().all(|p| p.downloaded_bytes <= p.total_bytes));
         assert_eq!(std::fs::read(store.blob_path(&e.sha256)).unwrap(), *data);
@@ -328,7 +406,16 @@ mod tests {
         // (d) second pull: zero network bytes, same manifest
         let (r, events) = pull_http(&store, &e).await;
         assert_eq!(r.unwrap(), m);
-        assert_eq!(events, vec![Progress { downloaded_bytes: e.bytes, total_bytes: e.bytes, network_bytes: 0, resumed_from: 0, done: true }]);
+        assert_eq!(
+            events,
+            vec![Progress {
+                downloaded_bytes: e.bytes,
+                total_bytes: e.bytes,
+                network_bytes: 0,
+                resumed_from: 0,
+                done: true
+            }]
+        );
         assert_eq!(srv.served.load(Ordering::SeqCst), e.bytes);
 
         // the https-enforcing entry point also serves from cache without touching the network
@@ -366,7 +453,11 @@ mod tests {
         let (r, _) = pull_http(&store, &e).await;
         assert_eq!(r.unwrap_err().code, ErrorCode::DownloadFailed);
         let partial = store.paths.partial().join(format!("{}.part", e.sha256));
-        assert_eq!(std::fs::metadata(&partial).unwrap().len(), half, "partial kept for resume");
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().len(),
+            half,
+            "partial kept for resume"
+        );
 
         srv.cut.store(u64::MAX, Ordering::SeqCst);
         srv.served.store(0, Ordering::SeqCst);
@@ -375,7 +466,11 @@ mod tests {
         let last = events.last().unwrap();
         assert!(last.done);
         assert_eq!(last.resumed_from, half);
-        assert!(last.network_bytes <= (e.bytes - half) + MIB, "network {}", last.network_bytes);
+        assert!(
+            last.network_bytes <= (e.bytes - half) + MIB,
+            "network {}",
+            last.network_bytes
+        );
         assert!(srv.served.load(Ordering::SeqCst) <= (e.bytes - half) + MIB);
         assert!(!partial.exists());
         store.verify("test-model").unwrap();
@@ -389,7 +484,10 @@ mod tests {
         let (_d, store) = store();
         let e = entry(&srv.url, &data);
         srv.cut.store(MIB, Ordering::SeqCst);
-        assert_eq!(pull_http(&store, &e).await.0.unwrap_err().code, ErrorCode::DownloadFailed);
+        assert_eq!(
+            pull_http(&store, &e).await.0.unwrap_err().code,
+            ErrorCode::DownloadFailed
+        );
         srv.cut.store(u64::MAX, Ordering::SeqCst);
         srv.ignore_range.store(true, Ordering::SeqCst);
         let (r, events) = pull_http(&store, &e).await;
@@ -441,9 +539,15 @@ mod tests {
         let data = data(8);
         let mut e = entry("https://example.invalid/m", &data);
         e.id = "../x".into();
-        assert_eq!(pull(&store, &e, &mut |_| {}).await.unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            pull(&store, &e, &mut |_| {}).await.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
         let mut e = entry("https://example.invalid/m", &data);
         e.sha256 = "../../etc".into();
-        assert_eq!(pull(&store, &e, &mut |_| {}).await.unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            pull(&store, &e, &mut |_| {}).await.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
     }
 }

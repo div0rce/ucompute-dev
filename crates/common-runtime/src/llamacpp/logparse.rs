@@ -67,14 +67,17 @@ fn offloaded(line: &str) -> Option<(u32, u32)> {
     rest.starts_with(" layers to GPU").then_some((a, b))
 }
 
-const GPU_DEVICE_PREFIXES: [&str; 9] = ["MTL", "Metal", "CUDA", "Vulkan", "ROCm", "HIP", "SYCL", "OpenCL", "CANN"];
+const GPU_DEVICE_PREFIXES: [&str; 9] = [
+    "MTL", "Metal", "CUDA", "Vulkan", "ROCm", "HIP", "SYCL", "OpenCL", "CANN",
+];
 
 fn device(line: &str) -> Option<String> {
     let rest = &line[line.find("using device ")? + "using device ".len()..];
     let dev = &rest[..rest.find(' ')?];
-    let is_gpu_id = GPU_DEVICE_PREFIXES
-        .iter()
-        .any(|p| dev.strip_prefix(p).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())));
+    let is_gpu_id = GPU_DEVICE_PREFIXES.iter().any(|p| {
+        dev.strip_prefix(p)
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    });
     if !is_gpu_id {
         return None;
     }
@@ -116,8 +119,21 @@ pub fn scrub(text: &str, secret: &str) -> String {
 /// the loader wraps them in "failed to load model"; the GGUF header was already validated, so other
 /// model-load failures mean the file itself is bad.
 pub fn exit_error_code(tail: &str) -> ErrorCode {
-    const BACKEND_MARKERS: [&str; 4] = ["failed to allocate", "unable to allocate", "out of memory", "couldn't bind"];
-    const MODEL_MARKERS: [&str; 4] = ["failed to load model", "unknown architecture", "invalid magic", "error loading model"];
+    // `ggml_metal_init: error` precedes the loader's "failed to load model" when the Metal library
+    // or device is unusable; that is a backend problem, not a bad file.
+    const BACKEND_MARKERS: [&str; 5] = [
+        "failed to allocate",
+        "unable to allocate",
+        "out of memory",
+        "couldn't bind",
+        "ggml_metal_init: error",
+    ];
+    const MODEL_MARKERS: [&str; 4] = [
+        "failed to load model",
+        "unknown architecture",
+        "invalid magic",
+        "error loading model",
+    ];
     if BACKEND_MARKERS.iter().any(|m| tail.contains(m)) {
         ErrorCode::BackendFailed
     } else if MODEL_MARKERS.iter().any(|m| tail.contains(m)) {
@@ -161,7 +177,11 @@ mod tests {
         let p = parse(METAL_LOG);
         assert_eq!(p.offloaded, Some((7, 7)));
         assert_eq!(p.device.as_deref(), Some("MTL0 (Apple M2)"));
-        assert_eq!(p.n_ctx, Some(128), "last n_ctx wins: the slot context, not the padded llama_context one");
+        assert_eq!(
+            p.n_ctx,
+            Some(128),
+            "last n_ctx wins: the slot context, not the padded llama_context one"
+        );
         assert!(p.gpu_proven());
     }
 
@@ -177,9 +197,18 @@ mod tests {
 
     #[test]
     fn other_gpu_vendors() {
-        assert_eq!(device("ggml_cuda_init: using device CUDA0 (NVIDIA RTX 4090) - 24000 MiB free").as_deref(), Some("CUDA0 (NVIDIA RTX 4090)"));
-        assert_eq!(device("using device Vulkan1 (AMD Radeon) x").as_deref(), Some("Vulkan1 (AMD Radeon)"));
-        assert_eq!(device("using device Metal0 (Apple M2)").as_deref(), Some("Metal0 (Apple M2)"));
+        assert_eq!(
+            device("ggml_cuda_init: using device CUDA0 (NVIDIA RTX 4090) - 24000 MiB free").as_deref(),
+            Some("CUDA0 (NVIDIA RTX 4090)")
+        );
+        assert_eq!(
+            device("using device Vulkan1 (AMD Radeon) x").as_deref(),
+            Some("Vulkan1 (AMD Radeon)")
+        );
+        assert_eq!(
+            device("using device Metal0 (Apple M2)").as_deref(),
+            Some("Metal0 (Apple M2)")
+        );
         assert_eq!(device("using device CPU (Apple M2)"), None);
         assert_eq!(device("using device MTL (x)"), None, "needs an index");
         assert_eq!(device("using device MTL0"), None, "needs a name");
@@ -199,12 +228,29 @@ mod tests {
     fn tail_scrub_and_classify() {
         assert_eq!(tail("a\nb\nc\nd", 2), "c\nd");
         assert_eq!(tail("a\nb", 5), "a\nb");
-        assert_eq!(scrub("--api-key s3cret and s3cret again", "s3cret"), "--api-key [redacted] and [redacted] again");
+        assert_eq!(
+            scrub("--api-key s3cret and s3cret again", "s3cret"),
+            "--api-key [redacted] and [redacted] again"
+        );
         assert_eq!(scrub("x", ""), "x");
         let junk = "E gguf_init_from_reader: invalid magic characters: '?B?(', expected 'GGUF'\nE srv load_model: failed to load model, 'x'\nE srv llama_server: exiting due to model loading error";
         assert_eq!(exit_error_code(junk), ErrorCode::ModelFileInvalid);
-        assert_eq!(exit_error_code("llama_model_load: error loading model: unable to allocate Metal buffer\nfailed to load model"), ErrorCode::BackendFailed);
-        assert_eq!(exit_error_code("error: invalid argument: --device COMMON_TEST_NO_SUCH_DEVICE"), ErrorCode::BackendFailed);
+        assert_eq!(
+            exit_error_code(
+                "llama_model_load: error loading model: unable to allocate Metal buffer\nfailed to load model"
+            ),
+            ErrorCode::BackendFailed
+        );
+        assert_eq!(
+            exit_error_code("error: invalid argument: --device COMMON_TEST_NO_SUCH_DEVICE"),
+            ErrorCode::BackendFailed
+        );
+        let metal = "E ggml_metal_init: error: failed to load library 'default.metallib'\nE srv load_model: failed to load model, '/x.gguf'\nE srv llama_server: exiting due to model loading error";
+        assert_eq!(
+            exit_error_code(metal),
+            ErrorCode::BackendFailed,
+            "a Metal init failure is not a damaged file"
+        );
         let bind = "E srv         start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 41099";
         assert!(bind_failed(bind));
         assert_eq!(exit_error_code(bind), ErrorCode::BackendFailed);

@@ -34,7 +34,9 @@ impl ModelManifest {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
-fn unknown() -> String { "unknown".into() }
+fn unknown() -> String {
+    "unknown".into()
+}
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -42,9 +44,15 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(paths: Paths) -> Self { Self { paths } }
-    pub fn blob_path(&self, sha256: &str) -> PathBuf { self.paths.model_blobs().join(format!("sha256-{sha256}")) }
-    pub fn manifest_path(&self, id: &str) -> PathBuf { self.paths.model_manifests().join(format!("{id}.json")) }
+    pub fn new(paths: Paths) -> Self {
+        Self { paths }
+    }
+    pub fn blob_path(&self, sha256: &str) -> PathBuf {
+        self.paths.model_blobs().join(format!("sha256-{sha256}"))
+    }
+    pub fn manifest_path(&self, id: &str) -> PathBuf {
+        self.paths.model_manifests().join(format!("{id}.json"))
+    }
 
     /// All manifests, sorted by id. An absent manifests directory is an empty store.
     pub fn list(&self) -> Result<Vec<ModelManifest>> {
@@ -77,10 +85,16 @@ impl Store {
     /// Manifest plus the blob path, for loading. `ModelNotFound` without a manifest,
     /// `ModelNotDownloaded` when the blob is missing.
     pub fn resolve(&self, id: &str) -> Result<(ModelManifest, PathBuf)> {
-        let m = self.get(id)?.ok_or_else(|| CommonError::new(ErrorCode::ModelNotFound, format!("no manifest for model '{id}'")))?;
+        let m = self
+            .get(id)?
+            .ok_or_else(|| CommonError::new(ErrorCode::ModelNotFound, format!("no manifest for model '{id}'")))?;
         let blob = self.blob_path(&m.sha256);
         if !blob.is_file() {
-            return Err(CommonError::new(ErrorCode::ModelNotDownloaded, format!("blob for model '{id}' is missing")).with_hint(format!("common models pull {id}")));
+            return Err(CommonError::new(
+                ErrorCode::ModelNotDownloaded,
+                format!("blob for model '{id}' is missing"),
+            )
+            .with_hint(format!("common models pull {id}")));
         }
         Ok((m, blob))
     }
@@ -88,10 +102,18 @@ impl Store {
     /// Hash `path`, link or copy it into the blob store, write a manifest. Does not move the original.
     /// `id` defaults to the file stem, `license` to `"unknown"`.
     pub fn import(&self, path: &Path, id: Option<&str>, license: Option<&str>) -> Result<ModelManifest> {
-        let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| CommonError::invalid("path has no file name"))?.to_string();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| CommonError::invalid("path has no file name"))?
+            .to_string();
         let id = match id {
             Some(i) => i.to_string(),
-            None => path.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
+            None => path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
         };
         check_id(&id)?;
         let path = path.canonicalize()?;
@@ -99,7 +121,9 @@ impl Store {
         let sha256 = sha256_file(&path)?;
         if let Some(existing) = self.get(&id)? {
             if existing.sha256 != sha256 {
-                return Err(CommonError::invalid(format!("model id '{id}' already exists with different content; remove it first")));
+                return Err(CommonError::invalid(format!(
+                    "model id '{id}' already exists with different content; remove it first"
+                )));
             }
         }
         let blob = self.blob_path(&sha256);
@@ -145,7 +169,9 @@ impl Store {
 
     /// Delete the manifest, and the blob when no other manifest references its hash.
     pub fn remove(&self, id: &str) -> Result<()> {
-        let m = self.get(id)?.ok_or_else(|| CommonError::new(ErrorCode::ModelNotFound, format!("no manifest for model '{id}'")))?;
+        let m = self
+            .get(id)?
+            .ok_or_else(|| CommonError::new(ErrorCode::ModelNotFound, format!("no manifest for model '{id}'")))?;
         std::fs::remove_file(self.manifest_path(id))?;
         if !self.list()?.iter().any(|o| o.sha256 == m.sha256) {
             match std::fs::remove_file(self.blob_path(&m.sha256)) {
@@ -164,7 +190,10 @@ impl Store {
         if actual != m.sha256 {
             return Err(CommonError::new(
                 ErrorCode::IntegrityMismatch,
-                format!("model '{id}': blob sha256 {actual} does not match manifest {}", m.sha256),
+                format!(
+                    "model '{id}': blob sha256 {actual} does not match manifest {}",
+                    m.sha256
+                ),
             ));
         }
         Ok(())
@@ -172,17 +201,25 @@ impl Store {
 }
 
 fn check_id(id: &str) -> Result<()> {
-    if safe_name(id) { Ok(()) } else { Err(CommonError::invalid(format!("invalid model id {id:?}"))) }
+    if safe_name(id) {
+        Ok(())
+    } else {
+        Err(CommonError::invalid(format!("invalid model id {id:?}")))
+    }
 }
 
 fn read_manifest(path: &Path) -> Result<ModelManifest> {
     let bytes = std::fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(|e| CommonError::io(format!("manifest {} is not valid: {e}", path.display())))
+    serde_json::from_slice(&bytes)
+        .map_err(|e| CommonError::io(format!("manifest {} is not valid: {e}", path.display())))
 }
 
 /// Current time as `YYYY-MM-DDTHH:MM:SSZ` from `std::time` (no chrono).
 pub fn utc_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     format_utc(secs)
 }
 
@@ -199,7 +236,12 @@ pub fn format_utc(secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -276,7 +318,10 @@ mod tests {
         // same id, different content -> refused
         let g = d.path().join("other.gguf");
         std::fs::write(&g, b"different").unwrap();
-        assert_eq!(s.import(&g, Some("alias"), None).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            s.import(&g, Some("alias"), None).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
         // re-import same content under same id is fine
         s.import(&f, Some("alias"), None).unwrap();
 

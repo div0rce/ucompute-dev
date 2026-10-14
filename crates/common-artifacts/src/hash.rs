@@ -46,7 +46,10 @@ mod tests {
         let p = dir.path().join("abc");
         std::fs::write(&p, b"abc").unwrap();
         assert_eq!(sha256_file(&p).unwrap(), ABC);
-        assert_eq!(sha256_file(Path::new("/nonexistent/x")).unwrap_err().code, common_core::ErrorCode::Io);
+        assert_eq!(
+            sha256_file(Path::new("/nonexistent/x")).unwrap_err().code,
+            common_core::ErrorCode::Io
+        );
     }
 
     #[test]

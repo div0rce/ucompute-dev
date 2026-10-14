@@ -24,22 +24,43 @@ impl Paths {
     }
 
     /// Pinned inference engines: `backends/<name>/<release>/`.
-    pub fn backends(&self) -> PathBuf { self.root.join("backends") }
+    pub fn backends(&self) -> PathBuf {
+        self.root.join("backends")
+    }
     /// Content-addressed model blobs: `models/blobs/sha256-<hex>`.
-    pub fn model_blobs(&self) -> PathBuf { self.root.join("models").join("blobs") }
+    pub fn model_blobs(&self) -> PathBuf {
+        self.root.join("models").join("blobs")
+    }
     /// One JSON manifest per cached model: `models/manifests/<id>.json`.
-    pub fn model_manifests(&self) -> PathBuf { self.root.join("models").join("manifests") }
+    pub fn model_manifests(&self) -> PathBuf {
+        self.root.join("models").join("manifests")
+    }
     /// In-progress downloads: `models/partial/<sha256>.part`.
-    pub fn partial(&self) -> PathBuf { self.root.join("models").join("partial") }
+    pub fn partial(&self) -> PathBuf {
+        self.root.join("models").join("partial")
+    }
     /// Execution records / evidence: `runs/<id>/`.
-    pub fn runs(&self) -> PathBuf { self.root.join("runs") }
+    pub fn runs(&self) -> PathBuf {
+        self.root.join("runs")
+    }
     /// Engine process logs.
-    pub fn logs(&self) -> PathBuf { self.root.join("logs") }
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
     /// Device identity, keys (M3).
-    pub fn identity(&self) -> PathBuf { self.root.join("identity") }
+    pub fn identity(&self) -> PathBuf {
+        self.root.join("identity")
+    }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
-        for d in [self.backends(), self.model_blobs(), self.model_manifests(), self.partial(), self.runs(), self.logs()] {
+        for d in [
+            self.backends(),
+            self.model_blobs(),
+            self.model_manifests(),
+            self.partial(),
+            self.runs(),
+            self.logs(),
+        ] {
             std::fs::create_dir_all(d)?;
         }
         Ok(())
@@ -57,7 +78,10 @@ fn default_root() -> PathBuf {
     if cfg!(target_os = "macos") {
         home().join("Library").join("Application Support").join("Common")
     } else if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(home).join("Common")
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(home)
+            .join("Common")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -71,7 +95,9 @@ pub fn safe_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 200
         && !name.starts_with('.')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && Path::new(name).components().count() == 1
 }
 

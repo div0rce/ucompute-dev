@@ -25,16 +25,25 @@ const PROMPT: &str = "Once upon a time, a little rabbit";
 /// Run every conformance check against `backend` using `req` (a small real GGUF).
 pub async fn run(backend: Arc<dyn InferenceBackend>, req: LoadRequest) -> Result<ConformanceReport> {
     let model = backend.load(req).await?;
-    let mut report = ConformanceReport { passed: vec![], failed: vec![] };
+    let mut report = ConformanceReport {
+        passed: vec![],
+        failed: vec![],
+    };
     let mut record = |name: &str, r: std::result::Result<(), String>| match r {
         Ok(()) => report.passed.push(name.into()),
         Err(e) => report.failed.push((name.into(), e)),
     };
     record("load_reports_proof_fields", load_reports_proof_fields(model.info()));
     record("greedy_is_deterministic", greedy_is_deterministic(&model).await);
-    record("streaming_delivers_before_done", streaming_delivers_before_done(&model).await);
+    record(
+        "streaming_delivers_before_done",
+        streaming_delivers_before_done(&model).await,
+    );
     record("cancellation_within_200ms", cancellation_within_200ms(&model).await);
-    record("tokenize_detokenize_roundtrip", tokenize_detokenize_roundtrip(&model).await);
+    record(
+        "tokenize_detokenize_roundtrip",
+        tokenize_detokenize_roundtrip(&model).await,
+    );
     record("usage_counts_match", usage_counts_match(&model).await);
     record("unload_terminates_process", unload_terminates_process(&model).await);
     Ok(report)
@@ -51,8 +60,14 @@ fn greedy(max_tokens: u32) -> GenerateRequest {
     }
 }
 
-async fn run_greedy(model: &Arc<dyn LoadedModel>, max_tokens: u32) -> std::result::Result<(String, Vec<u32>, Usage, Timings, String), String> {
-    let s = model.generate(greedy(max_tokens), CancellationToken::new()).await.map_err(|e| e.to_string())?;
+async fn run_greedy(
+    model: &Arc<dyn LoadedModel>,
+    max_tokens: u32,
+) -> std::result::Result<(String, Vec<u32>, Usage, Timings, String), String> {
+    let s = model
+        .generate(greedy(max_tokens), CancellationToken::new())
+        .await
+        .map_err(|e| e.to_string())?;
     collect(s).await.map_err(|e| e.to_string())
 }
 
@@ -82,7 +97,10 @@ async fn greedy_is_deterministic(model: &Arc<dyn LoadedModel>) -> std::result::R
 }
 
 async fn streaming_delivers_before_done(model: &Arc<dyn LoadedModel>) -> std::result::Result<(), String> {
-    let mut s = model.generate(greedy(32), CancellationToken::new()).await.map_err(|e| e.to_string())?;
+    let mut s = model
+        .generate(greedy(32), CancellationToken::new())
+        .await
+        .map_err(|e| e.to_string())?;
     let mut tokens_before_done = 0;
     while let Some(ev) = s.next().await {
         match ev.map_err(|e| e.to_string())? {
@@ -92,7 +110,9 @@ async fn streaming_delivers_before_done(model: &Arc<dyn LoadedModel>) -> std::re
         }
     }
     if tokens_before_done < 2 {
-        return Err(format!("only {tokens_before_done} Token events before Done; expected streaming"));
+        return Err(format!(
+            "only {tokens_before_done} Token events before Done; expected streaming"
+        ));
     }
     Ok(())
 }
@@ -102,7 +122,10 @@ async fn streaming_delivers_before_done(model: &Arc<dyn LoadedModel>) -> std::re
 /// engine slot proves the cancelled request released it).
 async fn cancellation_within_200ms(model: &Arc<dyn LoadedModel>) -> std::result::Result<(), String> {
     let cancel = CancellationToken::new();
-    let mut s = model.generate(greedy(128), cancel.clone()).await.map_err(|e| e.to_string())?;
+    let mut s = model
+        .generate(greedy(128), cancel.clone())
+        .await
+        .map_err(|e| e.to_string())?;
     match s.next().await {
         Some(Ok(GenerateEvent::Token { .. })) => {}
         other => return Err(format!("expected a first token, got {other:?}")),
@@ -122,11 +145,19 @@ async fn cancellation_within_200ms(model: &Arc<dyn LoadedModel>) -> std::result:
     if !saw_cancelled {
         return Err("stream ended without a Cancelled error item".into());
     }
-    let mut s2 = model.generate(greedy(1), CancellationToken::new()).await.map_err(|e| e.to_string())?;
+    let mut s2 = model
+        .generate(greedy(1), CancellationToken::new())
+        .await
+        .map_err(|e| e.to_string())?;
     let t2 = Instant::now();
     match tokio::time::timeout(Duration::from_millis(500), s2.next()).await {
         Ok(Some(Ok(GenerateEvent::Token { .. }))) => {}
-        other => return Err(format!("engine not free after cancel: first token of follow-up after {:?}: {other:?}", t2.elapsed())),
+        other => {
+            return Err(format!(
+                "engine not free after cancel: first token of follow-up after {:?}: {other:?}",
+                t2.elapsed()
+            ))
+        }
     }
     while s2.next().await.is_some() {}
     Ok(())
@@ -150,7 +181,10 @@ async fn usage_counts_match(model: &Arc<dyn LoadedModel>) -> std::result::Result
     // An EOS stop is counted by the engine but carries no text/id.
     let ok = usage.completion_tokens == n || (finish == "stop" && usage.completion_tokens == n + 1);
     if !ok {
-        return Err(format!("usage.completion_tokens = {} but {} token ids received (finish {finish})", usage.completion_tokens, n));
+        return Err(format!(
+            "usage.completion_tokens = {} but {} token ids received (finish {finish})",
+            usage.completion_tokens, n
+        ));
     }
     if usage.prompt_tokens == 0 {
         return Err("usage.prompt_tokens is 0".into());

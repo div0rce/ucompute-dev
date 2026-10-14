@@ -3,13 +3,13 @@
 //! Everything here is dependency-light on purpose: every other crate depends on it.
 
 pub mod error;
-pub mod paths;
 pub mod manifest;
+pub mod paths;
 pub mod timeout;
 
 pub use error::{CommonError, ErrorCode, Result};
-pub use paths::Paths;
 pub use manifest::{ExecutionManifest, HostSummary};
+pub use paths::Paths;
 pub use timeout::Timeouts;
 
 /// Semantic version of the Common software, taken from the workspace.

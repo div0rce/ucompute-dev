@@ -39,7 +39,11 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { max_attempts: 4, initial: Duration::from_millis(250), max: Duration::from_secs(8) }
+        Self {
+            max_attempts: 4,
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(8),
+        }
     }
 }
 

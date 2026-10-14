@@ -18,7 +18,8 @@ common-artifacts = { workspace = true }
 common-runtime = { workspace = true }
 common-api = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true }
+# io-std: tokio::io::stdin for the chat REPL so Ctrl-C can be selected against the read.
+tokio = { workspace = true, features = ["io-std"] }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
@@ -28,3 +29,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# SIGPIPE -> SIG_DFL so `common models list | head` exits quietly instead of panicking (unix only).
+libc = "0.2.190"

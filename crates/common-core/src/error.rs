@@ -132,25 +132,76 @@ impl ErrorCode {
     /// Plain-language explanation and suggested next step for people, not developers (F-10-06).
     pub fn user_message(self) -> (&'static str, &'static str) {
         match self {
-            ErrorCode::InvalidRequest => ("The request was not understood.", "Check the prompt and settings, then try again."),
-            ErrorCode::ModelNotFound => ("That model is not in Common's catalog.", "Pick a model from the library or import a GGUF file."),
-            ErrorCode::ModelNotDownloaded => ("This model has not been downloaded yet.", "Download it from the model library, then run it."),
-            ErrorCode::ModelFileInvalid => ("This model file is damaged or is not a GGUF file.", "Delete it and download the model again."),
-            ErrorCode::IntegrityMismatch => ("The downloaded file does not match its published checksum.", "Common deleted the file. Download it again; if this repeats, the source may be compromised."),
-            ErrorCode::InsufficientMemory => ("This model needs more memory than your computer has available.", "Choose a smaller model or quantization, lower the context length, or close other apps."),
-            ErrorCode::ContextTooLong => ("The prompt is longer than this model can read at once.", "Shorten the prompt or choose a model with a larger context window."),
-            ErrorCode::BackendUnavailable => ("The inference engine is not installed or failed verification.", "Run Common's setup to download the pinned engine."),
-            ErrorCode::BackendFailed => ("The inference engine stopped unexpectedly.", "Try again. If it keeps failing, open Diagnostics and share the log."),
-            ErrorCode::GpuUnavailable => ("Your GPU could not be used for this model.", "Common can run it on the CPU instead, which will be slower."),
-            ErrorCode::Timeout => ("The model took too long to respond.", "Try a shorter prompt or a smaller model."),
+            ErrorCode::InvalidRequest => (
+                "The request was not understood.",
+                "Check the prompt and settings, then try again.",
+            ),
+            ErrorCode::ModelNotFound => (
+                "That model is not in Common's catalog.",
+                "Pick a model from the library or import a GGUF file.",
+            ),
+            ErrorCode::ModelNotDownloaded => (
+                "This model has not been downloaded yet.",
+                "Download it from the model library, then run it.",
+            ),
+            ErrorCode::ModelFileInvalid => (
+                "This model file is damaged or is not a GGUF file.",
+                "Delete it and download the model again.",
+            ),
+            ErrorCode::IntegrityMismatch => (
+                "The downloaded file does not match its published checksum.",
+                "Common deleted the file. Download it again; if this repeats, the source may be compromised.",
+            ),
+            ErrorCode::InsufficientMemory => (
+                "This model needs more memory than your computer has available.",
+                "Choose a smaller model or quantization, lower the context length, or close other apps.",
+            ),
+            ErrorCode::ContextTooLong => (
+                "The prompt is longer than this model can read at once.",
+                "Shorten the prompt or choose a model with a larger context window.",
+            ),
+            ErrorCode::BackendUnavailable => (
+                "The inference engine is not installed or failed verification.",
+                "Run Common's setup to download the pinned engine.",
+            ),
+            ErrorCode::BackendFailed => (
+                "The inference engine stopped unexpectedly.",
+                "Try again. If it keeps failing, open Diagnostics and share the log.",
+            ),
+            ErrorCode::GpuUnavailable => (
+                "Your GPU could not be used for this model.",
+                "Common can run it on the CPU instead, which will be slower.",
+            ),
+            ErrorCode::Timeout => (
+                "The model took too long to respond.",
+                "Try a shorter prompt or a smaller model.",
+            ),
             ErrorCode::Cancelled => ("The request was stopped.", "Nothing further is needed."),
             ErrorCode::Overloaded => ("Common is busy with other requests.", "Wait a moment and try again."),
-            ErrorCode::DownloadFailed => ("The download did not complete.", "Check your internet connection and try again; downloads resume where they stopped."),
-            ErrorCode::NotImplemented => ("This feature is not available yet.", "Check the roadmap in the documentation."),
-            ErrorCode::PolicyDenied => ("Your settings do not allow this action.", "Review Privacy and Network settings."),
-            ErrorCode::Unauthorized => ("This computer is not authorized to use the API.", "Provide the API key configured on the server."),
-            ErrorCode::Io => ("Common could not read or write a file.", "Check disk space and permissions."),
-            ErrorCode::Internal => ("Something went wrong inside Common.", "Try again. If it keeps failing, open Diagnostics and share the log."),
+            ErrorCode::DownloadFailed => (
+                "The download did not complete.",
+                "Check your internet connection and try again; downloads resume where they stopped.",
+            ),
+            ErrorCode::NotImplemented => (
+                "This feature is not available yet.",
+                "Check the roadmap in the documentation.",
+            ),
+            ErrorCode::PolicyDenied => (
+                "Your settings do not allow this action.",
+                "Review Privacy and Network settings.",
+            ),
+            ErrorCode::Unauthorized => (
+                "This computer is not authorized to use the API.",
+                "Provide the API key configured on the server.",
+            ),
+            ErrorCode::Io => (
+                "Common could not read or write a file.",
+                "Check disk space and permissions.",
+            ),
+            ErrorCode::Internal => (
+                "Something went wrong inside Common.",
+                "Try again. If it keeps failing, open Diagnostics and share the log.",
+            ),
         }
     }
 }
@@ -175,16 +226,28 @@ pub struct CommonError {
 
 impl CommonError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), hint: None }
+        Self {
+            code,
+            message: message.into(),
+            hint: None,
+        }
     }
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
     }
-    pub fn invalid(msg: impl Into<String>) -> Self { Self::new(ErrorCode::InvalidRequest, msg) }
-    pub fn internal(msg: impl Into<String>) -> Self { Self::new(ErrorCode::Internal, msg) }
-    pub fn io(msg: impl Into<String>) -> Self { Self::new(ErrorCode::Io, msg) }
-    pub fn http_status(&self) -> u16 { self.code.http_status() }
+    pub fn invalid(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidRequest, msg)
+    }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Internal, msg)
+    }
+    pub fn io(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Io, msg)
+    }
+    pub fn http_status(&self) -> u16 {
+        self.code.http_status()
+    }
 
     /// OpenAI-compatible JSON body: `{"error":{"message","type","code","param":null}}`.
     pub fn to_openai_json(&self) -> serde_json::Value {

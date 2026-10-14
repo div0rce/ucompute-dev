@@ -8,7 +8,7 @@ pub mod quant;
 
 pub use feasibility::{check_fit, estimate, FitVerdict, MemoryEstimate};
 pub use gguf::{parse_metadata, read_metadata, GgufMetadata, GgufValue, QuantType, TensorInfo};
-pub use planning::{check_prompt_fits, plan_context, ContextPlan, KvType};
+pub use planning::{plan_context, ContextPlan, KvType};
 pub use quant::{recommend, QuantCandidate, Recommendation};
 
 /// Human-readable decimal size for messages: `"19.1 MB"`, `"5.2 GB"`, `"512 B"`.

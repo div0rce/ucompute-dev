@@ -39,7 +39,9 @@ pub struct ModelEntry {
     pub tags: Vec<String>,
 }
 
-fn unknown() -> String { "unknown".into() }
+fn unknown() -> String {
+    "unknown".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Catalog {
@@ -56,11 +58,18 @@ impl Catalog {
     }
     pub fn search(&self, query: &str) -> Vec<&ModelEntry> {
         let q = query.to_lowercase();
-        self.models.iter().filter(|m| {
-            m.id.to_lowercase().contains(&q) || m.name.to_lowercase().contains(&q)
-                || m.family.as_deref().map(|f| f.to_lowercase().contains(&q)).unwrap_or(false)
-                || m.tags.iter().any(|t| t.to_lowercase().contains(&q))
-        }).collect()
+        self.models
+            .iter()
+            .filter(|m| {
+                m.id.to_lowercase().contains(&q)
+                    || m.name.to_lowercase().contains(&q)
+                    || m.family
+                        .as_deref()
+                        .map(|f| f.to_lowercase().contains(&q))
+                        .unwrap_or(false)
+                    || m.tags.iter().any(|t| t.to_lowercase().contains(&q))
+            })
+            .collect()
     }
 }
 
@@ -86,13 +95,24 @@ mod tests {
             assert!(!m.url.contains("/main/"), "{}: url must pin a revision", m.id);
             assert!(is_sha256_hex(&m.sha256), "{}: sha256", m.id);
             assert!(m.bytes > 0, "{}: bytes", m.id);
-            assert!(!m.license.is_empty() && !m.name.is_empty() && !m.source.is_empty(), "{}", m.id);
-            assert!(["allowed", "disallowed", "unknown"].contains(&m.redistribution.as_str()), "{}: redistribution", m.id);
+            assert!(
+                !m.license.is_empty() && !m.name.is_empty() && !m.source.is_empty(),
+                "{}",
+                m.id
+            );
+            assert!(
+                ["allowed", "disallowed", "unknown"].contains(&m.redistribution.as_str()),
+                "{}: redistribution",
+                m.id
+            );
         }
         assert_eq!(c.get("stories15M-q4_0").unwrap().quantization.as_deref(), Some("Q4_0"));
         assert!(c.get("missing").is_none());
         assert!(c.search("qwen").len() >= 4);
-        assert!(c.search("EMBEDDING").iter().any(|m| m.id == "nomic-embed-text-v1.5-q8_0"));
+        assert!(c
+            .search("EMBEDDING")
+            .iter()
+            .any(|m| m.id == "nomic-embed-text-v1.5-q8_0"));
         assert!(c.search("fixture").iter().any(|m| m.id == "stories260K"));
     }
 
@@ -128,9 +148,17 @@ mod tests {
             assert_eq!(m.file_name, e.file_name, "{}: file_name", m.id);
             assert_eq!(m.license, e.license, "{}: license", m.id);
             assert!(store.blob_path(&m.sha256).is_file(), "{}: blob", m.id);
-            assert_eq!(std::fs::metadata(store.blob_path(&m.sha256)).unwrap().len(), e.bytes, "{}: blob size", m.id);
+            assert_eq!(
+                std::fs::metadata(store.blob_path(&m.sha256)).unwrap().len(),
+                e.bytes,
+                "{}: blob size",
+                m.id
+            );
             checked += 1;
         }
-        eprintln!("cross-checked {checked} of {} manifests against the catalog", manifests.len());
+        eprintln!(
+            "cross-checked {checked} of {} manifests against the catalog",
+            manifests.len()
+        );
     }
 }

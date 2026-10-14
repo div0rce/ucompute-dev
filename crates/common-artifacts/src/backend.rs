@@ -31,10 +31,15 @@ pub struct BackendPin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BackendPins { pub schema_version: u32, pub backends: Vec<BackendPin> }
+pub struct BackendPins {
+    pub schema_version: u32,
+    pub backends: Vec<BackendPin>,
+}
 
 impl BackendPins {
-    pub fn builtin() -> Result<Self> { Ok(serde_json::from_str(BACKENDS_JSON)?) }
+    pub fn builtin() -> Result<Self> {
+        Ok(serde_json::from_str(BACKENDS_JSON)?)
+    }
     /// The pin for this OS/arch, if one exists.
     pub fn for_current_platform(&self, name: &str) -> Option<&BackendPin> {
         let plat = current_platform();
@@ -43,8 +48,17 @@ impl BackendPins {
 }
 
 pub fn current_platform() -> String {
-    let os = match std::env::consts::OS { "macos" => "macos", "linux" => "linux", "windows" => "win", o => o };
-    let arch = match std::env::consts::ARCH { "aarch64" => "arm64", "x86_64" => "x64", a => a };
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "win",
+        o => o,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        a => a,
+    };
     format!("{os}-{arch}")
 }
 
@@ -87,12 +101,14 @@ pub fn verify_backend(paths: &Paths, pin: &BackendPin) -> Result<PathBuf> {
     check_pin(pin)?;
     let archive = archive_path(paths, pin);
     if !archive.is_file() {
-        return Err(unavailable(format!("backend archive {} is missing", pin.archive)).with_hint("run `common setup` to download the pinned engine"));
+        return Err(unavailable(format!("backend archive {} is missing", pin.archive))
+            .with_hint("run `common setup` to download the pinned engine"));
     }
     verify_archive(&archive, pin)?;
     let dir = backend_dir(paths, pin);
     if !dir.is_dir() {
-        return Err(unavailable(format!("backend directory {} is missing", dir.display())).with_hint("run `common setup` to extract the pinned engine"));
+        return Err(unavailable(format!("backend directory {} is missing", dir.display()))
+            .with_hint("run `common setup` to extract the pinned engine"));
     }
     verify_tree(&archive, pin, &dir)?;
     Ok(dir)
@@ -100,20 +116,31 @@ pub fn verify_backend(paths: &Paths, pin: &BackendPin) -> Result<PathBuf> {
 
 /// Path of a named binary inside a backend dir (adds `.exe` on Windows).
 pub fn binary(dir: &Path, name: &str) -> PathBuf {
-    if cfg!(windows) { dir.join(format!("{name}.exe")) } else { dir.join(name) }
+    if cfg!(windows) {
+        dir.join(format!("{name}.exe"))
+    } else {
+        dir.join(name)
+    }
 }
 
-fn unavailable(msg: String) -> CommonError { CommonError::new(ErrorCode::BackendUnavailable, msg) }
+fn unavailable(msg: String) -> CommonError {
+    CommonError::new(ErrorCode::BackendUnavailable, msg)
+}
 
 /// Pin fields become path components, so they must be safe names.
 fn check_pin(pin: &BackendPin) -> Result<()> {
     for s in [&pin.name, &pin.release, &pin.archive, &pin.directory] {
         if !safe_name(s) {
-            return Err(CommonError::invalid(format!("backend pin field {s:?} is not a safe name")));
+            return Err(CommonError::invalid(format!(
+                "backend pin field {s:?} is not a safe name"
+            )));
         }
     }
     if !is_sha256_hex(&pin.sha256) {
-        return Err(CommonError::invalid(format!("backend pin {} has a malformed sha256", pin.name)));
+        return Err(CommonError::invalid(format!(
+            "backend pin {} has a malformed sha256",
+            pin.name
+        )));
     }
     Ok(())
 }
@@ -125,7 +152,10 @@ fn verify_archive(archive: &Path, pin: &BackendPin) -> Result<()> {
         std::fs::remove_file(archive)?;
         return Err(CommonError::new(
             ErrorCode::IntegrityMismatch,
-            format!("backend archive {} hashed to {actual}, expected {}; deleted", pin.archive, pin.sha256),
+            format!(
+                "backend archive {} hashed to {actual}, expected {}; deleted",
+                pin.archive, pin.sha256
+            ),
         ));
     }
     Ok(())
@@ -135,7 +165,9 @@ type Tar = tar::Archive<flate2::read::GzDecoder<std::io::BufReader<std::fs::File
 
 fn open_archive(archive: &Path) -> Result<Tar> {
     let f = std::fs::File::open(archive)?;
-    Ok(tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(f))))
+    Ok(tar::Archive::new(flate2::read::GzDecoder::new(
+        std::io::BufReader::new(f),
+    )))
 }
 
 /// Entry path relative to `directory` (empty for the directory entry itself). Every entry must be
@@ -161,7 +193,11 @@ fn rel_path(p: &Path, directory: &str) -> Result<PathBuf> {
 fn check_link(rel: &Path, link: &Path) -> Result<()> {
     let mut depth: Vec<&std::ffi::OsStr> = rel
         .parent()
-        .map(|p| p.components().filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None }).collect())
+        .map(|p| {
+            p.components()
+                .filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None })
+                .collect()
+        })
         .unwrap_or_default();
     for c in link.components() {
         match c {
@@ -169,7 +205,10 @@ fn check_link(rel: &Path, link: &Path) -> Result<()> {
             Component::CurDir => {}
             Component::ParentDir => {
                 if depth.pop().is_none() {
-                    return Err(unavailable(format!("symlink {} escapes the backend directory", rel.display())));
+                    return Err(unavailable(format!(
+                        "symlink {} escapes the backend directory",
+                        rel.display()
+                    )));
                 }
             }
             Component::RootDir | Component::Prefix(_) => {
@@ -183,7 +222,9 @@ fn check_link(rel: &Path, link: &Path) -> Result<()> {
 /// Extract into a fresh temp dir next to `dir`, then rename it to `dir`. Any rejected entry
 /// aborts the whole extraction and the temp dir is removed, so nothing partial ever lands.
 fn extract(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
-    let parent = dir.parent().ok_or_else(|| CommonError::internal("backend directory has no parent"))?;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| CommonError::internal("backend directory has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let tmp = tempfile::Builder::new().prefix(".extract-").tempdir_in(parent)?;
     let root = tmp.path();
@@ -207,14 +248,21 @@ fn extract(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
             std::io::copy(&mut entry, &mut f)?;
             set_mode(&target, entry.header().mode()?)?;
         } else if ty.is_symlink() {
-            let link = entry.link_name()?.ok_or_else(|| unavailable(format!("symlink {} has no target", rel.display())))?.into_owned();
+            let link = entry
+                .link_name()?
+                .ok_or_else(|| unavailable(format!("symlink {} has no target", rel.display())))?
+                .into_owned();
             check_link(&rel, &link)?;
             if let Some(p) = target.parent() {
                 std::fs::create_dir_all(p)?;
             }
             symlink(&link, &target)?;
         } else {
-            return Err(unavailable(format!("archive entry {} has unsupported type {:?}", rel.display(), ty)));
+            return Err(unavailable(format!(
+                "archive entry {} has unsupported type {:?}",
+                rel.display(),
+                ty
+            )));
         }
     }
     std::fs::rename(root, dir)?;
@@ -234,7 +282,8 @@ fn verify_tree(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
         }
         let rel = rel_path(&entry.path()?, &pin.directory)?;
         let on_disk = dir.join(&rel);
-        let meta = std::fs::symlink_metadata(&on_disk).map_err(|_| unavailable(format!("{} is missing from {}", rel.display(), dir.display())))?;
+        let meta = std::fs::symlink_metadata(&on_disk)
+            .map_err(|_| unavailable(format!("{} is missing from {}", rel.display(), dir.display())))?;
         if ty.is_dir() {
             if !meta.is_dir() {
                 return Err(unavailable(format!("{} should be a directory", rel.display())));
@@ -248,16 +297,27 @@ fn verify_tree(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
             }
             let expected = sha256_reader(&mut entry)?;
             if expected != sha256_file(&on_disk)? {
-                return Err(unavailable(format!("{} does not match the pinned archive", rel.display())));
+                return Err(unavailable(format!(
+                    "{} does not match the pinned archive",
+                    rel.display()
+                )));
             }
         } else if ty.is_symlink() {
             let want = entry.link_name()?.map(|l| l.into_owned()).unwrap_or_default();
-            let got = std::fs::read_link(&on_disk).map_err(|_| unavailable(format!("{} should be a symlink", rel.display())))?;
+            let got = std::fs::read_link(&on_disk)
+                .map_err(|_| unavailable(format!("{} should be a symlink", rel.display())))?;
             if got != want {
-                return Err(unavailable(format!("symlink {} points to the wrong target", rel.display())));
+                return Err(unavailable(format!(
+                    "symlink {} points to the wrong target",
+                    rel.display()
+                )));
             }
         } else {
-            return Err(unavailable(format!("archive entry {} has unsupported type {:?}", rel.display(), ty)));
+            return Err(unavailable(format!(
+                "archive entry {} has unsupported type {:?}",
+                rel.display(),
+                ty
+            )));
         }
     }
     Ok(())
@@ -274,16 +334,24 @@ fn is_executable(m: &std::fs::Metadata) -> bool {
     m.permissions().mode() & 0o100 != 0
 }
 #[cfg(unix)]
-fn symlink(link: &Path, at: &Path) -> std::io::Result<()> { std::os::unix::fs::symlink(link, at) }
+fn symlink(link: &Path, at: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(link, at)
+}
 
 // ponytail: Windows ships .zip releases and needs privileges for symlinks; add a zip path when B-004 lands.
 #[cfg(not(unix))]
-fn set_mode(_: &Path, _: u32) -> std::io::Result<()> { Ok(()) }
+fn set_mode(_: &Path, _: u32) -> std::io::Result<()> {
+    Ok(())
+}
 #[cfg(not(unix))]
-fn is_executable(_: &std::fs::Metadata) -> bool { true }
+fn is_executable(_: &std::fs::Metadata) -> bool {
+    true
+}
 #[cfg(not(unix))]
 fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("symlinks in backend archives are not supported on this platform"))
+    Err(std::io::Error::other(
+        "symlinks in backend archives are not supported on this platform",
+    ))
 }
 
 #[cfg(test)]
@@ -303,7 +371,12 @@ mod tests {
     }
 
     fn llama_pin() -> BackendPin {
-        BackendPins::builtin().unwrap().backends.into_iter().find(|b| b.name == "llama.cpp" && b.platform == "macos-arm64").unwrap()
+        BackendPins::builtin()
+            .unwrap()
+            .backends
+            .into_iter()
+            .find(|b| b.name == "llama.cpp" && b.platform == "macos-arm64")
+            .unwrap()
     }
 
     /// Raw ustar header: `Builder::append` writes it verbatim, so `..`/absolute names get through.
@@ -322,7 +395,8 @@ mod tests {
         let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         let mut b = tar::Builder::new(enc);
         for (name, ty, link, data, mode) in entries {
-            b.append(&raw_header(name, *ty, link, data.len() as u64, *mode), *data).unwrap();
+            b.append(&raw_header(name, *ty, link, data.len() as u64, *mode), *data)
+                .unwrap();
         }
         b.into_inner().unwrap().finish().unwrap()
     }
@@ -353,7 +427,10 @@ mod tests {
     }
 
     fn only_archive_left(paths: &Paths, pin: &BackendPin) -> bool {
-        let names: Vec<_> = std::fs::read_dir(paths.backends().join(&pin.name)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let names: Vec<_> = std::fs::read_dir(paths.backends().join(&pin.name))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         names.len() == 1 && names[0] == pin.archive.as_str()
     }
 
@@ -371,7 +448,14 @@ mod tests {
             assert!(pins.for_current_platform("llama.cpp").is_some());
         }
         assert!(pins.for_current_platform("nope").is_none());
-        assert_eq!(binary(Path::new("/b"), "llama-server"), PathBuf::from(if cfg!(windows) { "/b/llama-server.exe" } else { "/b/llama-server" }));
+        assert_eq!(
+            binary(Path::new("/b"), "llama-server"),
+            PathBuf::from(if cfg!(windows) {
+                "/b/llama-server.exe"
+            } else {
+                "/b/llama-server"
+            })
+        );
     }
 
     #[test]
@@ -379,7 +463,11 @@ mod tests {
         assert_eq!(rel_path(Path::new("pkg"), "pkg").unwrap(), PathBuf::new());
         assert_eq!(rel_path(Path::new("./pkg/a/b"), "pkg").unwrap(), PathBuf::from("a/b"));
         for bad in ["../escape", "/absolute", "pkg/../x", "other/x", "", ".", "/pkg/x"] {
-            assert_eq!(rel_path(Path::new(bad), "pkg").unwrap_err().code, ErrorCode::BackendUnavailable, "{bad}");
+            assert_eq!(
+                rel_path(Path::new(bad), "pkg").unwrap_err().code,
+                ErrorCode::BackendUnavailable,
+                "{bad}"
+            );
         }
     }
 
@@ -388,8 +476,17 @@ mod tests {
         check_link(Path::new("lib.dylib"), Path::new("lib.1.dylib")).unwrap();
         check_link(Path::new("a/b/link"), Path::new("../../x")).unwrap();
         check_link(Path::new("a/link"), Path::new("./c/../d")).unwrap();
-        for (rel, link) in [("link", "../../escape"), ("a/link", "../../escape"), ("link", "/etc/passwd"), ("link", "..")] {
-            assert_eq!(check_link(Path::new(rel), Path::new(link)).unwrap_err().code, ErrorCode::BackendUnavailable, "{rel} -> {link}");
+        for (rel, link) in [
+            ("link", "../../escape"),
+            ("a/link", "../../escape"),
+            ("link", "/etc/passwd"),
+            ("link", ".."),
+        ] {
+            assert_eq!(
+                check_link(Path::new(rel), Path::new(link)).unwrap_err().code,
+                ErrorCode::BackendUnavailable,
+                "{rel} -> {link}"
+            );
         }
     }
 
@@ -413,10 +510,16 @@ mod tests {
             let (d, paths, pin) = home_with(&archive);
             let err = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err();
             assert_eq!(err.code, ErrorCode::BackendUnavailable, "{name}: {err}");
-            assert!(!backend_dir(&paths, &pin).exists(), "{name}: backend dir must not exist");
+            assert!(
+                !backend_dir(&paths, &pin).exists(),
+                "{name}: backend dir must not exist"
+            );
             assert!(only_archive_left(&paths, &pin), "{name}: temp dir must be cleaned up");
             assert!(!d.path().join("escape").exists() && !Path::new("/absolute").exists());
-            assert_eq!(verify_backend(&paths, &pin).unwrap_err().code, ErrorCode::BackendUnavailable);
+            assert_eq!(
+                verify_backend(&paths, &pin).unwrap_err().code,
+                ErrorCode::BackendUnavailable
+            );
         }
     }
 
@@ -440,7 +543,11 @@ mod tests {
         assert!(is_executable(&std::fs::metadata(dir.join("lib.1.dylib")).unwrap()));
         assert!(!is_executable(&std::fs::metadata(dir.join("README")).unwrap()));
         assert_eq!(verify_backend(&paths, &pin).unwrap(), dir);
-        assert_eq!(ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap(), dir, "idempotent");
+        assert_eq!(
+            ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap(),
+            dir,
+            "idempotent"
+        );
 
         // tamper with a file
         std::fs::write(dir.join("README"), b"read mE").unwrap();
@@ -454,7 +561,10 @@ mod tests {
         std::fs::remove_file(dir.join("lib.dylib")).unwrap();
         std::os::unix::fs::symlink("README", dir.join("lib.dylib")).unwrap();
         let err = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err();
-        assert!(err.code == ErrorCode::BackendUnavailable && err.message.contains("lib.dylib"), "{err}");
+        assert!(
+            err.code == ErrorCode::BackendUnavailable && err.message.contains("lib.dylib"),
+            "{err}"
+        );
         std::fs::remove_file(dir.join("lib.dylib")).unwrap();
         std::os::unix::fs::symlink("lib.1.dylib", dir.join("lib.dylib")).unwrap();
         verify_backend(&paths, &pin).unwrap();
@@ -468,9 +578,15 @@ mod tests {
         let mut bytes = std::fs::read(&ap).unwrap();
         bytes[10] ^= 0xff;
         std::fs::write(&ap, bytes).unwrap();
-        assert_eq!(verify_backend(&paths, &pin).unwrap_err().code, ErrorCode::IntegrityMismatch);
+        assert_eq!(
+            verify_backend(&paths, &pin).unwrap_err().code,
+            ErrorCode::IntegrityMismatch
+        );
         assert!(!ap.exists());
-        assert_eq!(verify_backend(&paths, &pin).unwrap_err().code, ErrorCode::BackendUnavailable);
+        assert_eq!(
+            verify_backend(&paths, &pin).unwrap_err().code,
+            ErrorCode::BackendUnavailable
+        );
     }
 
     #[tokio::test]
@@ -479,14 +595,26 @@ mod tests {
         let paths = Paths::at(d.path());
         let mut pin = pin_for(b"x");
         pin.url = "http://example.invalid/x.tar.gz".into();
-        assert_eq!(ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err().code, ErrorCode::PolicyDenied);
-        assert_eq!(verify_backend(&paths, &pin).unwrap_err().code, ErrorCode::BackendUnavailable);
+        assert_eq!(
+            ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err().code,
+            ErrorCode::PolicyDenied
+        );
+        assert_eq!(
+            verify_backend(&paths, &pin).unwrap_err().code,
+            ErrorCode::BackendUnavailable
+        );
         let mut pin = pin_for(b"x");
         pin.release = "../r".into();
-        assert_eq!(verify_backend(&paths, &pin).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            verify_backend(&paths, &pin).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
         let mut pin = pin_for(b"x");
         pin.sha256 = "zz".into();
-        assert_eq!(ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     /// Against the real pinned llama.cpp b11609 archive + directory in COMMON_HOME (skips if absent).
@@ -527,10 +655,19 @@ mod tests {
         let dir = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap();
         assert!(binary(&dir, "llama-server").is_file());
         assert!(is_executable(&std::fs::metadata(binary(&dir, "llama-server")).unwrap()));
-        assert!(std::fs::symlink_metadata(dir.join("libllama.dylib")).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(dir.join("libllama.dylib")).unwrap(), PathBuf::from("libllama.0.dylib"));
+        assert!(std::fs::symlink_metadata(dir.join("libllama.dylib"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(dir.join("libllama.dylib")).unwrap(),
+            PathBuf::from("libllama.0.dylib")
+        );
         assert_eq!(verify_backend(&paths, &pin).unwrap(), dir);
-        let leftovers: Vec<_> = std::fs::read_dir(paths.backends().join(&pin.name)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let leftovers: Vec<_> = std::fs::read_dir(paths.backends().join(&pin.name))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         assert_eq!(leftovers.len(), 2, "{leftovers:?}");
     }
 }
