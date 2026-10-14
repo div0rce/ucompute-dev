@@ -13,8 +13,20 @@ Read this first, every session, whichever agent you are (Claude, Codex, other). 
 python3 scripts/validate_registry.py          # must pass
 cat docs/PROGRESS.md docs/BLOCKERS.md         # where we are, what is stuck
 git status && git log --oneline -10
-# then run the project test suite (see README)
+scripts/fetch-fixtures.sh                     # pinned llama.cpp engine + tiny fixtures into ./.common (idempotent)
+COMMON_HOME=$PWD/.common cargo test           # unit + real-inference tests (daemon crates; desktop is built separately)
+cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 ```
+
+## Code map (M1)
+- `crates/common-core` — stable error codes (F-08-03), `COMMON_HOME` layout, execution manifest (X-15), timeouts.
+- `crates/common-hardware` — `probe()` (F-01-01). `crates/common-models` — GGUF reader, memory/context/quant planning.
+- `crates/common-artifacts` — catalog (`catalog/models.json`), content-addressed store, verified resumable downloads, pinned engine provisioning (`catalog/backends.json`).
+- `crates/common-runtime` — `InferenceBackend` trait, llama.cpp adapter = supervised pinned `llama-server` on 127.0.0.1 (ADR-0002), `ModelManager`, conformance suite.
+- `crates/common-api` — axum OpenAI-compatible API on 127.0.0.1:8192 (+ `/api/*`, `/metrics`, `/openapi.json`). `crates/common-cli` — the `common` binary.
+- `apps/desktop` — Tauri 2 + React shell over the API; bundles `common` as a sidecar.
+- `.recovery/codex-m1/` (ignored) and `refs/recovered/codex-m1/*` — the earlier Python slice, kept as correctness oracle.
+- Architecture decisions: ADR-0002 (engine), ADR-0003 (peer transport, proposed). Threat model: `docs/security/THREAT_MODEL.md`.
 
 ## Session end (spec section 16 step 8)
 1. Build, lint, test. Record commands and results in `docs/VERIFICATION.md`.
@@ -39,5 +51,6 @@ git status && git log --oneline -10
 - Preserve existing code; inspect before editing.
 
 ## Environment
-- Primary dev host: owner's Apple Silicon MacBook. Run `scripts/inspect-env.sh` to (re)record `docs/environment/`.
+- Primary dev host: owner's MacBook Air (Apple M2, 8 GB unified memory, 10-core GPU, macOS 26.2). Run `scripts/inspect-env.sh` to (re)record `docs/environment/`. Disk is tight (B-010); the owner authorized deleting caches when needed.
+- Test assets live in `COMMON_HOME` (default `./.common`, git-ignored): `backends/llama.cpp/b11609/`, `models/blobs/sha256-*`, `models/manifests/*.json`.
 - Only one physical machine is currently available (see `docs/BLOCKERS.md`).
