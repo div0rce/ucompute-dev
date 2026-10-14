@@ -1,0 +1,25 @@
+[package]
+name = "common-runtime"
+description = "Inference backend adapters (F-01-06): llama.cpp via a supervised pinned llama-server process (ADR-0002)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+common-core = { workspace = true }
+common-models = { workspace = true }
+common-artifacts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

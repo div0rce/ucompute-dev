@@ -1,0 +1,25 @@
+[package]
+name = "common-integration-tests"
+description = "End-to-end tests that run the real pinned engine on real GGUF fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+common-core = { workspace = true }
+common-hardware = { workspace = true }
+common-models = { workspace = true }
+common-artifacts = { workspace = true }
+common-runtime = { workspace = true }
+common-api = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }

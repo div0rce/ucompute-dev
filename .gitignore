@@ -14,3 +14,12 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Rust
+/target/
+
+# Local data dir when COMMON_HOME points into the repo
+/.common/
+
+# Node
+node_modules/

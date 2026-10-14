@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "stories15M-q4_0",
+      "name": "TinyStories 15M (Q4_0) — test fixture",
+      "file_name": "stories15M-q4_0.gguf",
+      "url": "https://huggingface.co/ggml-org/models-moved/resolve/499bc8821c6b12b4e53c5bffcb21ec206f212d81/tinyllamas/stories15M-q4_0.gguf",
+      "sha256": "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739",
+      "bytes": 19077344,
+      "license": "unknown",
+      "license_url": "https://huggingface.co/ggml-org/models-moved",
+      "source": "ggml-org/models-moved (llama.cpp CI fixtures); weights from llama2.c TinyStories",
+      "family": "tinyllamas",
+      "parameters": "15M",
+      "quantization": "Q4_0",
+      "chat": false,
+      "redistribution": "unknown",
+      "notes": "128-token trained context. Proves execution only; not a general assistant. Upstream card: CI/demo use.",
+      "tags": ["fixture"]
+    }
+  ]
+}

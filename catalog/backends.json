@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "backends": [
+    {
+      "name": "llama.cpp",
+      "release": "b11609",
+      "source_commit": "fcac19079",
+      "platform": "macos-arm64",
+      "archive": "llama-b11609-bin-macos-arm64.tar.gz",
+      "directory": "llama-b11609",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-macos-arm64.tar.gz",
+      "sha256": "d03f28b5a5baa9cdfbb01db5ed22c695126c11c193326f14cdc51d001be10f4e",
+      "bytes": 12117158,
+      "license": "MIT"
+    }
+  ]
+}

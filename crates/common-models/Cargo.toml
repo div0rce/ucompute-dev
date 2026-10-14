@@ -1,0 +1,16 @@
+[package]
+name = "common-models"
+description = "GGUF metadata parsing, memory feasibility, context/KV planning, quantization recommendation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+common-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
