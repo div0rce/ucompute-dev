@@ -4,14 +4,15 @@ import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { refreshStatus } from "../daemon";
-import { chatHistory, daemon, lastError, runs } from "../state/stores";
-import { installFakeDaemon, LOADED } from "./mocks";
+import { chatHistory, daemon, lastError, privacy, runs } from "../state/stores";
+import { installFakeDaemon, LOADED, NETWORK, PEER, PRIVACY, STRANGER } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
   chatHistory.set({ messages: [] });
   runs.set([]);
   lastError.set(null);
+  privacy.set(null);
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -34,12 +35,21 @@ const VIEWS: [string, string, () => Promise<unknown>][] = [
   ["performance", "Performance", () => screen.findByText(/common_tokens_generated_total/)],
   ["settings", "Settings", () => screen.findByLabelText("Context length")],
   ["diagnostics", "Diagnostics", () => screen.findByText("insufficient_memory")],
-  ["peers", "Peers", () => screen.findByText(/Not available yet/)],
+  // Peers with networking on, a paired device, a group, a stranger nearby and a pairing code showing.
+  ["peers", "Peers", () => screen.findByRole("group", { name: "Pairing code" })],
+  // Privacy in trusted-devices mode with the disclosure open (the acknowledge checkbox visible).
+  ["privacy", "Privacy", () => screen.findByRole("checkbox", { name: /I understand/ })],
 ];
 
 describe("axe accessibility scan", () => {
   it.each(VIEWS)("#/%s has no serious or critical violations", async (route, title, ready) => {
-    const fake = installFakeDaemon();
+    const fake = installFakeDaemon({
+      network: { ...NETWORK, enabled: true },
+      peers: [PEER],
+      discovered: [STRANGER],
+      groups: [{ name: "home", members: [PEER.id], policy: { allow_remote_inference: true, allow_pooled_inference: false } }],
+      privacy: { ...PRIVACY, mode: "trusted_group" },
+    });
     fake.loaded = LOADED;
     await refreshStatus();
     chatHistory.set({
@@ -53,6 +63,16 @@ describe("axe accessibility scan", () => {
     window.location.hash = `#/${route}`;
     const { container } = render(<App poll={false} />);
     expect(await screen.findByRole("heading", { level: 1, name: title })).toBeTruthy();
+    if (route === "peers") {
+      await screen.findByText("Studio Mac", { selector: ".model-name" });
+      (await screen.findByRole("button", { name: "Pair this device" })).click();
+    }
+    if (route === "privacy") {
+      // The disclosure only appears when leaving local-only, so start there and pick trusted devices.
+      fake.privacy = { ...PRIVACY };
+      privacy.set({ ...PRIVACY });
+      (await screen.findByRole("radio", { name: /Trusted devices/ })).click();
+    }
     await ready();
     await scan(container);
   }, 20000);

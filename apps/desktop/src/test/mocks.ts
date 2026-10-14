@@ -1,6 +1,6 @@
 // Fake daemon for tests: an in-memory catalog plus a fetch() that serves the API contract.
 import { vi } from "vitest";
-import type { Hardware, Loaded, Model, Status } from "../api/client";
+import type { AuditEvent, Discovered, Group, Hardware, Loaded, Model, NetworkState, PairingSession, Peer, Privacy, Status } from "../api/client";
 
 export const HARDWARE: Hardware = {
   host: { os: "macOS", os_version: "26.2", arch: "arm64", chip: "Apple M2", memory_bytes: 8589934592 },
@@ -105,6 +105,33 @@ common_ttft_seconds_sum 2.5
 common_ttft_seconds_count 10
 `;
 
+
+// Peer networking fixtures. Ids are 64 hex like the daemon's; the short label is the first 12 as xxxx-xxxx-xxxx.
+export const SELF_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+export const PEER_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+export const STRANGER_ID = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+const label = (id: string) => `${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8, 12)}`;
+
+export const NETWORK: NetworkState = { enabled: false, serve_peers: false, listen_addr: "0.0.0.0:8193", mdns: true, peer_id: SELF_ID, short_label: label(SELF_ID) };
+
+export const PEER: Peer = { id: PEER_ID, short_label: label(PEER_ID), name: "Studio Mac", groups: ["home"], last_seen_utc: "2026-10-14T12:00:00Z", connected: true, health: "connected" };
+
+export const STRANGER: Discovered = { id: STRANGER_ID, short_label: label(STRANGER_ID), addr: "192.168.1.77:51234", pairing: true, trusted: false };
+
+export const PRIVACY: Privacy = {
+  mode: "local_only",
+  disclosure:
+    "In trusted-devices mode a prompt you send to a paired device, and the reply, travel encrypted to that device, where it can read them. Nothing goes to any other device or service.",
+};
+
+export const AUDIT: AuditEvent[] = [
+  { ts_utc: "2026-10-14T12:00:00Z", kind: "pairing_succeeded", peer_id: PEER_ID, fields: { port: 51234 } },
+  { ts_utc: "2026-10-14T11:59:00Z", kind: "pairing_started", fields: { port: 51234, window_secs: 120 } },
+];
+
+/** The code the fake accepts on /api/pair/join. */
+export const JOIN_CODE = "123456";
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -157,18 +184,49 @@ export interface FakeDaemon {
   loaded: Loaded | null;
   /** Options for the next chat stream. */
   chat: { chunks: string[]; delayMs: number };
+  network: NetworkState;
+  peers: Peer[];
+  discovered: Discovered[];
+  groups: Group[];
+  privacy: Privacy;
+  audit: AuditEvent[];
+  /** Pairing session opened by /api/pair/start; `result` is what /api/pair/status reports once set. */
+  pairing: { session: PairingSession | null; result: Peer | null };
+  /** When true every join answers pairing_locked. */
+  pairLocked: boolean;
+  /** Redacted bundle served by /api/diagnostics; null means the endpoint does not exist (501). */
+  diagnostics: Record<string, unknown> | null;
+  /** Simulates the other device finishing the pairing: pins `peer` and makes /api/pair/status report it. */
+  completePairing: (peer?: Peer) => void;
   fetchMock: ReturnType<typeof vi.fn>;
 }
 
 /** Installs a fetch mock serving the daemon contract from mutable in-memory state. */
-export function installFakeDaemon(overrides: Partial<Pick<FakeDaemon, "models" | "loaded" | "chat">> = {}): FakeDaemon {
+export function installFakeDaemon(
+  overrides: Partial<Pick<FakeDaemon, "models" | "loaded" | "chat" | "network" | "peers" | "discovered" | "groups" | "privacy" | "audit" | "diagnostics">> = {},
+): FakeDaemon {
   const fake: FakeDaemon = {
     models: structuredClone(MODELS),
     loaded: null,
     chat: { chunks: ["Hello", ", ", "world", "."], delayMs: 0 },
+    network: { ...NETWORK },
+    peers: [],
+    discovered: [],
+    groups: [],
+    privacy: { ...PRIVACY },
+    audit: structuredClone(AUDIT),
+    pairing: { session: null, result: null },
+    pairLocked: false,
+    diagnostics: null,
+    completePairing: (peer = PEER) => {
+      fake.peers.push({ ...peer, groups: [] });
+      fake.pairing.result = peer;
+    },
     ...overrides,
     fetchMock: vi.fn(),
   };
+  const withGroups = (p: Peer): Peer => ({ ...p, groups: fake.groups.filter((g) => g.members.includes(p.id)).map((g) => g.name) });
+  const disabled = () => apiError("policy_denied", "network disabled", 403, "enable networking in Peers");
   fake.fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname;
@@ -207,8 +265,76 @@ export function installFakeDaemon(overrides: Partial<Pick<FakeDaemon, "models" |
       if (fake.loaded?.model_id === model?.id) fake.loaded = null;
       return new Response(null, { status: 204 });
     }
+
+    // Peer networking (ADR-0003 / F-10-05 / F-10-10).
+    if (path === "/api/network" && method === "GET") return json(fake.network);
+    if (path === "/api/network" && method === "PUT") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled: boolean; serve_peers: boolean };
+      fake.network = { ...fake.network, enabled: !!body.enabled, serve_peers: !!body.enabled && !!body.serve_peers };
+      return json(fake.network);
+    }
+    if (path === "/api/peers" && method === "GET") return json({ peers: fake.peers.map(withGroups), discovered: fake.network.enabled ? fake.discovered : [] });
+    if ((m = path.match(/^\/api\/peers\/([^/]+)\/revoke$/)) && method === "POST") {
+      const id = decodeURIComponent(m[1]);
+      if (!fake.peers.some((p) => p.id === id)) return apiError("peer_unauthorized", "not a paired device", 404);
+      fake.peers = fake.peers.filter((p) => p.id !== id);
+      fake.groups = fake.groups.map((g) => ({ ...g, members: g.members.filter((x) => x !== id) }));
+      fake.audit.unshift({ ts_utc: new Date().toISOString(), kind: "peer_revoked", peer_id: id, fields: {} });
+      return new Response(null, { status: 204 });
+    }
+    if ((m = path.match(/^\/api\/peers\/([^/]+)$/)) && method === "DELETE") {
+      const id = decodeURIComponent(m[1]);
+      fake.peers = fake.peers.filter((p) => p.id !== id);
+      fake.groups = fake.groups.map((g) => ({ ...g, members: g.members.filter((x) => x !== id) }));
+      return new Response(null, { status: 204 });
+    }
+    if (path === "/api/pair/start" && method === "POST") {
+      if (!fake.network.enabled) return disabled();
+      fake.pairing = {
+        session: { code: "482913", port: 51234, qr_payload: `common-pair:v1:${SELF_ID}:192.168.1.10:51234:00112233445566778899aabbccddeeff`, expires_at: Math.floor(Date.now() / 1000) + 120, peer_id: SELF_ID },
+        result: null,
+      };
+      return json(fake.pairing.session);
+    }
+    if (path === "/api/pair/status") {
+      const active = !!fake.pairing.session && !fake.pairing.result;
+      const result = fake.pairing.result;
+      if (result) fake.pairing = { session: null, result: null };
+      return json({ active, result });
+    }
+    if (path === "/api/pair/join" && method === "POST") {
+      if (!fake.network.enabled) return disabled();
+      if (fake.pairLocked) return apiError("pairing_locked", "too many failed confirmations in the last 60 s", 429);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { addr: string; code: string; name: string };
+      if (body.code !== JOIN_CODE) return apiError("pairing_failed", "confirmation MAC mismatch", 403);
+      const peer: Peer = { ...PEER, groups: [] };
+      fake.peers.push(peer);
+      fake.discovered = fake.discovered.filter((x) => x.id !== peer.id);
+      return json(peer);
+    }
+    if (path === "/api/groups" && method === "GET") return json({ groups: fake.groups });
+    if (path === "/api/groups" && method === "PUT") {
+      fake.groups = (JSON.parse(String(init?.body ?? "{}")) as { groups: Group[] }).groups;
+      return json({ groups: fake.groups });
+    }
+    if (path === "/api/privacy" && method === "GET") return json(fake.privacy);
+    if (path === "/api/privacy" && method === "PUT") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { mode: Privacy["mode"]; acknowledged: boolean };
+      if (body.mode !== "local_only" && !body.acknowledged) return apiError("policy_denied", "disclosure not acknowledged", 403);
+      if (body.mode !== "local_only" && body.mode !== "trusted_group") return apiError("invalid_request", "unknown privacy mode", 400);
+      fake.privacy = { ...fake.privacy, mode: body.mode };
+      return json(fake.privacy);
+    }
+    if (path === "/api/audit") return json({ events: fake.audit });
+    if (path === "/api/diagnostics") return fake.diagnostics ? json(fake.diagnostics) : apiError("not_implemented", "no diagnostics bundle", 501);
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!fake.loaded) return apiError("model_not_downloaded", "no model loaded", 404);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { target?: string };
+      const target = body.target ?? "local";
+      if (target !== "local") {
+        if (fake.privacy.mode === "local_only") return apiError("policy_denied", "privacy mode is local_only", 403);
+        if (!fake.peers.some((p) => `peer:${p.id}` === target)) return apiError("peer_unauthorized", "not a paired device", 403);
+      }
       const n = fake.chat.chunks.length;
       const chunks: unknown[] = fake.chat.chunks.map((c, i) => ({
         id: "chatcmpl-1",
@@ -221,6 +347,7 @@ export function installFakeDaemon(overrides: Partial<Pick<FakeDaemon, "models" |
         choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         usage: { prompt_tokens: 7, completion_tokens: n, total_tokens: 7 + n },
         timings: { time_to_first_token_ms: 120, prompt_tokens_per_second: 300, decode_tokens_per_second: 42.5 },
+        target,
       });
       return sse(chunks, { delayMs: fake.chat.delayMs, signal: init?.signal ?? undefined });
     }

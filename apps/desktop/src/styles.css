@@ -662,6 +662,132 @@ progress {
   gap: 6px;
 }
 
+/* Peers and privacy -------------------------------------------------------- */
+
+/* The pairing code is the one loud element: six digits big enough to read from across a room. */
+.pair-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.pair-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 16px;
+}
+.pair-panel > h2 {
+  margin-bottom: 8px;
+}
+.pair-code {
+  font-size: 56px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin: 10px 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+.qr-payload,
+.device-id {
+  display: block;
+  padding: 6px 8px;
+  margin-top: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.device-id {
+  max-width: 36ch;
+}
+.run-on {
+  display: inline-grid;
+  gap: 2px;
+}
+.mode-pill {
+  display: inline-block;
+  margin: 0 8px 10px;
+  padding: 1px 9px;
+  font-size: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  text-decoration: none;
+  width: fit-content;
+}
+.mode-pill.away {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.modes {
+  display: grid;
+  gap: 10px;
+}
+.mode {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  max-width: 64ch;
+}
+.mode:has(input:checked) {
+  border-color: var(--accent);
+}
+.mode.disabled {
+  opacity: 0.7;
+}
+.mode > span {
+  display: grid;
+  gap: 2px;
+}
+.mode input {
+  margin-top: 3px;
+}
+.notice.disclosure {
+  margin-top: 14px;
+  max-width: 64ch;
+}
+.disclosure-text {
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+.group {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 10px;
+}
+.group-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.tag.member {
+  margin-left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+}
+.tag-x {
+  font: inherit;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.tag-x:hover {
+  color: var(--danger);
+}
+
 @media (max-width: 760px) {
   .app {
     grid-template-columns: 1fr;
@@ -696,8 +822,12 @@ progress {
     margin-left: auto;
     padding: 0;
   }
-  .journey {
+  .journey,
+  .pair-grid {
     grid-template-columns: 1fr;
+  }
+  .pair-code {
+    font-size: 44px;
   }
   main {
     padding: 16px;

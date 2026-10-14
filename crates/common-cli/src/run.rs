@@ -1,15 +1,23 @@
 //! `common run`, `common chat`, `common bench`, `common replay`: load through the ModelManager,
 //! stream tokens, write the execution manifest (X-15), stop on Ctrl-C / SIGTERM / SIGHUP (F-08-02).
+//! `run --peer` sends the whole request to one paired device instead (Mode B, remote execution):
+//! the manifest records `scope = remote_single_peer` and the peer id; it never claims more than
+//! one physical device, because this CLI cannot know whether the peer is another machine.
 
+use crate::mesh::Mesh;
 use crate::{context, shutdown_signal, Device, Stop};
 use clap::Args;
 use common_core::manifest::RunMetrics;
 use common_core::{CommonError, ErrorCode, ExecutionManifest, HostSummary, Paths, Result};
+use common_identity::PeerId;
+use common_network::NetworkConfig;
+use common_policy::{ExecutionTarget, PrivacyMode, WorkloadKind};
 use common_runtime::manager::{LoadOptions, ModelManager};
 use common_runtime::*;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +31,9 @@ pub struct RunArgs {
     pub model: String,
     #[arg(short, long)]
     pub prompt: String,
+    /// Run on this paired device (id or short label) instead of here; needs `common privacy trusted-devices`
+    #[arg(long, conflicts_with_all = ["device", "threads", "ctx"])]
+    pub peer: Option<String>,
     /// Maximum tokens to generate
     #[arg(short = 'n', long = "max-tokens", default_value_t = 256)]
     pub max_tokens: u32,
@@ -94,6 +105,18 @@ pub struct RunManifest {
     /// `raw` (prompt sent as-is) or `chat` (prompt wrapped as one user message, template applied).
     pub input_mode: String,
     pub parallel_slots: u32,
+    /// The device that executed the request when it was not this one (`scope = remote_single_peer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_peer_id: Option<PeerId>,
+}
+
+impl RunManifest {
+    /// `local` or `peer:<64 hex>`, for the summary line.
+    pub fn target(&self) -> String {
+        self.remote_peer_id
+            .map(|p| format!("peer:{p}"))
+            .unwrap_or_else(|| "local".into())
+    }
 }
 
 fn opts(device: Device, ctx: Option<u32>) -> LoadOptions {
@@ -128,6 +151,16 @@ struct Outcome {
 /// the adapter then yields one Cancelled item and ends, which is reported as `cancelled` (F-08-02).
 async fn stream(model: &dyn LoadedModel, req: GenerateRequest, echo: bool) -> Result<Outcome> {
     let cancel = CancellationToken::new();
+    drain(cancel.clone(), echo, model.generate(req, cancel)).await
+}
+
+/// `open` yields the event stream (local engine or remote peer); a stop signal cancels `cancel` at
+/// any point, including while `open` is still pending.
+async fn drain(
+    cancel: CancellationToken,
+    echo: bool,
+    open: impl Future<Output = Result<GenerateStream>>,
+) -> Result<Outcome> {
     let token = cancel.clone();
     let watcher = tokio::spawn(async move {
         let stop = shutdown_signal().await;
@@ -135,7 +168,7 @@ async fn stream(model: &dyn LoadedModel, req: GenerateRequest, echo: bool) -> Re
         stop
     });
     let result = async {
-        let mut s = model.generate(req, cancel).await?;
+        let mut s = open.await?;
         let mut out = Outcome::default();
         while let Some(ev) = s.next().await {
             match ev {
@@ -175,6 +208,9 @@ async fn stream(model: &dyn LoadedModel, req: GenerateRequest, echo: bool) -> Re
 
 /// Load, generate, unload, write the manifest. Shared by `run` and `replay`.
 async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outcome)> {
+    if let Some(peer) = &a.peer {
+        return execute_remote(a, peer, echo).await;
+    }
     let started = Instant::now();
     let m = context().await?;
     let model = load(
@@ -187,24 +223,7 @@ async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outco
     )
     .await?;
     let seed = a.seed.unwrap_or_else(random_seed);
-    let input = if a.chat {
-        PromptInput::Chat(vec![ChatMessage {
-            role: "user".into(),
-            content: a.prompt.clone(),
-        }])
-    } else {
-        PromptInput::Raw(a.prompt.clone())
-    };
-    let req = GenerateRequest {
-        input,
-        max_tokens: a.max_tokens,
-        temperature: a.temp,
-        top_p: a.top_p,
-        seed: Some(seed),
-        return_token_ids: true,
-        ..Default::default()
-    };
-    let out = stream(model.as_ref(), req, echo).await;
+    let out = stream(model.as_ref(), request(a, seed), echo).await;
     let rss = model.memory_rss_bytes();
     m.unload().await?;
     let out = out?;
@@ -217,9 +236,126 @@ async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outco
         total_ms: started.elapsed().as_secs_f64() * 1000.0,
         peak_rss_bytes: rss,
     };
-    let manifest = manifest(m.hardware.host_summary(), info, a, seed, &out, metrics);
+    let manifest = manifest(m.hardware.host_summary(), info, a, seed, &out, metrics, None);
     let path = write_manifest(&m.paths, &manifest)?;
     Ok((manifest, path, out))
+}
+
+/// Mode B: the whole request runs on one paired device. Order (I-05): privacy, then the policy
+/// engine for this peer, then the model hash from the local store or catalog (the peer verifies
+/// integrity against it; nothing is downloaded), then a client-only endpoint on an ephemeral port.
+async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManifest, PathBuf, Outcome)> {
+    let started = Instant::now();
+    let mesh = Mesh::open()?;
+    if mesh.settings.privacy == PrivacyMode::LocalOnly {
+        return Err(
+            CommonError::new(ErrorCode::PolicyDenied, "your privacy settings require local execution")
+                .with_hint("`common privacy trusted-devices` allows paired devices to run your requests"),
+        );
+    }
+    let rec = mesh.resolve_peer(peer)?;
+    mesh.policy(mesh.settings.network_enabled, false)
+        .evaluate(
+            mesh.settings.privacy,
+            ExecutionTarget::Peer(rec.id),
+            WorkloadKind::RemoteInference,
+        )
+        .into_result()?;
+    let sha = model_sha256(&mesh.paths, &a.model)?;
+    let addr = mesh.peer_addr(&rec).await?;
+    let node = mesh
+        .node(
+            NetworkConfig {
+                enabled: true,
+                listen_port: 0,
+                mdns: false,
+                ..NetworkConfig::default()
+            },
+            false,
+        )
+        .await?;
+    let result = async {
+        let conn = node.connect(addr, rec.id).await?;
+        let engine = conn
+            .capabilities
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().and_then(|c| c.engines.first().cloned()))
+            .unwrap_or_default();
+        let seed = a.seed.unwrap_or_else(random_seed);
+        let req = request(a, seed);
+        let cancel = CancellationToken::new();
+        let privacy = mesh.settings.privacy_str();
+        let out = drain(
+            cancel.clone(),
+            echo,
+            common_network::remote::generate_remote(conn, &a.model, &sha, req, &privacy, cancel),
+        )
+        .await?;
+        Ok::<_, CommonError>((engine, seed, out))
+    }
+    .await;
+    node.shutdown().await;
+    let (engine, seed, out) = result?;
+    let info = LoadedModelInfo {
+        model_id: a.model.clone(),
+        model_sha256: sha,
+        backend_name: "remote".into(),
+        backend_version: engine,
+        device_requested: "peer".into(),
+        device_actual: format!("peer:{}", rec.id.short_label()),
+        ..Default::default()
+    };
+    let metrics = RunMetrics {
+        load_ms: None,
+        // Client-side wall clock (request written -> first token), includes the network and any load on the peer.
+        time_to_first_token_ms: out.timings.time_to_first_token_ms,
+        prefill_tokens_per_second: out.timings.prompt_tokens_per_second,
+        decode_tokens_per_second: out.timings.decode_tokens_per_second,
+        total_ms: started.elapsed().as_secs_f64() * 1000.0,
+        peak_rss_bytes: None,
+    };
+    let host = common_hardware::probe()?.host_summary();
+    let manifest = manifest(host, &info, a, seed, &out, metrics, Some(rec.id));
+    let path = write_manifest(&mesh.paths, &manifest)?;
+    Ok((manifest, path, out))
+}
+
+/// The hash the peer must serve: the local manifest's, else the catalog's. Never a substitute.
+fn model_sha256(paths: &Paths, model: &str) -> Result<String> {
+    if let Some(m) = common_artifacts::Store::new(paths.clone()).get(model)? {
+        return Ok(m.sha256);
+    }
+    common_artifacts::Catalog::builtin()?
+        .get(model)
+        .map(|e| e.sha256.clone())
+        .ok_or_else(|| {
+            CommonError::new(
+                ErrorCode::ModelNotFound,
+                format!("{model} is neither in the local store nor in the catalog"),
+            )
+            .with_hint("common models list")
+        })
+}
+
+fn request(a: &RunArgs, seed: u64) -> GenerateRequest {
+    let input = if a.chat {
+        PromptInput::Chat(vec![ChatMessage {
+            role: "user".into(),
+            content: a.prompt.clone(),
+        }])
+    } else {
+        PromptInput::Raw(a.prompt.clone())
+    };
+    GenerateRequest {
+        input,
+        max_tokens: a.max_tokens,
+        temperature: a.temp,
+        top_p: a.top_p,
+        seed: Some(seed),
+        return_token_ids: true,
+        ..Default::default()
+    }
 }
 
 pub async fn run(a: &RunArgs, json: bool) -> Result<()> {
@@ -233,7 +369,7 @@ pub async fn run(a: &RunArgs, json: bool) -> Result<()> {
         if !out.text.ends_with('\n') {
             println!();
         }
-        eprintln!("{}", summary(&manifest.base, &path));
+        eprintln!("{}", summary(&manifest, &path));
     }
     if out.cancelled {
         return Err(CommonError::new(ErrorCode::Cancelled, "generation stopped"));
@@ -324,6 +460,8 @@ fn replay_args(m: &RunManifest) -> Result<RunArgs> {
     Ok(RunArgs {
         model: m.base.model_id.clone(),
         prompt,
+        // A replay always runs here: the point is to check this host against the record.
+        peer: None,
         max_tokens: m.base.max_tokens,
         device: if m.base.device_actual == "cpu" {
             Device::Cpu
@@ -354,11 +492,14 @@ fn divergence(expected: &[u32], actual: &[u32]) -> Option<usize> {
     )
 }
 
-/// One line for stderr: F-01-04 wants device, offloaded layers and decode tok/s visible.
-fn summary(m: &ExecutionManifest, path: &Path) -> String {
+/// One line for stderr: F-01-04 wants device, offloaded layers and decode tok/s visible; `target`
+/// says which device ran it (`local` or `peer:<id>`).
+fn summary(r: &RunManifest, path: &Path) -> String {
+    let m = &r.base;
     let f = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "-".into());
     format!(
-        "device={} offloaded={}/{} prompt_tokens={} completion_tokens={} ttft_ms={} prefill_tok_s={} decode_tok_s={} load_ms={} manifest={}",
+        "target={} device={} offloaded={}/{} prompt_tokens={} completion_tokens={} ttft_ms={} prefill_tok_s={} decode_tok_s={} load_ms={} manifest={}",
+        r.target(),
         m.device_actual,
         m.offloaded_layers,
         m.total_layers,
@@ -372,6 +513,8 @@ fn summary(m: &ExecutionManifest, path: &Path) -> String {
     )
 }
 
+/// `remote_peer` set = Mode B: scope `remote_single_peer`, still one physical device claimed
+/// (this CLI cannot prove the peer is another machine; the id is the evidence, F-02-10 honesty).
 fn manifest(
     host: HostSummary,
     info: &LoadedModelInfo,
@@ -379,6 +522,7 @@ fn manifest(
     seed: u64,
     out: &Outcome,
     metrics: RunMetrics,
+    remote_peer: Option<PeerId>,
 ) -> RunManifest {
     let base = ExecutionManifest {
         schema_version: ExecutionManifest::SCHEMA_VERSION,
@@ -405,7 +549,12 @@ fn manifest(
         completion_token_ids: out.ids.clone(),
         completion_sha256: sha256(out.text.as_bytes()),
         metrics,
-        scope: "single_physical_host".into(),
+        scope: if remote_peer.is_some() {
+            "remote_single_peer"
+        } else {
+            "single_physical_host"
+        }
+        .into(),
         physical_device_count: 1,
     };
     RunManifest {
@@ -413,6 +562,7 @@ fn manifest(
         top_p: a.top_p,
         input_mode: if a.chat { "chat" } else { "raw" }.into(),
         parallel_slots: info.parallel_slots,
+        remote_peer_id: remote_peer,
     }
 }
 
@@ -619,6 +769,7 @@ mod tests {
         RunArgs {
             model: "m".into(),
             prompt: "secret".into(),
+            peer: None,
             max_tokens: 8,
             device: Device::Cpu,
             ctx: None,
@@ -667,7 +818,15 @@ mod tests {
             },
             ..Default::default()
         };
-        let m = manifest(HostSummary::default(), &info, &args, 42, &out, RunMetrics::default());
+        let m = manifest(
+            HostSummary::default(),
+            &info,
+            &args,
+            42,
+            &out,
+            RunMetrics::default(),
+            None,
+        );
         assert!(m.base.prompt.is_none());
         assert_eq!(m.base.prompt_sha256, sha256(b"secret"));
         assert_eq!(
@@ -691,6 +850,7 @@ mod tests {
             42,
             &out,
             RunMetrics::default(),
+            None,
         );
         assert_eq!(
             (saved.base.prompt.as_deref(), saved.input_mode.as_str()),
@@ -711,7 +871,7 @@ mod tests {
             "flattened: base and extra fields side by side"
         );
         assert_eq!(read_run_manifest(&path).unwrap(), m);
-        assert!(summary(&m.base, &path).contains("offloaded=7/6"));
+        assert!(summary(&m, &path).contains("target=local device=") && summary(&m, &path).contains("offloaded=7/6"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -725,7 +885,15 @@ mod tests {
             ..Default::default()
         };
         let out = Outcome::default();
-        let m = manifest(HostSummary::default(), &info, &args(), 42, &out, RunMetrics::default());
+        let m = manifest(
+            HostSummary::default(),
+            &info,
+            &args(),
+            42,
+            &out,
+            RunMetrics::default(),
+            None,
+        );
         let e = replay_args(&m).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidRequest);
         assert!(e.hint.as_deref().unwrap_or_default().contains("--save-prompt"));
@@ -742,6 +910,7 @@ mod tests {
             42,
             &out,
             RunMetrics::default(),
+            None,
         );
         let r = replay_args(&m).unwrap();
         assert_eq!(
@@ -772,6 +941,7 @@ mod tests {
             1,
             &out,
             RunMetrics::default(),
+            None,
         );
         assert_eq!(replay_args(&cpu).unwrap().device, Device::Cpu);
     }

@@ -12,9 +12,14 @@
 //! Chat on a GGUF without `tokenizer.chat_template` (e.g. the stories15M fixture): the API builds a
 //! plain prompt of `role: content` lines followed by `assistant:` and generates raw text, so the
 //! OpenAI chat endpoint still works; tool calls cannot be parsed from such a model.
+//!
+//! Common Mesh (M3, ADR-0003) lives in [`mesh`]: privacy mode and peer networking are off by
+//! default and persisted in `COMMON_HOME/config.json`; a request leaves this device only through
+//! `target: "peer:<id>"` after `PolicyEngine::evaluate` allowed it, and the response says so.
 
 mod admin;
 pub mod admission;
+pub mod mesh;
 pub mod metrics;
 mod openai;
 
@@ -24,17 +29,20 @@ use axum::extract::{DefaultBodyLimit, FromRequest, MatchedPath, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use common_core::{CommonError, ErrorCode, Paths, Result};
+use common_identity::{DeviceIdentity, PeerStore};
 use common_models::GgufMetadata;
+use common_network::NetworkConfig;
+use common_observability::Audit;
 use common_runtime::manager::ModelManager;
 use metrics::Metrics;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -64,6 +72,11 @@ pub struct ApiConfig {
     /// let any website the user visits drive the local daemon.
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
+    /// Peer transport parameters (port, bind address, mDNS, timeouts). Whether the endpoint is
+    /// up is the persisted setting behind `PUT /api/network`; `network.enabled` only seeds that
+    /// setting when `COMMON_HOME/config.json` does not exist yet.
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 fn default_cors_origins() -> Vec<String> {
@@ -89,6 +102,7 @@ impl Default for ApiConfig {
             queue_timeout_ms: 30_000,
             default_device: common_runtime::DevicePreference::Auto,
             cors_origins: default_cors_origins(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -105,6 +119,21 @@ pub struct AppState {
     /// Cancelled when `serve` starts shutting down; every generation runs on a child of it, so
     /// in-flight streams end (with a `cancelled` error + `[DONE]`) instead of holding the server open.
     pub shutdown: CancellationToken,
+    /// This device's Ed25519 identity (`COMMON_HOME/identity/device.key`, 0600; Debug redacts).
+    pub identity: Arc<DeviceIdentity>,
+    /// Pinned peers, groups, revocations (`identity/peers.json`).
+    pub peers: Arc<PeerStore>,
+    /// Append-only audit of every off-device action (`logs/audit.jsonl`); ids and counts only.
+    pub audit: Arc<Audit>,
+    /// Privacy mode and network switches (default all off), persisted to `config.json` (0600).
+    /// `mesh::AppState::policy` builds the `PolicyEngine` from this on every call.
+    settings: RwLock<mesh::Settings>,
+    /// The peer Node, discovery handles and inbound accept loop; `Some` only while enabled.
+    pub net: tokio::sync::Mutex<mesh::Net>,
+    /// The one pairing session at a time (ADR-0003 D2: single-use code).
+    pairing: tokio::sync::Mutex<Option<mesh::Pairing>>,
+    /// Revocations issued here, forwarded by every connection's control loop (ADR-0003 D7).
+    revocations: tokio::sync::broadcast::Sender<common_network::proto::ControlMessage>,
     /// GGUF headers by sha256 (chat-template lookup per request, fit estimates per listing).
     meta_cache: Mutex<HashMap<String, Arc<GgufMetadata>>>,
     /// Bounds concurrent downloads (`MAX_PULLS`).
@@ -112,18 +141,28 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Loads (or creates) the device identity, the peer store, the audit log and the persisted
+    /// settings under `paths`; `Io` when `COMMON_HOME` is not writable. Nothing listens yet:
+    /// `serve_on` (or `mesh::AppState::apply_network`) starts the peer Node when enabled.
     pub fn new(
         config: ApiConfig,
         paths: Paths,
         catalog: common_artifacts::Catalog,
         manager: Arc<ModelManager>,
-    ) -> Self {
+    ) -> Result<Self> {
         let admission = Admission::new(
             config.max_concurrent,
             config.max_queue,
             Duration::from_millis(config.queue_timeout_ms),
         );
-        Self {
+        let identity = Arc::new(DeviceIdentity::load_or_create(&paths)?);
+        let peers = Arc::new(PeerStore::open(&paths)?);
+        let audit = Arc::new(Audit::open(&paths)?);
+        let settings = mesh::Settings::load(&paths)?.unwrap_or(mesh::Settings {
+            network_enabled: config.network.enabled,
+            ..Default::default()
+        });
+        Ok(Self {
             store: manager.store.clone(),
             config,
             paths,
@@ -133,9 +172,16 @@ impl AppState {
             admission,
             started: Instant::now(),
             shutdown: CancellationToken::new(),
+            identity,
+            peers,
+            audit,
+            settings: RwLock::new(settings),
+            net: tokio::sync::Mutex::new(mesh::Net::default()),
+            pairing: tokio::sync::Mutex::new(None),
+            revocations: tokio::sync::broadcast::channel(64).0,
             meta_cache: Mutex::new(HashMap::new()),
             pulls: Arc::new(Semaphore::new(MAX_PULLS)),
-        }
+        })
     }
 
     /// Load options every API load uses: the engine gets exactly `max_concurrent` slots, so
@@ -191,6 +237,19 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/unload"),
     ("DELETE", "/api/models/{id}"),
     ("POST", "/api/models/import"),
+    ("GET", "/api/network"),
+    ("PUT", "/api/network"),
+    ("GET", "/api/peers"),
+    ("DELETE", "/api/peers/{id}"),
+    ("POST", "/api/peers/{id}/revoke"),
+    ("POST", "/api/pair/start"),
+    ("GET", "/api/pair/status"),
+    ("POST", "/api/pair/join"),
+    ("GET", "/api/groups"),
+    ("PUT", "/api/groups"),
+    ("GET", "/api/privacy"),
+    ("PUT", "/api/privacy"),
+    ("GET", "/api/audit"),
 ];
 
 /// Build the axum router (exposed for in-process tests).
@@ -215,6 +274,19 @@ pub fn router(state: Arc<AppState>) -> Router {
             ("POST", "/api/unload") => post(admin::unload),
             ("DELETE", "/api/models/{id}") => delete(admin::remove),
             ("POST", "/api/models/import") => post(admin::import),
+            ("GET", "/api/network") => get(mesh::network_get),
+            ("PUT", "/api/network") => put(mesh::network_put),
+            ("GET", "/api/peers") => get(mesh::peers_get),
+            ("DELETE", "/api/peers/{id}") => delete(mesh::peer_delete),
+            ("POST", "/api/peers/{id}/revoke") => post(mesh::peer_revoke),
+            ("POST", "/api/pair/start") => post(mesh::pair_start),
+            ("GET", "/api/pair/status") => get(mesh::pair_status),
+            ("POST", "/api/pair/join") => post(mesh::pair_join),
+            ("GET", "/api/groups") => get(mesh::groups_get),
+            ("PUT", "/api/groups") => put(mesh::groups_put),
+            ("GET", "/api/privacy") => get(mesh::privacy_get),
+            ("PUT", "/api/privacy") => put(mesh::privacy_put),
+            ("GET", "/api/audit") => get(mesh::audit_get),
             other => unreachable!("route {other:?} is in ROUTES but has no handler"),
         };
         r = r.route(path, handler);
@@ -254,9 +326,11 @@ pub async fn serve(
     serve_on(state, listener, shutdown).await
 }
 
-/// Serve on an already-bound listener (tests bind `127.0.0.1:0` themselves). When `shutdown`
-/// resolves: in-flight generations are cancelled, connections get `SHUTDOWN_GRACE` to drain,
-/// then the loaded model is unloaded (engine process stopped) and this returns.
+/// Serve on an already-bound listener (tests bind `127.0.0.1:0` themselves). The peer Node is
+/// started first when the persisted setting says so (a failure is logged, the API still serves,
+/// `GET /api/network` shows `enabled: false`). When `shutdown` resolves: in-flight generations
+/// are cancelled, connections get `SHUTDOWN_GRACE` to drain, then the Node is closed and the
+/// loaded model is unloaded (engine process stopped) and this returns.
 pub async fn serve_on(
     state: Arc<AppState>,
     listener: tokio::net::TcpListener,
@@ -264,6 +338,13 @@ pub async fn serve_on(
 ) -> Result<()> {
     if let Ok(a) = listener.local_addr() {
         tracing::info!(addr = %a, "common api listening");
+    }
+    if let Err(e) = state.apply_network().await {
+        tracing::warn!(error = %e, "peer networking not started");
+        state.set_settings(mesh::Settings {
+            network_enabled: false,
+            ..state.settings()
+        });
     }
     let root = state.shutdown.clone();
     let signal = async move {
@@ -282,6 +363,7 @@ pub async fn serve_on(
             Ok(())
         }
     };
+    state.stop_network().await;
     if let Err(e) = state.manager.unload().await {
         tracing::warn!(error = %e, "unload at shutdown failed");
     }
@@ -427,7 +509,7 @@ async fn cors(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Resp
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
     h.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
     );
     h.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -557,7 +639,7 @@ mod tests {
         for (m, p) in ROUTES {
             assert!(seen.insert((m, p)), "duplicate route {m} {p}");
             assert!(p.starts_with('/') && !p.ends_with('/'), "{p}");
-            assert!(matches!(*m, "GET" | "POST" | "DELETE"), "{m}");
+            assert!(matches!(*m, "GET" | "POST" | "PUT" | "DELETE"), "{m}");
         }
     }
 }

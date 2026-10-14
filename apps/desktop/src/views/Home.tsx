@@ -3,14 +3,16 @@ import { api, type Hardware, type Model } from "../api/client";
 import { explain } from "../api/errors";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { FitBar } from "../components/FitBar";
+import { RunOn } from "../components/RunOn";
 import { refreshStatus } from "../daemon";
 import { fitText, humanBytes } from "../format";
 import { href, navigate } from "../router";
-import { daemon, lastError, settings } from "../state/stores";
+import { daemon, lastError, privacy, settings } from "../state/stores";
 
 export function Home() {
   const d = daemon.use();
   const err = lastError.use();
+  const localOnly = (privacy.use()?.mode ?? "local_only") === "local_only";
   const [hw, setHw] = useState<Hardware | null>(null);
   const [models, setModels] = useState<Model[] | null>(null);
   const [running, setRunning] = useState(false);
@@ -54,7 +56,7 @@ export function Home() {
     <section className="view" aria-labelledby="view-title">
       <div className="view-head">
         <h1 id="view-title">Home</h1>
-        <p>Run AI models on this computer. Nothing you type leaves it.</p>
+        <p>{localOnly ? "Run AI models on this computer. Nothing you type leaves it." : "Run AI models on this computer or on a device you paired. A prompt leaves this Mac only for the device you pick."}</p>
       </div>
 
       <div className="glance" role="status">
@@ -63,6 +65,11 @@ export function Home() {
           {glance} {hwLine}
         </span>
       </div>
+      {d.reachable && (
+        <div className="toolbar" style={{ marginTop: 12, marginBottom: 0 }}>
+          <RunOn />
+        </div>
+      )}
 
       <ol className="journey" aria-label="Getting started">
         {[

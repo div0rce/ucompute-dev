@@ -12,6 +12,10 @@ common-hardware = { workspace = true }
 common-models = { workspace = true }
 common-artifacts = { workspace = true }
 common-runtime = { workspace = true }
+common-identity = { workspace = true }
+common-policy = { workspace = true }
+common-observability = { workspace = true }
+common-network = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -22,6 +26,7 @@ serde_json = { workspace = true }
 prometheus = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

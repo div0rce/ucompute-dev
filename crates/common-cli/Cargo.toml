@@ -17,6 +17,10 @@ common-models = { workspace = true }
 common-artifacts = { workspace = true }
 common-runtime = { workspace = true }
 common-api = { workspace = true }
+common-identity = { workspace = true }
+common-policy = { workspace = true }
+common-observability = { workspace = true }
+common-network = { workspace = true }
 clap = { workspace = true }
 # io-std: tokio::io::stdin for the chat REPL so Ctrl-C can be selected against the read.
 tokio = { workspace = true, features = ["io-std"] }

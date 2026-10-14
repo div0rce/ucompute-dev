@@ -101,6 +101,82 @@ export interface ChatResult {
   timings: Timings | null;
   /** True when the client aborted the stream. */
   stopped: boolean;
+  /** Echoed by the daemon when the request named a target; "local" otherwise. */
+  target: Target;
+}
+
+/** Peer networking (ADR-0003). Ids are 64 lowercase hex; `short_label` is `xxxx-xxxx-xxxx`, display only. */
+export interface NetworkState {
+  enabled: boolean;
+  serve_peers: boolean;
+  listen_addr: string;
+  mdns: boolean;
+  peer_id: string;
+  short_label: string;
+}
+
+export type PeerHealth = "connected" | "unhealthy" | "reconnecting" | "disconnected";
+
+export interface Peer {
+  id: string;
+  short_label: string;
+  name: string;
+  groups: string[];
+  last_seen_utc: string | null;
+  connected: boolean;
+  health: PeerHealth;
+}
+
+/** Seen through mDNS but not pinned. Never actionable except pairing. */
+export interface Discovered {
+  id: string;
+  short_label: string;
+  addr: string;
+  pairing: boolean;
+  trusted: boolean;
+}
+
+export interface PairingSession {
+  code: string;
+  port: number;
+  qr_payload: string;
+  /** Unix seconds or an ISO timestamp; see `expiresAtMs`. */
+  expires_at: number | string;
+  peer_id: string;
+}
+
+export interface PairingStatus {
+  active: boolean;
+  result: Peer | null;
+}
+
+export interface Group {
+  name: string;
+  members: string[];
+  policy: { allow_remote_inference: boolean; allow_pooled_inference: boolean };
+}
+
+export type PrivacyMode = "local_only" | "trusted_group";
+
+export interface Privacy {
+  mode: PrivacyMode;
+  /** What leaves this device in the non-local mode; shown before the user can switch. */
+  disclosure: string;
+}
+
+export interface AuditEvent {
+  ts_utc: string;
+  kind: string;
+  peer_id?: string;
+  fields: Record<string, unknown>;
+}
+
+/** Where a request runs: this computer or a paired device. */
+export type Target = "local" | `peer:${string}`;
+
+/** `expires_at` as epoch milliseconds whichever form the daemon used. */
+export function expiresAtMs(v: number | string): number {
+  return typeof v === "number" ? v * 1000 : Date.parse(v);
 }
 
 /** Error shape every daemon endpoint returns: {"error":{message,type,code,param,hint?}}. */
@@ -229,17 +305,19 @@ export const api = {
 
   /** Streams a chat completion. `onDelta` receives each new text fragment. Abort via `signal` to stop. */
   async chat(
-    req: { model: string; messages: ChatMessage[]; max_tokens?: number; temperature?: number },
+    req: { model: string; messages: ChatMessage[]; max_tokens?: number; temperature?: number; target?: Target },
     onDelta: (text: string) => void,
     signal?: AbortSignal,
   ): Promise<ChatResult> {
-    const result: ChatResult = { content: "", finish_reason: null, usage: null, timings: null, stopped: false };
+    const { target = "local", ...rest } = req;
+    const result: ChatResult = { content: "", finish_reason: null, usage: null, timings: null, stopped: false, target };
     let res: Response;
     try {
       res = await send("/v1/chat/completions", {
         method: "POST",
         // stream_options.include_usage makes the daemon append a final chunk with usage + timings (OpenAI semantics).
-        body: JSON.stringify({ ...req, stream: true, stream_options: { include_usage: true } }),
+        // `target` is only sent for a peer so local requests keep the M1 wire shape.
+        body: JSON.stringify({ ...rest, ...(target !== "local" ? { target } : {}), stream: true, stream_options: { include_usage: true } }),
         signal,
       });
     } catch (err) {
@@ -252,7 +330,9 @@ export const api = {
           choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
           usage?: Usage;
           timings?: Timings;
+          target?: Target;
         };
+        if (chunk.target) result.target = chunk.target;
         const choice = chunk.choices?.[0];
         const delta = choice?.delta?.content;
         if (delta) {
@@ -269,4 +349,29 @@ export const api = {
     }
     return result;
   },
+
+  // Peer networking (ADR-0003). Every call below is refused by the daemon while networking is disabled,
+  // except reading the state itself.
+  network: () => json<NetworkState>("/api/network"),
+  setNetwork: (body: { enabled: boolean; serve_peers: boolean }) =>
+    json<NetworkState>("/api/network", { method: "PUT", body: JSON.stringify(body) }),
+  peers: () => json<{ peers: Peer[]; discovered: Discovered[] }>("/api/peers"),
+  removePeer: async (id: string) => {
+    await send(`/api/peers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+  revokePeer: async (id: string) => {
+    await send(`/api/peers/${encodeURIComponent(id)}/revoke`, { method: "POST" });
+  },
+  pairStart: (name: string) => json<PairingSession>("/api/pair/start", { method: "POST", body: JSON.stringify({ name }) }),
+  pairStatus: () => json<PairingStatus>("/api/pair/status"),
+  pairJoin: (body: { addr: string; code: string; name: string }) =>
+    json<Peer>("/api/pair/join", { method: "POST", body: JSON.stringify(body) }),
+  groups: async () => (await json<{ groups: Group[] }>("/api/groups")).groups,
+  setGroups: async (groups: Group[]) => (await json<{ groups: Group[] }>("/api/groups", { method: "PUT", body: JSON.stringify({ groups }) })).groups,
+  privacy: () => json<Privacy>("/api/privacy"),
+  setPrivacy: (body: { mode: PrivacyMode; acknowledged: boolean }) =>
+    json<Privacy>("/api/privacy", { method: "PUT", body: JSON.stringify(body) }),
+  audit: async () => (await json<{ events: AuditEvent[] }>("/api/audit")).events,
+  /** Redacted diagnostics bundle (F-06-10). Throws `not_implemented` on daemons without it. */
+  diagnostics: () => json<Record<string, unknown>>("/api/diagnostics"),
 };

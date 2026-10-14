@@ -70,6 +70,19 @@ describe("api.chat", () => {
   });
 });
 
+describe("api.chat target", () => {
+  it("omits target for local runs and echoes the daemon's target for a peer", async () => {
+    const fake = installFakeDaemon({ privacy: { mode: "trusted_group", disclosure: "" }, peers: [{ id: "ab".repeat(32), short_label: "abab-abab-abab", name: "x", groups: [], last_seen_utc: null, connected: true, health: "connected" }] });
+    fake.loaded = { model_id: "x" } as never;
+    const local = await api.chat({ model: "x", messages: [] }, () => undefined);
+    expect(local.target).toBe("local");
+    expect("target" in JSON.parse(String((fake.fetchMock.mock.calls.at(-1)![1] as RequestInit).body))).toBe(false);
+    const remote = await api.chat({ model: "x", messages: [], target: `peer:${"ab".repeat(32)}` }, () => undefined);
+    expect(remote.target).toBe(`peer:${"ab".repeat(32)}`);
+    expect(JSON.parse(String((fake.fetchMock.mock.calls.at(-1)![1] as RequestInit).body)).target).toBe(`peer:${"ab".repeat(32)}`);
+  });
+});
+
 describe("api.pull", () => {
   it("reports progress until done", async () => {
     installFakeDaemon();

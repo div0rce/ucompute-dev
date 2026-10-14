@@ -9,6 +9,31 @@ All API access lives in `src/api/client.ts`. If the daemon contract changes, tha
 Plain-language error texts live in `src/api/errors.ts` and are checked against
 `crates/common-core/src/error.rs` by `src/api/errors.test.ts`.
 
+## Devices and privacy (M3)
+
+Two views talk to the peer-networking API from ADR-0003; both default to the safest state and say so.
+
+- **Peers** (`#/peers`, F-10-05): the networking switch (off by default; `GET/PUT /api/network`), this device's
+  id as 8 groups of 8 hex plus its `xxxx-xxxx-xxxx` label, "Pair this device" (shows the six-digit code large,
+  the QR payload as text, a countdown, and polls `GET /api/pair/status` until the other side confirms), "Join a
+  device" (address + code; a wrong code shows the `pairing_failed` text, a lockout shows `pairing_locked`), the
+  paired list with health, groups, revoke and remove (both confirmed inline), household groups and their two
+  policy switches (`GET/PUT /api/groups`), and devices seen on the network but not trusted, whose only action is
+  "Pair". No QR image is drawn; the payload is shown as text.
+- **Privacy** (`#/privacy`, F-10-10): local only / trusted devices / public (disabled, "coming later"). Leaving
+  local-only shows the disclosure returned by `GET /api/privacy` and requires the acknowledge checkbox before
+  `PUT /api/privacy {mode, acknowledged}`. The current mode is the pill under the app name on every screen.
+- **Run on**: Chat and Home show a device selector only when the mode is not local-only; a chat request then
+  carries `"target": "peer:<id>"` and the reply footer says "Ran on <device>". In local-only mode the field is
+  never sent, so the wire shape of a local request is unchanged.
+- **Diagnostics** shows the audit tail (`GET /api/audit`: ids, sizes, reasons, never prompts) and "Copy
+  diagnostics" copies the daemon's redacted bundle from `GET /api/diagnostics` when that endpoint exists,
+  falling back to status + hardware on older daemons.
+
+The fake daemon in `src/test/mocks.ts` serves every one of these endpoints so the flows are tested end to end in
+jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`). Everything here runs on one machine; no test
+claims two physical devices paired.
+
 ## Development loop
 
 Terminal 1, from the repo root, start the daemon yourself:
@@ -35,7 +60,7 @@ the sidecar binary is not needed for `tauri dev`.
 ## Checks
 
 ```sh
-pnpm test         # vitest: API client, error-table sync with error.rs, axe scan, keyboard-only flow
+pnpm test         # vitest: API client, error-table sync with error.rs, axe scan, keyboard-only flows, pairing, privacy
 pnpm build        # tsc + vite build -> dist/
 cargo check -p common-desktop   # from the repo root; the Tauri shell
 ```
@@ -63,10 +88,10 @@ background, and kills the child on exit. The webview CSP only allows `connect-sr
 ```
 src/api/client.ts      typed client for every endpoint, SSE parser, bearer-token support
 src/api/errors.ts      error code -> plain-language title + next step (mirrors error.rs)
-src/state/             tiny stores: settings (localStorage), daemon status, chat history, session runs
-src/views/             Home, Models, Chat, Hardware, Performance, Settings, Diagnostics
-src/components/        FitBar (memory fit), ErrorNotice, Later (honest placeholder for M3/M7 views)
-src/test/              fake daemon (fetch mock), axe scan, keyboard-only flow
+src/state/             tiny stores: settings (localStorage), daemon status, chat history, session runs, privacy mode, run target
+src/views/             Home, Models, Chat, Hardware, Performance, Settings, Diagnostics, Peers, Privacy
+src/components/        FitBar (memory fit), ErrorNotice, RunOn (device selector), Groups, Later (placeholder for M3/M7 views)
+src/test/              fake daemon (fetch mock), axe scan, keyboard-only flows, pairing and privacy flows
 src-tauri/src/lib.rs   sidecar spawn, health probe, daemon_info command
 scripts/prepare-sidecar.sh
 ```

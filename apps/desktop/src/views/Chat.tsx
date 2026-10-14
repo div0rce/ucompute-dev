@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { api, type Model } from "../api/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, type Model, type Peer } from "../api/client";
 import { explain, type MappedError } from "../api/errors";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { RunOn, targetName } from "../components/RunOn";
 import { refreshStatus } from "../daemon";
 import { num } from "../format";
 import { href } from "../router";
-import { chatHistory, daemon, lastError, runs, settings, type StoredMessage } from "../state/stores";
+import { chatHistory, daemon, lastError, privacy, runs, runTarget, settings, type StoredMessage } from "../state/stores";
 
 export function Chat() {
   const d = daemon.use();
@@ -19,6 +20,9 @@ export function Chat() {
   const [error, setError] = useState<MappedError | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const peersRef = useRef<Peer[]>([]);
+  const onPeers = useCallback((p: Peer[]) => (peersRef.current = p), []);
+  const localOnly = (privacy.use()?.mode ?? "local_only") === "local_only";
 
   useEffect(() => {
     if (loaded) return;
@@ -61,9 +65,11 @@ export function Chat() {
     setStreaming("");
     const ac = new AbortController();
     abortRef.current = ac;
+    // Local-only is enforced here too, not only by hiding the selector.
+    const target = localOnly ? "local" : runTarget.get();
     try {
       const res = await api.chat(
-        { model: loaded.model_id, messages: history.map(({ role, content }) => ({ role, content })) },
+        { model: loaded.model_id, messages: history.map(({ role, content }) => ({ role, content })), target },
         (delta) => setStreaming((s) => (s ?? "") + delta),
         ac.signal,
       );
@@ -74,6 +80,8 @@ export function Chat() {
         usage: res.usage,
         timings: res.timings,
         stopped: res.stopped,
+        target: res.target,
+        ran_on: targetName(res.target, peersRef.current),
       };
       chatHistory.set((h) => ({ messages: [...h.messages, assistant] }));
       runs.set((r) => [
@@ -115,6 +123,11 @@ export function Chat() {
         ) : (
           <p>No model is loaded. Pick a downloaded model to start, or get one from the <a href={href("models")}>model library</a>.</p>
         )}
+        {loaded && (
+          <div className="toolbar" style={{ marginTop: 10 }}>
+            <RunOn onPeers={onPeers} />
+          </div>
+        )}
         {!loaded && d.reachable && (
           <div className="toolbar" style={{ marginTop: 10 }}>
             <label>
@@ -142,7 +155,13 @@ export function Chat() {
       </div>
 
       <div className="chat-log" ref={logRef} aria-label="Conversation" role="log">
-        {messages.length === 0 && streaming === null && <div className="empty">Messages stay on this computer. Nothing you type is sent anywhere else.</div>}
+        {messages.length === 0 && streaming === null && (
+          <div className="empty">
+            {localOnly
+              ? "Messages stay on this computer. Nothing you type is sent anywhere else."
+              : "Messages are saved on this computer. A prompt is sent to another device only when you pick one under Run on."}
+          </div>
+        )}
         {messages.map((m, i) => (
           <article key={i} className={`msg ${m.role}`} aria-label={m.role === "user" ? "You" : "Model"}>
             <div className="body">{m.content}</div>
@@ -151,6 +170,7 @@ export function Chat() {
                 {m.stopped ? "Stopped. " : ""}
                 {m.usage ? `${num(m.usage.completion_tokens)} tokens` : "tokens unknown"}
                 {m.timings ? `, first token in ${num(m.timings.time_to_first_token_ms)} ms, ${num(m.timings.decode_tokens_per_second, 1)} tok/s` : ""}
+                {m.target && m.target !== "local" ? `. Ran on ${m.ran_on ?? targetName(m.target, peersRef.current)}.` : ""}
               </div>
             )}
           </article>

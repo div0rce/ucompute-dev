@@ -1,4 +1,5 @@
 import { getBaseUrl } from "../api/client";
+import { href } from "../router";
 import { settings } from "../state/stores";
 
 export function Settings() {
@@ -51,18 +52,14 @@ export function Settings() {
       </div>
 
       <div className="section">
-        <h2>Privacy</h2>
-        <p>All inference runs on this computer. Nothing is sent anywhere.</p>
-        <fieldset style={{ marginTop: 12 }}>
-          <legend>Devices and shared compute</legend>
-          <p className="muted small">Coming in a later release. These controls do nothing yet.</p>
-          <label className="check" style={{ marginTop: 8 }}>
-            <input type="checkbox" disabled /> Allow trusted devices to pair with this computer
-          </label>
-          <label className="check">
-            <input type="checkbox" disabled /> Contribute spare compute to a shared pool
-          </label>
-        </fieldset>
+        <h2>Privacy and devices</h2>
+        <p>
+          Where prompts may run is set under <a href={href("privacy")}>Privacy</a>; pairing, networking and groups live under{" "}
+          <a href={href("peers")}>Peers</a>. Both start off: nothing leaves this computer until you change them.
+        </p>
+        <p className="muted small" style={{ marginTop: 8 }}>
+          Contributing spare compute to a shared pool comes in a later release.
+        </p>
       </div>
     </section>
   );

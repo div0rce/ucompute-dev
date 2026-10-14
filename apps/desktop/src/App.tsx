@@ -1,13 +1,16 @@
 import { useEffect } from "react";
+import { api } from "./api/client";
 import { startDaemonPolling } from "./daemon";
 import { href, useRoute, type Route } from "./router";
-import { daemon } from "./state/stores";
+import { daemon, privacy } from "./state/stores";
 import { Chat } from "./views/Chat";
 import { Diagnostics } from "./views/Diagnostics";
 import { Hardware } from "./views/Hardware";
 import { Home } from "./views/Home";
 import { Models } from "./views/Models";
+import { Peers } from "./views/Peers";
 import { Performance } from "./views/Performance";
+import { MODE_LABEL, Privacy } from "./views/Privacy";
 import { Settings } from "./views/Settings";
 import { Later } from "./components/Later";
 
@@ -31,11 +34,11 @@ const NAV: { group: string; items: { route: Route; label: string; later?: string
   {
     group: "Devices and network",
     items: [
-      { route: "peers", label: "Peers", later: "M3" },
+      { route: "peers", label: "Peers" },
       { route: "cluster", label: "Cluster", later: "M3" },
       { route: "jobs", label: "Jobs", later: "M3" },
       { route: "contributions", label: "Contributions", later: "M7" },
-      { route: "privacy", label: "Privacy", later: "M3" },
+      { route: "privacy", label: "Privacy" },
     ],
   },
   { group: "", items: [{ route: "settings", label: "Settings" }] },
@@ -58,7 +61,7 @@ function View({ route }: { route: Route }) {
     case "diagnostics":
       return <Diagnostics />;
     case "peers":
-      return <Later title="Peers" milestone="milestone M3" what="Pair trusted devices with a short code so they can share models and compute." />;
+      return <Peers />;
     case "cluster":
       return <Later title="Cluster" milestone="milestone M3" what="See paired devices as one pool and run models larger than any single device." />;
     case "jobs":
@@ -66,13 +69,20 @@ function View({ route }: { route: Route }) {
     case "contributions":
       return <Later title="Contributions" milestone="milestone M7" what="Lend spare compute to others on your terms, with caps for CPU, GPU, battery and hours." />;
     case "privacy":
-      return <Later title="Privacy" milestone="milestone M3" what="Choose local-only, trusted devices or public compute, with a clear disclosure before anything leaves this machine. Today everything runs locally." />;
+      return <Privacy />;
   }
 }
 
 export default function App({ poll = true }: { poll?: boolean }) {
   const route = useRoute();
   const d = daemon.use();
+  const p = privacy.use();
+
+  // The mode in the header must be the daemon's, never a cached guess: fetch it whenever the service comes back.
+  useEffect(() => {
+    if (!d.reachable) return;
+    api.privacy().then(privacy.set, () => undefined);
+  }, [d.reachable]);
 
   useEffect(() => {
     if (!poll) return;
@@ -91,6 +101,9 @@ export default function App({ poll = true }: { poll?: boolean }) {
           <span className="brand-mark" aria-hidden="true" />
           Common
         </div>
+        <a className={`mode-pill${p && p.mode !== "local_only" ? " away" : ""}`} href={href("privacy")} aria-label={`Privacy mode: ${p ? MODE_LABEL[p.mode] : "unknown"}`}>
+          {p ? MODE_LABEL[p.mode] : "Privacy mode unknown"}
+        </a>
         <nav className="nav" aria-label="Main">
           {NAV.map((g) => (
             <div key={g.group || "settings"}>

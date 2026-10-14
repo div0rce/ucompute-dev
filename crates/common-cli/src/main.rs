@@ -1,9 +1,11 @@
-//! `common` CLI: hardware, models, run, chat, serve, setup, doctor, bench, replay.
+//! `common` CLI: hardware, models, run, chat, serve, setup, doctor, bench, replay, and the mesh
+//! commands peers, groups, privacy, audit, diagnostics (M3).
 //!
 //! Errors print `error[<code>]: <message>` plus the hint to stderr and exit 1; with `--json` the
 //! error is printed as JSON instead (F-08-03). Ctrl-C, SIGTERM and SIGHUP print `stopped` and
 //! exit 130 after the engine has been stopped (F-08-02).
 
+mod mesh;
 mod models;
 mod run;
 
@@ -64,6 +66,22 @@ pub enum Cmd {
     Bench(run::BenchArgs),
     /// Re-run a saved execution manifest and check that the same tokens come back (X-15)
     Replay(run::ReplayArgs),
+    /// Paired devices: list, discover, pair, join, rm, revoke
+    Peers {
+        #[command(subcommand)]
+        cmd: mesh::PeersCmd,
+    },
+    /// Trusted groups and what their members may run here
+    Groups {
+        #[command(subcommand)]
+        cmd: mesh::GroupsCmd,
+    },
+    /// Show or change the privacy mode (local-only is the default and the only private mode)
+    Privacy(mesh::PrivacyArgs),
+    /// Print the audit trail (ids, codes and counts; never prompts)
+    Audit(mesh::AuditArgs),
+    /// Write the redacted diagnostics bundle
+    Diagnostics(mesh::DiagnosticsArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -80,6 +98,14 @@ pub struct ServeArgs {
     /// Shut down when the parent process exits (used by the desktop app's sidecar spawn).
     #[arg(long, default_value_t = false)]
     exit_with_parent: bool,
+    /// Also open the authenticated peer endpoint (or `network_enabled` in config.json)
+    #[arg(long)]
+    pub network: bool,
+    /// Accept inference requests from paired devices in an allowing group (implies --network; or `serve_peers` in config.json)
+    #[arg(long)]
+    pub serve_peers: bool,
+    #[command(flatten)]
+    pub net: mesh::NetArgs,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +154,11 @@ async fn dispatch(cli: &Cli) -> Result<()> {
         Cmd::Doctor => doctor(cli.json).await,
         Cmd::Bench(a) => run::bench(a, cli.json).await,
         Cmd::Replay(a) => run::replay(a, cli.json).await,
+        Cmd::Peers { cmd } => mesh::peers(cmd, cli.json).await,
+        Cmd::Groups { cmd } => mesh::groups(cmd, cli.json),
+        Cmd::Privacy(a) => mesh::privacy(a, cli.json),
+        Cmd::Audit(a) => mesh::audit(a, cli.json),
+        Cmd::Diagnostics(a) => mesh::diagnostics(a),
     }
 }
 
@@ -389,7 +420,7 @@ async fn parent_exited(enabled: bool) {
 }
 
 async fn serve(a: &ServeArgs) -> Result<()> {
-    let m = context().await?;
+    let m = Arc::new(context().await?);
     let config = common_api::ApiConfig {
         host: a.host.clone(),
         port: a.port,
@@ -399,16 +430,21 @@ async fn serve(a: &ServeArgs) -> Result<()> {
     };
     // PolicyDenied (non-loopback without a key) before anything is printed or bound.
     let addr = common_api::bind_addr(&config)?;
+    // Flags enable for this run; config.json (written by `common privacy` and the API) persists.
+    // Nothing listens for peers unless one of the two says so (SD-04/SD-05).
+    let mesh = mesh::Mesh::open()?;
+    let serve_peers = a.serve_peers || mesh.settings.serve_peers;
+    let network = a.network || serve_peers || mesh.settings.network_enabled;
+    let peer = if network {
+        Some(mesh::PeerDaemon::start(&mesh, a.net.config(), serve_peers, m.clone()).await?)
+    } else {
+        None
+    };
     println!("listening on http://{addr}");
-    let state = common_api::AppState::new(
-        config,
-        m.paths.clone(),
-        common_artifacts::Catalog::builtin()?,
-        Arc::new(m),
-    );
+    let state = common_api::AppState::new(config, m.paths.clone(), common_artifacts::Catalog::builtin()?, m);
     // serve() unloads the model (stops the engine) once this future resolves.
     let exit_with_parent = a.exit_with_parent;
-    common_api::serve(Arc::new(state), async move {
+    let r = common_api::serve(Arc::new(state), async move {
         tokio::select! {
             _ = shutdown_signal() => {}
             _ = parent_exited(exit_with_parent) => {
@@ -416,7 +452,11 @@ async fn serve(a: &ServeArgs) -> Result<()> {
             }
         }
     })
-    .await
+    .await;
+    if let Some(p) = peer {
+        p.stop().await;
+    }
+    r
 }
 
 async fn setup(fixtures: bool) -> Result<()> {
