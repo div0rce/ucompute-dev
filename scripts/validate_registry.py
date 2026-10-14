@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Validate docs/REQUIREMENTS.csv against spec section 2 and section 21 rules.
+
+Exit code 0 = valid, 1 = violations (printed). Intended for CI and pre-commit.
+"""
+from __future__ import annotations
+
+import csv
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from gen_registry import FIELDS, STATUSES, parse_spec  # noqa: E402
+
+CSV_PATH = ROOT / "docs" / "REQUIREMENTS.csv"
+VAGUE = re.compile(r"works as intended|works correctly|as expected|TBD|TODO", re.I)
+COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def ms_num(m: str) -> int:
+    return int(m[1:])
+
+
+def main() -> int:
+    errs: list[str] = []
+    spec = parse_spec()
+    if len(spec) != 148:
+        errs.append(f"spec parse found {len(spec)} requirements, expected 148")
+    with CSV_PATH.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != FIELDS:
+            errs.append(f"CSV header mismatch: {reader.fieldnames}")
+        rows = list(reader)
+    ids = [r["id"] for r in rows]
+    if len(rows) != 148:
+        errs.append(f"CSV has {len(rows)} rows, expected 148")
+    dupes = {i for i in ids if ids.count(i) > 1}
+    if dupes:
+        errs.append(f"duplicate ids: {sorted(dupes)}")
+    if set(ids) != set(spec):
+        errs.append(f"id set differs from spec: missing={sorted(set(spec)-set(ids))} extra={sorted(set(ids)-set(spec))}")
+    by_id = {r["id"]: r for r in rows}
+
+    for r in rows:
+        rid = r["id"]
+        if r["priority"] != "P0":
+            errs.append(f"{rid}: priority {r['priority']!r} != P0")
+        if r["status"] not in STATUSES:
+            errs.append(f"{rid}: invalid status {r['status']!r}")
+        if spec.get(rid, ("",))[0] != r["description"]:
+            errs.append(f"{rid}: description does not match spec verbatim")
+        for fld in ("owner", "milestone", "design", "acceptance_criteria"):
+            if not r[fld].strip():
+                errs.append(f"{rid}: empty {fld}")
+        if VAGUE.search(r["acceptance_criteria"]):
+            errs.append(f"{rid}: acceptance criteria contains vague wording")
+        if r["status"] == "VERIFIED":
+            if not r["observed_evidence"].strip():
+                errs.append(f"{rid}: VERIFIED without observed_evidence")
+            if not COMMIT.match(r["last_verified_commit"].strip()):
+                errs.append(f"{rid}: VERIFIED without a valid last_verified_commit hash")
+        if r["status"] == "INFEASIBLE_WITH_EVIDENCE" and not r["observed_evidence"].strip():
+            errs.append(f"{rid}: INFEASIBLE_WITH_EVIDENCE without evidence")
+        if r["status"] == "BLOCKED" and not r["blocker"].strip():
+            errs.append(f"{rid}: BLOCKED without blocker")
+        if r["status"] == "IMPLEMENTED_UNVERIFIED" and not r["observed_evidence"].strip():
+            errs.append(f"{rid}: IMPLEMENTED_UNVERIFIED without any implementation reference")
+        for d in filter(None, r["dependencies"].split(";")):
+            if d not in by_id:
+                errs.append(f"{rid}: unknown dependency {d!r}")
+            elif ms_num(by_id[d]["milestone"]) > ms_num(r["milestone"]):
+                errs.append(f"{rid} ({r['milestone']}): depends on {d} in later milestone {by_id[d]['milestone']}")
+            elif r["status"] == "VERIFIED" and by_id[d]["status"] != "VERIFIED":
+                errs.append(f"{rid}: VERIFIED but dependency {d} is {by_id[d]['status']}")
+
+    # cycle detection
+    graph = {r["id"]: [d for d in r["dependencies"].split(";") if d in by_id] for r in rows}
+    state: dict[str, int] = {}
+
+    def visit(n: str, path: list[str]) -> None:
+        if state.get(n) == 2:
+            return
+        if state.get(n) == 1:
+            errs.append("dependency cycle: " + " -> ".join(path[path.index(n):] + [n]))
+            return
+        state[n] = 1
+        for m in graph[n]:
+            visit(m, path + [n])
+        state[n] = 2
+
+    for n in graph:
+        visit(n, [])
+
+    gen = subprocess.run([sys.executable, str(ROOT / "scripts" / "gen_registry.py"), "--check"],
+                         capture_output=True, text=True)
+    if gen.returncode != 0:
+        errs.append(gen.stdout.strip() or gen.stderr.strip())
+
+    if errs:
+        print(f"REGISTRY INVALID: {len(errs)} problem(s)")
+        for e in errs:
+            print(" -", e)
+        return 1
+    counts = {s: sum(r["status"] == s for r in rows) for s in STATUSES}
+    print("registry valid: 148 P0 rows;", ", ".join(f"{k}={v}" for k, v in counts.items()))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
