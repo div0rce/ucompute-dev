@@ -2,6 +2,10 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-14 (later) — Claude Code — M3 Common Mesh wave A committed (5034fb6)
+
+Identity (Ed25519/ring, 0700/0600, redacted), policy (default-deny, 2×2,000-case property tests), audit + redacted diagnostics, and the QUIC transport core (rustls RFC 7250 raw public keys, TLS 1.3 only, pinned verifier inside the handshake, signed capabilities, prost framing, peer loss in 6.5 s) are implemented with 66 tests. Ledger: 11 rows moved to IMPLEMENTED_UNVERIFIED (F-06-01/02/03/04/07/10, F-02-03/04/05/09, F-08-10). In progress: discovery (mDNS), SPAKE2 pairing, remote execution (Mode B), then API/CLI/desktop integration, review and the SINGLE-HOST evidence run. Known gap: reqwest's feature unification compiles rustls tls12 into the binary although every Common TLS config pins 1.3.
+
 ## 2026-10-14 — Claude Code (owner's Mac, shell access) — M1 delivered, M2 desktop running, registry 22 VERIFIED
 
 **Verified on the owner's MacBook Air (Apple M2, 8 GB, macOS 26.2):** 186 Rust tests with `COMMON_REQUIRE_FIXTURES=1` (no silent skips) + 43 desktop tests + 8 registry tests; `cargo fmt`/`clippy -D warnings` clean. Evidence per requirement in `docs/VERIFICATION.md` ("M1 evidence"), benchmarks in `benchmarks/results/`.
