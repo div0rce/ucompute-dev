@@ -1,0 +1,16 @@
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Recovery and local runtime files
+/.recovery/
+.runtime/
+
+# Model weights
+*.gguf
+*.safetensors
+
+# macOS
+.DS_Store
