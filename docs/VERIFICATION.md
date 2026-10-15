@@ -166,3 +166,10 @@ Everything in this section is **SINGLE-HOST**: two or more Common nodes running 
 
 ### Mode B — remote execution (spec section 7 B; not pooled inference)
 - `remote_golden_text_single_host` (greedy 32 tokens on the peer equal the golden text and a local run), `remote_streaming_delivers_before_done`, `remote_cancel_stops_server_generation_within_500ms`, `peer_lost_mid_stream_is_typed`; server verifies the requested model hash against its manifest and the loaded model (no substitution); audit entries carry ids, sizes and durations only.
+
+## M3 review fixes and SINGLE-HOST daemon run (2026-10-15, commit 5e5f10d)
+
+- Three adversarial reviews (security, correctness, acceptance) raised 45 findings; fixes landed in 5e5f10d. Notable: TLS session resumption bypassed the pinned/revoked verifier (now tested by `revoked_client_cannot_resume_with_cached_session`); PeerStore lost cross-process revocations; capabilities were verified over a re-encoding.
+- Suites after fixes, run by the integrator: `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace` → 334 passed, 0 failed; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean; `apps/desktop: pnpm test` → 68 passed; `pnpm build` ok.
+- Two-daemon run on this Mac, driven by `tests/distributed/single_host/m3_evidence.py`: report in `docs/evidence/m3-single-host-2026-10-15.md`. All 8 steps passed: discovery 1.0 s after both ready; pair join 25.7 ms; 6 wrong codes → `pairing_locked`; remote completion golden (warm 86 ms total, 4.8 ms first token, ~420–468 tok/s); local_only → `policy_denied` with zero server entries; revoke → `peer_revoked`, peer connection closed ≤0.01 s, reconnects refused in the handshake; SIGKILL detected in 4.855 s; relay capture 0 plaintext hits over 11 needles; decode TPOT overhead −0.5 %; local p95 +11.6 % under a peer flood (crate-level test).
+- **All of the above is SINGLE-HOST.** It is not two-machine evidence (B-002).
