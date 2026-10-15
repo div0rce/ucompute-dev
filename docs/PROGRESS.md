@@ -2,6 +2,29 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-15 — Claude Code — M3 Common Mesh: 13 rows VERIFIED (SINGLE-HOST), 3 open
+
+**Counts:** VERIFIED 35 (+13), IMPLEMENTED_UNVERIFIED 9, IN_PROGRESS 3, NOT_STARTED 101, BLOCKED 0, INFEASIBLE 0. Commits 5034fb6 … 68e73f0.
+
+**Built:** device identity (Ed25519, 0700/0600), peer store with groups and signed revocations, default-deny policy and per-peer quotas, append-only audit with rotation and redacted diagnostics, QUIC + TLS 1.3 raw-public-key transport (pinned and revoked keys refused inside the handshake, resumption included), signed capabilities, liveness and reconnect, signed mDNS discovery, SPAKE2 pairing bound to the TLS exporter (code or QR, QR identity checked in the handshake), Mode B remote execution, API routes, CLI commands, desktop Peers/Privacy/Run-on views.
+
+**Verified (SINGLE-HOST, topology-independent criteria):** F-06-01, F-06-02, F-06-03, F-06-05, F-06-07, F-06-10, F-02-02, F-02-03, F-02-04, F-02-05, F-02-09, F-08-10, F-10-10. Evidence: `docs/VERIFICATION.md` (M3 sections), `docs/evidence/m3-single-host-2026-10-15.md`, `docs/evidence/m3-ui-pairing-and-defaults-2026-10-15.md`.
+
+**Still open:** F-02-01 and F-10-05 need two machines (B-002). F-06-04 needs an owner decision on the default peer share (B-014) and has one unexplained `backend_failed` (B-015).
+
+**Review history:** three adversarial reviews of the first M3 cut (45 findings, including a TLS-resumption bypass of the pinned verifier and lost cross-process revocations) and two of the follow-ups (16 findings, each checked by a skeptic) were fixed. Testing in the app found two more defects, both now fixed: network settings changes failed with EADDRINUSE on the fixed port, and the CLI mesh test leaked daemons and engines on failure.
+
+**Suites at 68e73f0:** `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast` → 364 passed, 0 failed; clippy `-D warnings` and fmt clean; `apps/desktop` 77 passed, build ok; registry valid.
+
+**Next:**
+```
+python3 scripts/validate_registry.py
+cat docs/BLOCKERS.md                  # B-002 second machine, B-014 default peer share, B-015
+COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast
+M3_DIR=<scratch dir with a/ b/ bin/common> python3 -I tests/distributed/single_host/m3_evidence.py step1   # two-daemon run
+```
+With a second machine: run the same driver across two hosts, pair two packaged desktop installs through the UI, and capture on a LAN interface; then F-02-01, F-10-05 and the M4 pooled-inference work (F-03-*) can start.
+
 ## 2026-10-14 (later) — Claude Code — M3 Common Mesh wave A committed (5034fb6)
 
 Identity (Ed25519/ring, 0700/0600, redacted), policy (default-deny, 2×2,000-case property tests), audit + redacted diagnostics, and the QUIC transport core (rustls RFC 7250 raw public keys, TLS 1.3 only, pinned verifier inside the handshake, signed capabilities, prost framing, peer loss in 6.5 s) are implemented with 66 tests. Ledger: 11 rows moved to IMPLEMENTED_UNVERIFIED (F-06-01/02/03/04/07/10, F-02-03/04/05/09, F-08-10). In progress: discovery (mDNS), SPAKE2 pairing, remote execution (Mode B), then API/CLI/desktop integration, review and the SINGLE-HOST evidence run. Known gap: reqwest's feature unification compiles rustls tls12 into the binary although every Common TLS config pins 1.3.

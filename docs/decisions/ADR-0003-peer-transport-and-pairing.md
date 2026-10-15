@@ -169,7 +169,7 @@ Fixtures: the TinyStories models (`docs/research/TEST_MODELS.md`) for all SINGLE
 
 ## 9. Implementation notes (2026-10-15)
 
-What M3 built, decision by decision, and the tests that hold each rule in place. Every test is a unit test or a **SINGLE-HOST** test on the owner's one Mac. None is two-machine evidence (B-002), so none of this makes a ledger row `VERIFIED`. Test names are function names; the file is given once per group. The 2026-10-15 two-daemon run is in `docs/evidence/m3-single-host-2026-10-15.md`.
+What M3 built, decision by decision, and the tests that hold each rule in place. Every test is a unit test or a **SINGLE-HOST** test on the owner's one Mac. None is two-machine evidence (B-002). SINGLE-HOST evidence never satisfies a criterion that needs two machines (F-02-01 LAN discovery, F-03-01, F-03-02, Gate D, two installs pairing through the UI). Rows whose criteria do not depend on topology (pairing cryptography, policy, revocation, capture, liveness) were marked `VERIFIED` from SINGLE-HOST tests on 2026-10-15; see `docs/REQUIREMENTS.csv`. Test names are function names; the file is given once per group. The 2026-10-15 two-daemon run is in `docs/evidence/m3-single-host-2026-10-15.md`.
 
 ### 9.1 D1 Identity
 - One Ed25519 key per device, through `ring`. `identity/device.key` is PKCS#8 v2, mode 0600, in a 0700 directory, written tmp + rename. A loosened mode is tightened on load. A corrupt key file is an error, never a silent new identity.

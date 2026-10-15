@@ -18,7 +18,7 @@ COMMON_HOME=$PWD/.common cargo test           # unit + real-inference tests (dae
 cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 ```
 
-## Code map (M1)
+## Code map (M1–M3)
 - `crates/common-core` — stable error codes (F-08-03), `COMMON_HOME` layout, execution manifest (X-15), timeouts.
 - `crates/common-hardware` — `probe()` (F-01-01). `crates/common-models` — GGUF reader, memory/context/quant planning.
 - `crates/common-artifacts` — catalog (`catalog/models.json`), content-addressed store, verified resumable downloads, pinned engine provisioning (`catalog/backends.json`).
@@ -26,7 +26,9 @@ cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 - `crates/common-api` — axum OpenAI-compatible API on 127.0.0.1:8192 (+ `/api/*`, `/metrics`, `/openapi.json`). `crates/common-cli` — the `common` binary.
 - `apps/desktop` — Tauri 2 + React shell over the API; bundles `common` as a sidecar.
 - `.recovery/codex-m1/` (ignored) and `refs/recovered/codex-m1/*` — the earlier Python slice, kept as correctness oracle.
-- Architecture decisions: ADR-0002 (engine), ADR-0003 (peer transport, proposed). Threat model: `docs/security/THREAT_MODEL.md`.
+- M3 Common Mesh (off by default): `crates/common-identity` (device key, peer store, groups, revocations), `crates/common-policy` (default-deny, quotas), `crates/common-observability` (audit, redacted diagnostics), `crates/common-network` (QUIC + TLS 1.3 raw public keys, discovery, pairing, remote execution); mesh routes in `crates/common-api/src/mesh.rs`, CLI in `crates/common-cli/src/mesh.rs`. Wire format mirror: `proto/common/v1/control.proto`.
+- Two-daemon SINGLE-HOST driver: `tests/distributed/single_host/m3_evidence.py`. Desktop dev build can drive any loopback daemon with `?daemon=http://127.0.0.1:<port>` (see `apps/desktop/README.md`).
+- Architecture decisions: ADR-0002 (engine), ADR-0003 (peer transport; implementation notes list the enforcing tests). Threat model: `docs/security/THREAT_MODEL.md`.
 
 ## Session end (spec section 16 step 8)
 1. Build, lint, test. Record commands and results in `docs/VERIFICATION.md`.
