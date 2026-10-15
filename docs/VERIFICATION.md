@@ -183,3 +183,13 @@ Everything in this section is **SINGLE-HOST**: two or more Common nodes running 
 - Default-settings two-daemon rerun and desktop UI pairing: `docs/evidence/m3-ui-pairing-and-defaults-2026-10-15.md`.
 - Final suite at 68e73f0: `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast` → **364 passed, 0 failed** (41 test binaries); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean; desktop `pnpm test` 77 passed, `pnpm build` ok; no daemon or engine left running afterwards.
 - Open: one `500 backend_failed` among ~130,000 flood requests in an earlier full run (B-015), not reproduced.
+
+## Packaged desktop app: stale daemon fix (2026-10-15, commit 5f0c580)
+
+- Report from another Apple Silicon Mac: the bundled daemon rejected `--exit-with-parent` (exit 2) and the app never got a daemon. Root cause: `tauri build` bundled a daemon built before the flag existed; the build never rebuilt it. Full diagnosis, fix and results: `docs/evidence/desktop-sidecar-fix-2026-10-15.md`.
+- Also fixed: quit SIGKILLed the daemon and orphaned its engine; a crashed app made the daemon die on SIGPIPE and orphan its engine; the bundle was not signed.
+- `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1 cargo test -p common-cli --test desktop_sidecar` → 3 passed (the lifecycle test failed before the stdio fix with "engine stops with the daemon not within 5s").
+- `cd apps/desktop && pnpm tauri build --bundles app,dmg` → the build step reports `build-sidecar: staged daemon accepts: serve --host 127.0.0.1 --port 8192 --exit-with-parent`; signed with identity `-`.
+- `python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/Common_0.1.0_aarch64.dmg --built target/release --work <empty>` → ALL PASS (15 checks): dmg sha256 `7cc481d1c821625eadf00e0dcc3fbca50ab9e59041114b819efed2250ef934c2`; daemon `3168e521…8286d`, shell `c66c8c35…ea01`; fresh-HOME install healthy in 2.4 s with the engine downloaded; golden completion on Metal at 418–438 tok/s; quit, restart, crash (daemon and engine gone in 0.52 s) and restart leave nothing running.
+- Workspace at 5f0c580: `cargo test --workspace --no-fail-fast` → **367 passed, 0 failed**; clippy `-D warnings` and fmt clean; desktop 77 passed, build ok; no daemon or engine left running.
+- Limits: one Mac (fresh HOME, not a fresh user account or second Mac); ad-hoc signed, not notarized, so `spctl` rejects it and a downloaded copy needs "Open Anyway" once (B-008).

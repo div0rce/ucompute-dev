@@ -2,6 +2,12 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-15 (evening) — Claude Code — packaged desktop app fixed (stale bundled daemon)
+
+A tester's packaged `Common.app` never started its daemon: the bundled `common` predated `--exit-with-parent`, which the shell passes. `tauri build` now builds and checks the daemon from the same checkout (`apps/desktop/scripts/build-sidecar.sh`), and the daemon's arguments live in one file (`apps/desktop/src-tauri/daemon-args.txt`). Three more defects found while verifying were fixed: quit orphaned the engine (SIGKILL), a crashed app orphaned it too (SIGPIPE on the daemon's next write), and the bundle was not signed. Evidence: `docs/evidence/desktop-sidecar-fix-2026-10-15.md`; the rebuilt `Common_0.1.0_aarch64.dmg` passed all 15 checks of `apps/desktop/scripts/verify_packaged_app.py` with real inference. Workspace 367 passed, desktop 77 passed. Ledger unchanged (F-10-01 stays IMPLEMENTED_UNVERIFIED: fresh-account, UI-only first token not yet run; B-008).
+
+Next: replace the old `/Applications/Common.app` with the new build; run the UI-only install → first token on a fresh macOS user account or a second Mac; ship testers the new .dmg with its sha256.
+
 ## 2026-10-15 — Claude Code — M3 Common Mesh: 13 rows VERIFIED (SINGLE-HOST), 3 open
 
 **Counts:** VERIFIED 35 (+13), IMPLEMENTED_UNVERIFIED 9, IN_PROGRESS 3, NOT_STARTED 101, BLOCKED 0, INFEASIBLE 0. Commits 5034fb6 … 68e73f0.
