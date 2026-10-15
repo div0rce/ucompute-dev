@@ -4,23 +4,24 @@
 //! `COMMON_REQUIRE_FIXTURES=1` fails instead). Nothing is mocked.
 mod common;
 
-use common::{audit_kinds, pair, Peer};
+use common::{audit_kinds, pair, poll_until, start_relay, Peer};
 use common_artifacts::Store;
 use common_core::{ErrorCode, Paths};
 use common_identity::{Group, GroupPolicy};
 use common_network::proto::{control_message::Body, encode_frame, RemoteChunk, RemoteRequest};
-use common_network::remote::{generate_remote, serve_peer};
+use common_network::remote::{generate_remote, serve_peer, serve_peer_with, ServeOptions};
 use common_network::scan_for_plaintext;
 use common_network::transport::{Node, PeerConnection};
-use common_policy::{ExecutionTarget, PolicyConfig, PolicyEngine, PrivacyMode, WorkloadKind};
+use common_policy::{ExecutionTarget, PolicyConfig, PolicyEngine, PrivacyMode, QuotaConfig, Quotas, WorkloadKind};
 use common_runtime::manager::{LoadOptions, ModelManager};
-use common_runtime::{collect, GenerateEvent, GenerateRequest, PromptInput};
+use common_runtime::{collect, GenerateEvent, GenerateRequest, GenerateStream, PromptInput};
 use futures_util::StreamExt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -30,9 +31,6 @@ const PROMPT: &str = "Once upon a time, a little rabbit";
 /// Greedy 32-token continuation of PROMPT with stories15M-q4_0 on llama.cpp b11609 (CPU and Metal).
 const GOLDEN: &str =
     " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big";
-
-/// Relayed datagrams: (client→server?, payload).
-type Capture = Arc<Mutex<Vec<(bool, Vec<u8>)>>>;
 
 fn common_home() -> PathBuf {
     std::env::var_os("COMMON_HOME")
@@ -62,6 +60,13 @@ fn fixtures() -> Option<Paths> {
     );
     eprintln!("SKIP: {missing}");
     None
+}
+
+/// Tests that run the engine take turns: the timing ones (TPOT, flood) must not measure another
+/// test's llama-server, and two engines at once on an 8 GB Mac only add noise.
+async fn engine_turn() -> tokio::sync::MutexGuard<'static, ()> {
+    static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    TURN.lock().await
 }
 
 /// The serving node's manager over the real COMMON_HOME store (its identity and audit stay in a
@@ -141,21 +146,10 @@ fn find_audit(p: &Peer, kind: &str) -> Option<common_observability::AuditEvent> 
     p.audit.tail(50).unwrap().into_iter().find(|e| e.kind == kind)
 }
 
-/// Polls until `f` holds or `bound` passes; the time it took, or None.
-async fn poll_until(bound: Duration, mut f: impl FnMut() -> bool) -> Option<Duration> {
-    let t = Instant::now();
-    while t.elapsed() < bound {
-        if f() {
-            return Some(t.elapsed());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    None
-}
-
 #[tokio::test]
 async fn remote_golden_text_single_host() {
     let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
     let (a, b) = pair();
     let policy = serving_policy(&b, &a, true);
     let l = link(&a, &b).await;
@@ -234,6 +228,7 @@ async fn remote_golden_text_single_host() {
 #[tokio::test]
 async fn remote_streaming_delivers_before_done() {
     let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
     let (a, b) = pair();
     let policy = serving_policy(&b, &a, true);
     let l = link(&a, &b).await;
@@ -381,6 +376,7 @@ async fn local_only_privacy_never_leaves_device() {
 #[tokio::test]
 async fn remote_cancel_stops_server_generation_within_500ms() {
     let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
     let (a, b) = pair();
     let policy = serving_policy(&b, &a, true);
     let l = link(&a, &b).await;
@@ -426,6 +422,7 @@ async fn remote_cancel_stops_server_generation_within_500ms() {
 #[tokio::test]
 async fn peer_lost_mid_stream_is_typed() {
     let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
     let (a, b) = pair();
     let policy = serving_policy(&b, &a, true);
     let l = link(&a, &b).await;
@@ -463,41 +460,44 @@ async fn peer_lost_mid_stream_is_typed() {
     eprintln!("SINGLE-HOST: peer loss mid-stream surfaced as PeerLost after {took:?}");
 }
 
-/// TEST-ONLY UDP relay: forwards every datagram between the client endpoint and the server
-/// endpoint and records every payload. No such socket exists in `src/` (tests/invariants.rs).
-async fn relay(r_in: UdpSocket, r_out: UdpSocket, server: SocketAddr, log: Capture) {
-    let (mut bi, mut bo) = (vec![0u8; 65535], vec![0u8; 65535]);
-    let mut client: Option<SocketAddr> = None;
-    loop {
-        tokio::select! {
-            r = r_in.recv_from(&mut bi) => {
-                let (n, from) = r.unwrap();
-                client = Some(from);
-                log.lock().unwrap().push((true, bi[..n].to_vec()));
-                r_out.send_to(&bi[..n], server).await.unwrap();
-            }
-            r = r_out.recv_from(&mut bo) => {
-                let (n, _) = r.unwrap();
-                log.lock().unwrap().push((false, bo[..n].to_vec()));
-                if let Some(c) = client {
-                    r_in.send_to(&bo[..n], c).await.unwrap();
-                }
-            }
-        }
+/// Every event of a stream with its arrival time since `t0`.
+async fn timed(mut stream: GenerateStream, t0: Instant) -> Vec<(Duration, GenerateEvent)> {
+    let mut out = Vec::new();
+    while let Some(ev) = stream.next().await {
+        out.push((t0.elapsed(), ev.unwrap()));
     }
+    out
+}
+
+/// Client-observed decode time per output token: (last token − first token) / (tokens − 1).
+fn tpot(events: &[(Duration, GenerateEvent)]) -> Duration {
+    let at: Vec<Duration> = events
+        .iter()
+        .filter(|(_, e)| matches!(e, GenerateEvent::Token { .. }))
+        .map(|(t, _)| *t)
+        .collect();
+    assert!(at.len() >= 2, "{} token events", at.len());
+    (at[at.len() - 1] - at[0]) / (at.len() as u32 - 1)
+}
+
+fn median(mut v: Vec<Duration>) -> Duration {
+    v.sort();
+    v[v.len() / 2]
+}
+
+fn p95(mut v: Vec<Duration>) -> Duration {
+    v.sort();
+    v[((v.len() * 95).div_ceil(100)).saturating_sub(1)]
 }
 
 #[tokio::test]
 async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
     let (a, b) = pair();
     let policy = serving_policy(&b, &a, true);
     let nb = b.start().await;
-    let r_in = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let r_out = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let (relay_addr, relay_out_addr) = (r_in.local_addr().unwrap(), r_out.local_addr().unwrap());
-    let log: Capture = Arc::default();
-    let relay_task = tokio::spawn(relay(r_in, r_out, nb.local_addr().unwrap(), log.clone()));
+    let (relay_addr, relay_out_addr, log, _, relay_task) = start_relay(nb.local_addr().unwrap()).await;
     let na = a.start().await;
     let (out, inn) = tokio::join!(na.connect(relay_addr, b.id()), async { nb.accept().await.unwrap() });
     let out = out.unwrap();
@@ -512,18 +512,42 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut rnd).unwrap();
     let canary = format!("CANARY-{}", hex::encode(rnd));
     let prompt = format!("{PROMPT} {canary}");
-    // Reference completion: the same greedy request on the same engine, locally.
+    // Reference completion: the same greedy request on the same engine, locally, event by event.
+    // The server sends one RemoteChunk per event, so the needles are the individual token texts
+    // (what a plaintext wire would carry contiguously), not the whole completion.
     let local = m.ensure_loaded(MODEL_ID, LoadOptions::default()).await.unwrap();
-    let (expected, ..) = collect(
+    let reference = timed(
         local
             .generate(greedy(&prompt, 32), CancellationToken::new())
             .await
             .unwrap(),
+        Instant::now(),
     )
-    .await
-    .unwrap();
+    .await;
+    let reference: Vec<GenerateEvent> = reference.into_iter().map(|(_, e)| e).collect();
+    let expected: String = reference
+        .iter()
+        .filter_map(|e| match e {
+            GenerateEvent::Token { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     let expected = expected.trim().to_string();
-    assert!(expected.len() >= 8, "completion too short to search for: {expected:?}");
+    let mut token_needles: Vec<String> = reference
+        .iter()
+        .filter_map(|e| match e {
+            GenerateEvent::Token { text, .. } if text.trim().chars().filter(|c| c.is_alphanumeric()).count() >= 4 => {
+                Some(text.trim().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    token_needles.sort();
+    token_needles.dedup();
+    assert!(
+        token_needles.len() >= 3,
+        "too few distinctive tokens to search for: {token_needles:?}"
+    );
 
     let (text, _, usage, ..) = collect(
         generate_remote(
@@ -547,15 +571,8 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     let datagrams: Vec<Vec<u8>> = captured.iter().map(|(_, d)| d.clone()).collect();
     assert!(datagrams.len() > 10, "{} datagrams relayed", datagrams.len());
 
-    // The completion as the peer's JSON would carry it (escaped), and as raw text.
-    let expected_json = serde_json::to_string(&expected).unwrap().trim_matches('"').to_string();
-    let needles = [
-        canary.as_str(),
-        prompt.as_str(),
-        PROMPT,
-        expected.as_str(),
-        expected_json.as_str(),
-    ];
+    let mut needles: Vec<&str> = vec![canary.as_str(), prompt.as_str(), PROMPT];
+    needles.extend(token_needles.iter().map(String::as_str));
     let hits = scan_for_plaintext(&datagrams, &needles);
     assert!(hits.is_empty(), "plaintext in relayed datagrams {hits:?}");
 
@@ -573,28 +590,257 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
         vec![0]
     );
     assert_eq!(scan_for_plaintext(&[req_frame], &[PROMPT]), vec![0]);
-    let chunk_frame = encode_frame(
-        &Body::RemoteChunk(RemoteChunk {
-            event_json: serde_json::to_string(&GenerateEvent::Token {
-                text: expected.clone(),
-                token_ids: vec![],
-            })
-            .unwrap(),
-            ..Default::default()
+    // The real per-token wire sequence in plaintext: one RemoteChunk frame per event, exactly as
+    // the server frames them. Every token needle must be found there, so the empty result above
+    // is not an artefact of the needles never being contiguous on the wire.
+    let plain_frames: Vec<Vec<u8>> = reference
+        .iter()
+        .map(|ev| {
+            encode_frame(
+                &Body::RemoteChunk(RemoteChunk {
+                    request_id: "0123456789abcdef".into(),
+                    event_json: serde_json::to_string(ev).unwrap(),
+                    done: matches!(ev, GenerateEvent::Done { .. }),
+                })
+                .into(),
+            )
         })
-        .into(),
-    );
-    assert_eq!(scan_for_plaintext(&[chunk_frame], &[expected_json.as_str()]), vec![0]);
+        .collect();
+    for n in &token_needles {
+        assert!(
+            !scan_for_plaintext(&plain_frames, &[n.as_str()]).is_empty(),
+            "positive control misses token {n:?}"
+        );
+    }
 
     let (to_server, to_client): (Vec<_>, Vec<_>) = captured.iter().partition(|(c2s, _)| *c2s);
     let bytes = |v: &[&(bool, Vec<u8>)]| v.iter().map(|(_, d)| d.len() as u64).sum::<u64>();
     eprintln!(
-        "bench:transport-overhead SINGLE-HOST relay capture, whole session incl. handshake, 32 tokens: client→server {} B in {} datagrams, server→client {} B in {} datagrams ({:.0} B/token server→client); 0 plaintext hits over {} needles",
+        "bench:transport-overhead SINGLE-HOST relay capture, whole session incl. handshake, 32 tokens: client→server {} B in {} datagrams, server→client {} B in {} datagrams ({:.0} B/token server→client); 0 plaintext hits over {} needles ({} per-token: {:?})",
         bytes(&to_server),
         to_server.len(),
         bytes(&to_client),
         to_client.len(),
         bytes(&to_client) as f64 / 32.0,
         needles.len(),
+        token_needles.len(),
+        token_needles,
+    );
+}
+
+/// F-02-03 "transport overhead on decode TPOT measured": the same greedy 64-token request on the
+/// same loaded engine, local stream vs through the peer transport, alternating, 5 runs each;
+/// client-observed time per output token. SINGLE-HOST loopback QUIC: this is the CPU cost of the
+/// QUIC + TLS + framing hop, a lower bound for H1 (<= 5 % on a real LAN), not the LAN number.
+#[tokio::test]
+async fn decode_tpot_overhead_measured_single_host() {
+    let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
+    let (a, b) = pair();
+    let policy = serving_policy(&b, &a, true);
+    let l = link(&a, &b).await;
+    let m = manager(&home);
+    let model = m.ensure_loaded(MODEL_ID, LoadOptions::default()).await.unwrap();
+    tokio::spawn(serve_peer(l.inn.clone(), m.clone(), policy, b.audit.clone()));
+    let (mut local, mut remote) = (Vec::new(), Vec::new());
+    for run in 0..6 {
+        let t0 = Instant::now();
+        let ev = timed(
+            model
+                .generate(greedy(PROMPT, 64), CancellationToken::new())
+                .await
+                .unwrap(),
+            t0,
+        )
+        .await;
+        let lt = tpot(&ev);
+        let t0 = Instant::now();
+        let stream = generate_remote(
+            l.out.clone(),
+            MODEL_ID,
+            MODEL_SHA,
+            greedy(PROMPT, 64),
+            "trusted_group",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let rt = tpot(&timed(stream, t0).await);
+        if run > 0 {
+            // run 0 warms caches on both paths
+            local.push(lt);
+            remote.push(rt);
+        }
+    }
+    let (lt, rt) = (median(local.clone()), median(remote.clone()));
+    let ratio = rt.as_secs_f64() / lt.as_secs_f64();
+    eprintln!(
+        "bench:transport-overhead SINGLE-HOST loopback decode TPOT (median of 5, 64 tokens, stories15M-q4_0): local {:.3} ms, remote {:.3} ms, ratio {ratio:.3} (overhead {:+.1} %); local runs {local:?}, remote runs {remote:?}",
+        lt.as_secs_f64() * 1000.0,
+        rt.as_secs_f64() * 1000.0,
+        (ratio - 1.0) * 100.0,
+    );
+    // A gross-regression guard only; the H1 claim needs the two-machine LAN measurement (B-002).
+    assert!(ratio < 1.5, "remote decode is {ratio:.2}x local");
+}
+
+/// A peer's request is held to the local API's bounds: a raw GBNF grammar is refused before
+/// anything is loaded (so this runs without the fixture too).
+#[tokio::test]
+async fn peer_supplied_grammar_refused_before_load() {
+    let (a, b) = pair();
+    let policy = serving_policy(&b, &a, true);
+    let l = link(&a, &b).await;
+    let m = manager(&Paths::at(common_home()));
+    tokio::spawn(serve_peer(l.inn.clone(), m.clone(), policy, b.audit.clone()));
+    let req = GenerateRequest {
+        grammar: Some("root ::= (\"a\" root) | \"a\"".into()),
+        ..greedy(PROMPT, 8)
+    };
+    let stream = generate_remote(
+        l.out.clone(),
+        MODEL_ID,
+        MODEL_SHA,
+        req,
+        "trusted_group",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let items: Vec<_> = timeout(Duration::from_secs(5), stream.collect()).await.unwrap();
+    let e = items[0].as_ref().unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidRequest, "{e}");
+    assert!(e.message.contains("grammar"), "{e}");
+    assert!(m.status().await.is_none(), "nothing was loaded");
+}
+
+/// F-06-04 `peer_flood_throttled` + `bench:abuse-flood`: a peer floods 8 concurrent requests at a
+/// time while this device serves its own (local) requests. The serving side shares its engine as
+/// the daemon would (`serve_peer_with`: the local load options, the local admission's engine-slot
+/// semaphore, at most one peer generation at a time, per-peer quotas). The peer gets typed
+/// `overloaded` errors; local p95 latency must degrade by less than 20 %. SINGLE-HOST: peer and
+/// local work share this Mac's CPU/GPU, which makes the bound harder, not easier.
+#[tokio::test]
+async fn peer_flood_throttled_local_p95_within_20pct_single_host() {
+    let Some(home) = fixtures() else { return };
+    let _turn = engine_turn().await;
+    let (a, b) = pair();
+    let policy = serving_policy(&b, &a, true);
+    let l = link(&a, &b).await;
+    let m = manager(&home);
+    let slots = 4;
+    let load = LoadOptions {
+        parallel_slots: Some(slots),
+        ..Default::default()
+    };
+    let engine = Arc::new(Semaphore::new(slots as usize));
+    let peer_share = Arc::new(Semaphore::new(1));
+    let opts = ServeOptions {
+        load: load.clone(),
+        quotas: Arc::new(Quotas::new(QuotaConfig {
+            requests_per_minute: 100_000,
+            max_concurrent: 2,
+            ..QuotaConfig::default()
+        })),
+        engine_slots: Some(engine.clone()),
+        peer_slots: peer_share.clone(),
+    };
+    tokio::spawn(serve_peer_with(l.inn.clone(), m.clone(), policy, b.audit.clone(), opts));
+    let model = m.ensure_loaded(MODEL_ID, load).await.unwrap();
+    // One local request as the API runs it: wait for an engine slot (admission), then generate.
+    let local_once = || {
+        let (engine, model) = (engine.clone(), model.clone());
+        async move {
+            let t0 = Instant::now();
+            let _slot = engine.acquire_owned().await.unwrap();
+            let s = model
+                .generate(greedy(PROMPT, 16), CancellationToken::new())
+                .await
+                .unwrap();
+            collect(s).await.unwrap();
+            t0.elapsed()
+        }
+    };
+    for _ in 0..3 {
+        local_once().await;
+    }
+    // Flood on and off in alternating phases, so drift on this shared machine hits both buckets.
+    let (stop, on) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (out, flag, flooding) = (l.out.clone(), stop.clone(), on.clone());
+    let flood = tokio::spawn(async move {
+        let (mut ok, mut overloaded, mut other) = (0u32, 0u32, Vec::new());
+        while !flag.load(Ordering::SeqCst) {
+            if !flooding.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+            let wave = (0..8).map(|_| {
+                let out = out.clone();
+                async move {
+                    let s = generate_remote(
+                        out,
+                        MODEL_ID,
+                        MODEL_SHA,
+                        greedy(PROMPT, 32),
+                        "trusted_group",
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                    collect(s).await
+                }
+            });
+            for r in futures_util::future::join_all(wave).await {
+                match r {
+                    Ok(_) => ok += 1,
+                    Err(e) if e.code == ErrorCode::Overloaded => overloaded += 1,
+                    Err(e) => other.push(e.code),
+                }
+            }
+        }
+        (ok, overloaded, other)
+    });
+    let (mut baseline, mut flooded) = (Vec::new(), Vec::new());
+    for phase in 0..8 {
+        let flood_phase = phase % 2 == 1;
+        on.store(flood_phase, Ordering::SeqCst);
+        if flood_phase {
+            // Measure only once a peer generation really holds the engine.
+            poll_until(Duration::from_secs(5), || peer_share.available_permits() == 0)
+                .await
+                .expect("the flood reaches the engine");
+        } else {
+            // No peer generation left over from the last flood phase in the baseline.
+            poll_until(Duration::from_secs(5), || peer_share.available_permits() == 1)
+                .await
+                .expect("peer generations drain");
+        }
+        for _ in 0..10 {
+            let t = local_once().await;
+            if flood_phase {
+                flooded.push(t);
+            } else {
+                baseline.push(t);
+            }
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    let (ok, overloaded, other) = flood.await.unwrap();
+    let (base, under) = (p95(baseline.clone()), p95(flooded.clone()));
+    let ratio = under.as_secs_f64() / base.as_secs_f64();
+    eprintln!(
+        "bench:abuse-flood SINGLE-HOST: local p95 {:.1} ms baseline vs {:.1} ms under a peer flood (ratio {ratio:.3}, {:+.1} %); peer requests served {ok}, refused overloaded {overloaded}, other {other:?}; local median {:.1} -> {:.1} ms",
+        base.as_secs_f64() * 1000.0,
+        under.as_secs_f64() * 1000.0,
+        (ratio - 1.0) * 100.0,
+        median(baseline).as_secs_f64() * 1000.0,
+        median(flooded).as_secs_f64() * 1000.0,
+    );
+    assert!(overloaded > 0, "the flood must be throttled with typed errors");
+    assert!(other.is_empty(), "every refusal is typed overloaded: {other:?}");
+    assert!(ok > 0, "the peer is still served within its share");
+    assert!(
+        ratio < 1.2,
+        "local p95 degraded {:.1} % under the flood",
+        (ratio - 1.0) * 100.0
     );
 }

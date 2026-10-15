@@ -62,7 +62,8 @@ describe("Peers view", () => {
     await screen.findByText("Paired with Studio Mac.");
     expect(screen.queryByRole("group", { name: "Pairing code" })).toBeNull();
     await screen.findByText("Studio Mac", { selector: ".model-name" });
-    expect(screen.getByText("Connected")).toBeTruthy();
+    // Pairing opens no workload connection; the daemon connects when a request first targets the device.
+    expect(screen.getByText("Not connected")).toBeTruthy();
   });
 
   it("a window the other device fails closes with the daemon's typed error", async () => {
@@ -146,7 +147,7 @@ describe("Peers view", () => {
     render(<Peers pollMs={20} />);
     // Without heartbeat health the daemon's `connected` decides the column.
     expect(await screen.findByText("Connected")).toBeTruthy();
-    expect(screen.getByText("Offline")).toBeTruthy();
+    expect(screen.getByText("Not connected")).toBeTruthy();
 
     await user.click(await screen.findByRole("button", { name: "Revoke Studio Mac" }));
     expect(fake.peers).toHaveLength(2);

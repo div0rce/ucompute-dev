@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, shortLabel, type Peer, type Target } from "../api/client";
 import { privacy, runTarget } from "../state/stores";
 
@@ -13,17 +13,16 @@ export function targetName(target: Target | undefined, peers: Peer[]): string {
 /**
  * "Run on" selector. Rendered only when the privacy mode allows leaving this device; in local-only mode it
  * renders nothing and the target stays "local", so the selector cannot be the thing that leaks.
+ *
+ * Every paired device is selectable whether or not a connection is open: the daemon connects on demand when a
+ * request targets it and answers `peer_lost` when it cannot reach it, which the chat shows like any error.
  */
 export function RunOn({ onPeers }: { onPeers?: (peers: Peer[]) => void } = {}) {
   const mode = privacy.use()?.mode ?? "local_only";
   const target = runTarget.use();
   const [peers, setPeers] = useState<Peer[]>([]);
 
-  useEffect(() => {
-    if (mode === "local_only") {
-      runTarget.set("local");
-      return;
-    }
+  const load = useCallback(() => {
     api.peers().then(
       (r) => {
         setPeers(r.peers);
@@ -34,18 +33,23 @@ export function RunOn({ onPeers }: { onPeers?: (peers: Peer[]) => void } = {}) {
       },
       () => undefined,
     );
-  }, [mode, onPeers]);
+  }, [onPeers]);
+
+  useEffect(() => {
+    if (mode === "local_only") runTarget.set("local");
+    else load();
+  }, [mode, load]);
 
   if (mode === "local_only") return null;
+  // ponytail: refreshed on focus (a device paired since mount shows up when the list is opened), no polling.
   return (
     <label className="run-on">
       <span className="small muted">Run on</span>
-      <select value={target} onChange={(e) => runTarget.set(e.target.value as Target)}>
+      <select value={target} onFocus={load} onChange={(e) => runTarget.set(e.target.value as Target)}>
         <option value="local">This Mac</option>
         {peers.map((p) => (
-          <option key={p.id} value={`peer:${p.id}`} disabled={!p.connected}>
+          <option key={p.id} value={`peer:${p.id}`}>
             {p.name || p.short_label}
-            {p.connected ? "" : " (offline)"}
           </option>
         ))}
       </select>

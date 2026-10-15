@@ -7,29 +7,43 @@
 //! [`DISCLOSURE`] until the caller acknowledges it; `swarm_allowed` is refused until Gate F.
 //! Every off-device action is audited with ids, counts and codes only.
 //!
+//! `config.json` is re-read whenever it changes on disk, and `PUT /api/network|privacy` are
+//! read-modify-writes of the file, so `common privacy local-only` from another process applies to
+//! the next request and is never written back over.
+//!
 //! Connections: the inbound accept loop and every outbound connect attach the same two tasks to a
 //! `PeerConnection`: `remote::serve_peer` (default deny per request) and [`control_loop`], which
-//! sends this device's revocations and applies the peer's (ADR-0003 D7), so a revocation reaches
-//! every connected group member and the revoked device is disconnected everywhere.
+//! sends this device's revocations and applies (and forwards) the peer's (ADR-0003 D7). While
+//! networking is on, [`sync_loop`] keeps a connection to every pinned device (1, 2, 4 … 30 s
+//! backoff), so a revocation reaches members that are not mid-request and offline members
+//! converge when they return. Turning networking off also closes an open pairing window.
 
 use crate::{ApiError, AppState, Json};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use common_core::{CommonError, ErrorCode, Paths, Result};
-use common_identity::{DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
+use common_identity::{utc_now, DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
 use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, MAX_RECORD_AGE_SECS};
+use common_network::health::HealthTracker;
 use common_network::pairing;
 use common_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
 use common_network::transport::{ControlStream, Node, PeerConnection};
 use common_network::{remote, NetworkConfig, MAX_CONTROL_FRAME};
+use common_observability::Audit;
 use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode};
+use common_runtime::{GenerateEvent, GenerateRequest, GenerateStream};
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{ready, Context, Poll};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// Shown before a non-local privacy mode can be selected (F-10-10, THREAT_MODEL §4). Returned by
 /// `GET /api/privacy` and, as the error message, by an unacknowledged `PUT /api/privacy`.
@@ -41,6 +55,8 @@ Pair only devices you trust with your prompts.";
 
 const SETTINGS_FILE: &str = "config.json";
 const DEFAULT_DEVICE_NAME: &str = "Common device";
+/// How often [`sync_loop`] looks for pinned devices without a connection.
+const SYNC_TICK: Duration = Duration::from_secs(1);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -80,6 +96,37 @@ impl Settings {
     }
 }
 
+/// `(mtime, len)` of `config.json`, `None` when absent: the change detector for [`SettingsCell`].
+fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+}
+
+/// The settings as last read from `config.json`, and that file's stamp at the time.
+pub(crate) struct SettingsCell {
+    value: Settings,
+    stamp: Option<(SystemTime, u64)>,
+}
+
+impl SettingsCell {
+    /// The file, or (no file yet) the defaults with `network.enabled` from the API config.
+    pub(crate) fn load(paths: &Paths, config: &crate::ApiConfig) -> Result<SettingsCell> {
+        // Stamp first: a write between the two reads is then seen as a change on the next read.
+        let stamp = file_stamp(&Settings::path(paths));
+        let value = Settings::load(paths)?.unwrap_or_else(|| seed(config));
+        Ok(SettingsCell { value, stamp })
+    }
+}
+
+/// What applies while no `config.json` exists.
+fn seed(config: &crate::ApiConfig) -> Settings {
+    Settings {
+        network_enabled: config.network.enabled,
+        ..Default::default()
+    }
+}
+
 /// `<path>.tmp` + rename, mode 0600 (the identity crate's discipline; its helper is private).
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
@@ -111,11 +158,12 @@ pub struct Net {
     advertiser: Option<Advertiser>,
     browser: Option<Browser>,
     accept: Option<tokio::task::JoinHandle<()>>,
+    sync: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Net {
     async fn stop(&mut self) {
-        if let Some(t) = self.accept.take() {
+        for t in [self.accept.take(), self.sync.take()].into_iter().flatten() {
             t.abort();
         }
         self.advertiser = None;
@@ -157,6 +205,10 @@ pub struct Pairing {
     pub port: u16,
     pub expires_at: u64,
     result: Arc<Mutex<Option<Result<PeerRecord>>>>,
+    /// Aborts `pairing::start`'s task; dropping it drops (and so closes) the pairing endpoint.
+    abort: tokio::task::AbortHandle,
+    /// The task that records `result`; awaited by [`cancel_pairing`].
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Pairing {
@@ -165,15 +217,65 @@ impl Pairing {
     }
 }
 
+/// Close an open pairing window (its endpoint goes with the aborted task, so nothing listens
+/// and nothing can be pinned afterwards) and wait until its result is recorded (`cancelled`).
+async fn cancel_pairing(slot: &mut Option<Pairing>) {
+    if let Some(p) = slot.as_mut() {
+        p.abort.abort();
+        if let Some(t) = p.task.take() {
+            let _ = t.await;
+        }
+    }
+}
+
 impl AppState {
+    /// The current settings: `config.json` as it is now (re-read when its mtime or size changed,
+    /// so another process's `common privacy local-only` applies to the next request). A file that
+    /// no longer parses keeps the rest but forces `local_only` (fail closed, logged).
     pub fn settings(&self) -> Settings {
-        *self.settings.read().unwrap_or_else(PoisonError::into_inner)
+        self.fresh_settings(&mut lock(&self.settings), false)
     }
 
-    /// Replace the in-memory settings (not persisted; `Settings::save` does that). The CLI uses it
-    /// for run-only flags.
+    fn fresh_settings(&self, cell: &mut SettingsCell, force: bool) -> Settings {
+        let stamp = file_stamp(&Settings::path(&self.paths));
+        if force || stamp != cell.stamp {
+            cell.value = match Settings::load(&self.paths) {
+                Ok(Some(s)) => s,
+                Ok(None) => seed(&self.config),
+                Err(e) => {
+                    tracing::warn!(error = %e, "settings file unreadable; privacy forced to local_only");
+                    Settings {
+                        privacy: PrivacyMode::LocalOnly,
+                        ..cell.value
+                    }
+                }
+            };
+            cell.stamp = stamp;
+        }
+        cell.value
+    }
+
+    /// Replace the in-memory settings until `config.json` next changes (not persisted;
+    /// `serve_on` uses it to show networking off when the endpoint could not start).
     pub fn set_settings(&self, s: Settings) {
-        *self.settings.write().unwrap_or_else(PoisonError::into_inner) = s;
+        lock(&self.settings).value = s;
+    }
+
+    /// Read-modify-write of `config.json` under the settings lock: `f` sees the file as it is now
+    /// (never an in-memory override), and a changed result is saved before anything uses it.
+    /// Returns `(before, after)`.
+    // ponytail: in-process lock only; a CLI write landing between this read and save (same
+    // millisecond) is lost. A flock on config.json is the upgrade if that ever matters.
+    fn update_settings(&self, f: impl FnOnce(Settings) -> Settings) -> Result<(Settings, Settings)> {
+        let mut cell = lock(&self.settings);
+        let before = self.fresh_settings(&mut cell, true);
+        let after = f(before);
+        if after != before {
+            after.save(&self.paths)?;
+            cell.value = after;
+            cell.stamp = file_stamp(&Settings::path(&self.paths));
+        }
+        Ok((before, after))
     }
 
     /// The policy engine for the current settings. Built per call (two bools and an `Arc` clone),
@@ -191,18 +293,22 @@ impl AppState {
         ))
     }
 
-    /// Append an audit line; a failure is logged, never fatal for the request.
+    /// Append an audit line; a failure is logged at warn, never fatal for the request. (A request
+    /// that leaves the device is refused instead when its entry cannot be written; see
+    /// [`generate_remote_audited`].)
     pub fn audit(&self, kind: &str, peer: Option<&PeerId>, fields: Value) {
         let hex = peer.map(PeerId::to_hex);
         if let Err(e) = self.audit.record(kind, hex.as_deref(), fields) {
-            tracing::debug!(kind, error = %e, "audit record not written");
+            tracing::warn!(kind, error = %e, "audit record not written");
         }
     }
 
-    /// Stop whatever runs, then start the Node, discovery and the accept loop when
-    /// `settings().network_enabled`. `Node::start` refuses unless the config says enabled, so a
-    /// disabled setting can never leave an endpoint bound.
+    /// Close any pairing window, stop whatever runs, then start the Node, discovery, the accept
+    /// loop and the sync loop when `settings().network_enabled`. `Node::start` refuses unless the
+    /// config says enabled, so a disabled setting can never leave an endpoint bound.
     pub async fn apply_network(self: &Arc<Self>) -> Result<()> {
+        let mut pairing = self.pairing.lock().await;
+        cancel_pairing(&mut pairing).await;
         let s = self.settings();
         let mut net = self.net.lock().await;
         net.stop().await;
@@ -232,12 +338,16 @@ impl AppState {
         net.advertiser = Some(Advertiser::start(&cfg, self.identity.clone(), port, None)?);
         net.browser = Some(Browser::start(&cfg, self.peers.clone())?);
         net.accept = Some(tokio::spawn(accept_loop(self.clone(), node.clone())));
+        net.sync = Some(tokio::spawn(sync_loop(self.clone(), node.clone())));
         net.cfg = Some(cfg);
         net.node = Some(node);
         Ok(())
     }
 
+    /// Close any pairing window and the peer endpoint; afterwards no socket of the mesh is open.
     pub async fn stop_network(&self) {
+        let mut pairing = self.pairing.lock().await;
+        cancel_pairing(&mut pairing).await;
         self.net.lock().await.stop().await;
     }
 
@@ -293,25 +403,12 @@ impl AppState {
     }
 
     /// An authenticated connection to `id`: the open one when there is one, else a new connect to
-    /// the pinned `last_addr` (or the address mDNS saw). Typed errors from `Node::connect`.
+    /// the address mDNS sees now, then the pinned `last_addr` (see [`dial_order`]). A successful
+    /// dial refreshes `last_addr`/`last_seen_utc`. Typed errors from `Node::connect`; an
+    /// unreachable address falls through to the next one, a refusal (revoked, unpinned) does not.
     pub async fn peer_connection(self: &Arc<Self>, node: &Arc<Node>, id: PeerId) -> Result<Arc<PeerConnection>> {
         if let Some(c) = node.connections().into_iter().find(|c| c.peer_id == id) {
             return Ok(c);
-        }
-        let addr = self.peer_addr(id).await?;
-        let conn = node.connect(addr, id).await?;
-        self.attach(node, conn.clone());
-        Ok(conn)
-    }
-
-    async fn peer_addr(&self, id: PeerId) -> Result<SocketAddr> {
-        let pinned = self
-            .peers
-            .get(&id)?
-            .and_then(|p| p.last_addr)
-            .and_then(|a| a.parse().ok());
-        if let Some(a) = pinned {
-            return Ok(a);
         }
         let discovered = self
             .net
@@ -321,13 +418,46 @@ impl AppState {
             .into_iter()
             .find(|p| p.id == id)
             .map(|p| p.addr);
-        discovered.ok_or_else(|| {
-            CommonError::new(
-                ErrorCode::PeerLost,
-                format!("no known address for device {}", id.short_label()),
-            )
-            .with_hint("check that it is awake and on the same network")
-        })
+        let pinned = self
+            .peers
+            .get(&id)?
+            .and_then(|p| p.last_addr)
+            .and_then(|a| a.parse().ok());
+        let mut last = CommonError::new(
+            ErrorCode::PeerLost,
+            format!("no known address for device {}", id.short_label()),
+        )
+        .with_hint("check that it is awake and on the same network");
+        for addr in dial_order(discovered, pinned) {
+            match node.connect(addr, id).await {
+                Ok(conn) => {
+                    self.touch(id, Some(addr));
+                    self.attach(node, conn.clone());
+                    return Ok(conn);
+                }
+                Err(e) if matches!(e.code, ErrorCode::PeerLost | ErrorCode::Timeout) => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+
+    /// Record a contact with a pinned peer: `last_seen_utc` always, `last_addr` only for an address
+    /// this device dialled (an inbound source may be a short-lived client port such as
+    /// `common run --peer`). Under `peer_writes`, so it never re-pins a device unpaired meanwhile;
+    /// `PeerStore::pin` refuses a revoked one.
+    fn touch(&self, id: PeerId, dialled: Option<SocketAddr>) {
+        let _g = lock(&self.peer_writes);
+        let Ok(Some(mut p)) = self.peers.get(&id) else {
+            return;
+        };
+        if let Some(a) = dialled {
+            p.last_addr = Some(a.to_string());
+        }
+        p.last_seen_utc = Some(utc_now());
+        if let Err(e) = self.peers.pin(p) {
+            tracing::debug!(peer = %id.short_label(), code = %e.code, "peer address not refreshed");
+        }
     }
 
     /// Serve the peer's requests (default deny per request) and run the control loop.
@@ -371,9 +501,54 @@ fn short_label(s: &str) -> Option<String> {
     ok.then(|| s.to_ascii_lowercase())
 }
 
+/// Where to dial a peer, best first: the address in a fresh signed mDNS record (it follows DHCP
+/// and Wi-Fi changes), then the pinned `last_addr`; duplicates removed.
+fn dial_order(discovered: Option<SocketAddr>, pinned: Option<SocketAddr>) -> Vec<SocketAddr> {
+    let mut v: Vec<SocketAddr> = discovered.into_iter().chain(pinned).collect();
+    v.dedup();
+    v
+}
+
 async fn accept_loop(st: Arc<AppState>, node: Arc<Node>) {
     while let Some(conn) = node.accept().await {
+        st.touch(conn.peer_id, None);
         st.attach(&node, conn);
+    }
+}
+
+/// ADR-0003 D7: keep a connection (and so a control loop) to every pinned device while networking
+/// is on. A device that could not be reached waits `HealthTracker::backoff_secs(failures - 1)`
+/// (1, 2, 4 … 30 s) before the next dial; due dials run concurrently.
+// ponytail: every failed dial is one `peer_rejected` audit line (written by `Node::connect`), so an
+// offline paired device costs at most two lines a minute. Dial only devices mDNS sees, or let
+// `Node::connect` skip auditing plain timeouts, if that ever bloats the audit log.
+async fn sync_loop(st: Arc<AppState>, node: Arc<Node>) {
+    let mut failures: HashMap<PeerId, (u32, Instant)> = HashMap::new();
+    loop {
+        let connected: HashSet<PeerId> = node.connections().iter().map(|c| c.peer_id).collect();
+        let now = Instant::now();
+        let due: Vec<PeerId> = st
+            .peers
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|id| !connected.contains(id) && failures.get(id).is_none_or(|(_, next)| *next <= now))
+            .collect();
+        let results = futures_util::future::join_all(due.iter().map(|id| st.peer_connection(&node, *id))).await;
+        for (id, r) in due.into_iter().zip(results) {
+            match r {
+                Ok(_) => {
+                    failures.remove(&id);
+                }
+                Err(_) => {
+                    let n = failures.get(&id).map_or(0, |(n, _)| *n) + 1;
+                    let wait = Duration::from_secs(HealthTracker::backoff_secs(n - 1));
+                    failures.insert(id, (n, Instant::now() + wait));
+                }
+            }
+        }
+        tokio::time::sleep(SYNC_TICK).await;
     }
 }
 
@@ -406,10 +581,32 @@ fn revocation_from_msg(m: RevocationMsg) -> Result<Revocation> {
     })
 }
 
+/// A revocation from a peer: ignored when already held or when it names this device; otherwise
+/// checked and stored by `PeerStore::apply_revocation` (issuer pinned and sharing a group with the
+/// target, signature valid, not superseded by a later local re-pair, so a replay on reconnect
+/// cannot undo that re-pair), the revoked device disconnected, and the revocation forwarded to
+/// every other connected peer (a peer that already holds it stops there, so forwarding ends).
+async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revocation) {
+    if r.peer_id == st.identity.id || st.peers.revocations_since(0).unwrap_or_default().contains(&r) {
+        return;
+    }
+    if let Err(e) = st.peers.apply_revocation(&r) {
+        tracing::info!(peer = %from.short_label(), code = %e.code, "revocation from peer ignored");
+        return;
+    }
+    node.disconnect(&r.peer_id, "revoked").await;
+    st.audit(
+        "peer_revoked",
+        Some(&r.peer_id),
+        json!({ "seq": r.seq, "by": r.revoked_by.short_label(), "source": "peer" }),
+    );
+    let _ = st.revocations.send(revocation_msg(&r));
+}
+
 /// Owns the control stream for the life of the connection: first sends every revocation this
-/// store holds (ADR-0003 D7 `revocations_since` on reconnect), then forwards new local ones and
-/// applies the peer's (signature and issuer checked by `PeerStore::apply_revocation`; the revoked
-/// device is disconnected here too). `Status` and unknown messages are ignored in this minor.
+/// store holds (ADR-0003 D7 `revocations_since` on reconnect), then forwards new ones (local or
+/// applied from another peer) and applies the peer's ([`apply_peer_revocation`]). `Status` and
+/// unknown messages are ignored in this minor.
 async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnection>) {
     let mut rx = st.revocations.subscribe();
     let mut guard = conn.control.lock().await;
@@ -439,28 +636,122 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
         match frame {
             Ok(Some(ControlMessage {
                 body: Some(Body::Revocation(m)),
-            })) => {
-                let applied = revocation_from_msg(m).and_then(|r| {
-                    st.peers.apply_revocation(&r)?;
-                    Ok(r)
-                });
-                match applied {
-                    Ok(r) => {
-                        node.disconnect(&r.peer_id, "revoked").await;
-                        st.audit(
-                            "peer_revoked",
-                            Some(&r.peer_id),
-                            json!({ "seq": r.seq, "by": r.revoked_by.short_label(), "source": "peer" }),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::info!(peer = %conn.peer_id.short_label(), code = %e.code, "revocation from peer ignored");
-                    }
+            })) => match revocation_from_msg(m) {
+                Ok(r) => apply_peer_revocation(&st, &node, conn.peer_id, r).await,
+                Err(e) => {
+                    tracing::info!(peer = %conn.peer_id.short_label(), code = %e.code, "malformed revocation ignored");
                 }
-            }
+            },
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => return,
         }
+    }
+}
+
+// ---------------------------------------------------------------- remote requests (F-06-10)
+
+/// `remote::generate_remote` with the sending side's audit (F-06-10): a `remote_request` entry
+/// (`phase: "sent"`, peer, model id) is written before the request frame leaves, and the request
+/// is refused (`io`) when that entry cannot be written; a second entry (`phase: "finished"`)
+/// records the outcome: `done`, the error code, `incomplete`, or `cancelled` when the caller
+/// dropped the stream (HTTP client gone, Stop). Ids, counts and durations only, never text.
+/// The API's `target: peer:<id>` uses it; `common run --peer` should too.
+pub async fn generate_remote_audited(
+    audit: Arc<Audit>,
+    conn: Arc<PeerConnection>,
+    model_id: &str,
+    model_sha256: &str,
+    req: GenerateRequest,
+    privacy: &str,
+    cancel: CancellationToken,
+) -> Result<GenerateStream> {
+    let peer = conn.peer_id;
+    audit
+        .record(
+            "remote_request",
+            Some(&peer.to_hex()),
+            json!({ "role": "client", "phase": "sent", "peer": peer.short_label(), "model_id": model_id }),
+        )
+        .map_err(|e| CommonError::io(format!("audit log not writable, request not sent: {}", e.message)))?;
+    let mut outcome = Outcome::new(audit, peer, model_id);
+    match remote::generate_remote(conn, model_id, model_sha256, req, privacy, cancel).await {
+        Ok(inner) => Ok(Audited { inner, outcome }.boxed()),
+        Err(e) => {
+            outcome.finish(e.code.as_str());
+            Err(e)
+        }
+    }
+}
+
+/// The `finished` entry of one remote request; written once, by `finish` or else on drop.
+struct Outcome {
+    audit: Arc<Audit>,
+    peer: PeerId,
+    model_id: String,
+    started: Instant,
+    completion_tokens: u32,
+    written: bool,
+}
+
+impl Outcome {
+    fn new(audit: Arc<Audit>, peer: PeerId, model_id: &str) -> Self {
+        Self {
+            audit,
+            peer,
+            model_id: model_id.to_string(),
+            started: Instant::now(),
+            completion_tokens: 0,
+            written: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &str) {
+        if std::mem::replace(&mut self.written, true) {
+            return;
+        }
+        let fields = json!({
+            "role": "client",
+            "phase": "finished",
+            "peer": self.peer.short_label(),
+            "model_id": self.model_id,
+            "outcome": outcome,
+            "completion_tokens": self.completion_tokens,
+            "duration_ms": self.started.elapsed().as_millis() as u64,
+        });
+        if let Err(e) = self.audit.record("remote_request", Some(&self.peer.to_hex()), fields) {
+            tracing::warn!(error = %e, "remote_request outcome not audited");
+        }
+    }
+}
+
+impl Drop for Outcome {
+    fn drop(&mut self) {
+        self.finish("cancelled");
+    }
+}
+
+/// A remote generation that writes its [`Outcome`] when it ends, fails or is dropped.
+struct Audited {
+    inner: GenerateStream,
+    outcome: Outcome,
+}
+
+impl Stream for Audited {
+    type Item = Result<GenerateEvent>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let item = ready!(this.inner.poll_next_unpin(cx));
+        match &item {
+            Some(Ok(GenerateEvent::Done { usage, .. })) => {
+                this.outcome.completion_tokens = usage.completion_tokens;
+                this.outcome.finish("done");
+            }
+            Some(Err(e)) => this.outcome.finish(e.code.as_str()),
+            Some(Ok(_)) => {}
+            None => this.outcome.finish("incomplete"),
+        }
+        Poll::Ready(item)
     }
 }
 
@@ -478,30 +769,28 @@ pub struct NetworkBody {
     pub serve_peers: Option<bool>,
 }
 
-/// Changes are persisted and the Node is restarted so every connection sees the new policy. When
-/// the endpoint cannot start, networking is recorded as off and the error is returned.
+/// Changes are persisted (a read-modify-write of `config.json`, so a concurrent CLI privacy change
+/// is kept) and the Node is restarted so every connection sees the new policy; it is also
+/// (re)started when the file says enabled but no endpoint runs. When the endpoint cannot start,
+/// networking is recorded as off and the error is returned.
 pub async fn network_put(
     State(st): State<Arc<AppState>>,
     Json(body): Json<NetworkBody>,
 ) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let before = st.settings();
-    let after = Settings {
-        network_enabled: body.enabled.unwrap_or(before.network_enabled),
-        serve_peers: body.serve_peers.unwrap_or(before.serve_peers),
-        ..before
-    };
-    if after != before {
-        st.set_settings(after);
+    let (before, after) = st.update_settings(|s| Settings {
+        network_enabled: body.enabled.unwrap_or(s.network_enabled),
+        serve_peers: body.serve_peers.unwrap_or(s.serve_peers),
+        ..s
+    })?;
+    let running = st.net.lock().await.node.is_some();
+    if after != before || after.network_enabled != running {
         if let Err(e) = st.apply_network().await {
-            let off = Settings {
+            st.update_settings(|s| Settings {
                 network_enabled: false,
-                ..after
-            };
-            st.set_settings(off);
-            off.save(&st.paths)?;
+                ..s
+            })?;
             return Err(e.into());
         }
-        after.save(&st.paths)?;
         st.audit(
             "network_changed",
             None,
@@ -554,7 +843,10 @@ pub async fn peer_delete(
     Path(id): Path<String>,
 ) -> std::result::Result<StatusCode, ApiError> {
     let id = st.resolve_peer(&id)?;
-    st.peers.remove(&id)?;
+    {
+        let _g = lock(&st.peer_writes);
+        st.peers.remove(&id)?;
+    }
     let node = st.net.lock().await.node.clone();
     if let Some(node) = node {
         node.disconnect(&id, "unpaired").await;
@@ -591,7 +883,9 @@ pub struct PairStartBody {
 }
 
 /// Open the pairing window (one at a time; 409 `overloaded` while one is active). Returns the
-/// 6-digit code and the QR payload; `GET /api/pair/status` reports the outcome.
+/// 6-digit code, `pair_addr` (`ip:port` another device dials: the LAN address when the endpoint
+/// is bound on every interface) and the QR payload carrying that address; `GET /api/pair/status`
+/// reports the outcome. Turning networking off closes the window (`cancelled`).
 pub async fn pair_start(
     State(st): State<Arc<AppState>>,
     Json(body): Json<PairStartBody>,
@@ -609,16 +903,38 @@ pub async fn pair_start(
             status: StatusCode::CONFLICT,
         });
     }
+    let bind: IpAddr = node
+        .config
+        .bind_addr
+        .parse()
+        .map_err(|e| CommonError::invalid(format!("network bind address: {e}")))?;
     let (session, handle) = pairing::start(node, &name).await?;
+    let bound = SocketAddr::new(bind, session.port);
+    let pair_addr = routable(bound);
+    // The QR carries the bind address; 0.0.0.0 is not dialable from another machine.
+    let qr = session.qr_payload.replace(&bound.to_string(), &pair_addr.to_string());
     if let Err(e) = st.net.lock().await.advertise(st.identity.clone(), Some(session.port)) {
         tracing::warn!(error = %e, "mdns pairing advert failed");
     }
     let result = Arc::new(Mutex::new(None));
     let (st2, res2) = (st.clone(), result.clone());
-    tokio::spawn(async move {
-        let r = handle
-            .await
-            .unwrap_or_else(|e| Err(CommonError::internal(format!("pairing task failed: {e}"))));
+    let abort = handle.abort_handle();
+    let task = tokio::spawn(async move {
+        let r = match handle.await {
+            Ok(r) => r,
+            Err(e) if e.is_cancelled() => {
+                st2.audit(
+                    "pairing_failed",
+                    None,
+                    json!({ "role": "initiator", "reason": "cancelled" }),
+                );
+                Err(CommonError::new(
+                    ErrorCode::Cancelled,
+                    "the pairing window was closed because peer networking was turned off or restarted",
+                ))
+            }
+            Err(e) => Err(CommonError::internal(format!("pairing task failed: {e}"))),
+        };
         *lock(&res2) = Some(r);
         if let Err(e) = st2.net.lock().await.advertise(st2.identity.clone(), None) {
             tracing::warn!(error = %e, "mdns advert refresh failed");
@@ -628,13 +944,36 @@ pub async fn pair_start(
         port: session.port,
         expires_at: session.expires_at_unix,
         result,
+        abort,
+        task: Some(task),
     });
     Ok(axum::Json(json!({
         "code": session.code,
         "port": session.port,
-        "qr_payload": session.qr_payload,
+        "pair_addr": pair_addr.to_string(),
+        "qr_payload": qr,
         "expires_at": session.expires_at_unix,
     })))
+}
+
+/// The address a LAN peer should dial when `addr` is bound on every interface: the IP of the
+/// default route. The UDP `connect` sends nothing (it only asks the kernel which source address it
+/// would use) and the probe socket is dropped at once; this is the only socket this module opens
+/// outside `common-network`. A specific address, or no route, returns `addr` unchanged.
+// ponytail: one default-route guess; a multi-homed host gets the first route. mDNS carries the
+// address the other device actually sees. `common_cli::mesh::routable` is the same function and
+// can call this one.
+pub fn routable(addr: SocketAddr) -> SocketAddr {
+    if !addr.ip().is_unspecified() {
+        return addr;
+    }
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
+        .and_then(|s| s.local_addr());
+    match probe {
+        Ok(local) if !local.ip().is_unspecified() => SocketAddr::new(local.ip(), addr.port()),
+        _ => addr,
+    }
 }
 
 pub async fn pair_status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
@@ -685,12 +1024,30 @@ pub async fn pair_join(
         })?;
         (addr, body.code, None)
     };
-    let rec = pairing::join(node, addr, &code, &name).await?;
+    let revoked_before: HashSet<PeerId> = st.peers.revocations_since(0)?.into_iter().map(|r| r.peer_id).collect();
+    let rec = pairing::join(node.clone(), addr, &code, &name).await?;
     if expected.is_some_and(|id| id != rec.id) {
-        st.peers.remove(&rec.id)?;
+        // ponytail: `pairing::join` pins (and clears a revocation of) whoever answered before the
+        // id can be compared here. Rolled back: unpinned again, re-revoked when it was revoked,
+        // any connection it opened meanwhile closed. Checking the expected id inside the pairing
+        // handshake (common-network) is the upgrade that pins nothing at all.
+        {
+            let _g = lock(&st.peer_writes);
+            if revoked_before.contains(&rec.id) {
+                st.peers.revoke(&rec.id, &st.identity)?;
+            } else {
+                st.peers.remove(&rec.id)?;
+            }
+        }
+        node.disconnect(&rec.id, "not the device in the QR code").await;
+        st.audit(
+            "pairing_failed",
+            Some(&rec.id),
+            json!({ "role": "joiner", "reason": "qr_peer_mismatch" }),
+        );
         return Err(CommonError::new(
             ErrorCode::PairingFailed,
-            "the device that answered is not the one in the QR code; nothing was pinned",
+            "the device that answered is not the one in the QR code; it was unpinned again",
         )
         .into());
     }
@@ -757,14 +1114,11 @@ pub async fn privacy_put(
             .into())
         }
     }
-    let before = st.settings();
-    if before.privacy != body.mode {
-        let after = Settings {
-            privacy: body.mode,
-            ..before
-        };
-        after.save(&st.paths)?;
-        st.set_settings(after);
+    let (before, after) = st.update_settings(|s| Settings {
+        privacy: body.mode,
+        ..s
+    })?;
+    if before != after {
         st.audit(
             "privacy_changed",
             None,
@@ -864,6 +1218,89 @@ mod tests {
             ..m
         };
         assert_eq!(revocation_from_msg(bad_id).unwrap_err().code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn dial_order_prefers_the_fresh_mdns_address() {
+        let (a, b): (SocketAddr, SocketAddr) = ("192.168.1.20:8193".parse().unwrap(), "10.0.0.5:8193".parse().unwrap());
+        assert_eq!(dial_order(Some(a), Some(b)), vec![a, b]);
+        assert_eq!(dial_order(Some(a), Some(a)), vec![a]);
+        assert_eq!(dial_order(None, Some(b)), vec![b]);
+        assert_eq!(dial_order(Some(a), None), vec![a]);
+        assert!(dial_order(None, None).is_empty());
+    }
+
+    #[test]
+    fn routable_replaces_only_the_unspecified_address() {
+        let specific: SocketAddr = "127.0.0.1:7".parse().unwrap();
+        assert_eq!(routable(specific), specific);
+        let r = routable("0.0.0.0:7".parse().unwrap());
+        assert_eq!(r.port(), 7);
+        // Without any route (offline CI) the address comes back unchanged; with one it is dialable.
+        if !r.ip().is_unspecified() {
+            assert!(!r.ip().is_loopback(), "{r}");
+        }
+    }
+
+    fn done(tokens: u32) -> Result<GenerateEvent> {
+        Ok(GenerateEvent::Done {
+            finish_reason: "length".into(),
+            usage: common_runtime::Usage {
+                prompt_tokens: 3,
+                completion_tokens: tokens,
+            },
+            timings: Default::default(),
+        })
+    }
+
+    fn token(t: &str) -> Result<GenerateEvent> {
+        Ok(GenerateEvent::Token {
+            text: t.into(),
+            token_ids: vec![],
+        })
+    }
+
+    /// The `finished` entries a wrapped stream leaves: one per request, whatever ends it, and never
+    /// the generated text.
+    #[tokio::test]
+    async fn audited_stream_records_one_outcome_whatever_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(Audit::open(&Paths::at(dir.path())).unwrap());
+        let peer = DeviceIdentity::generate().unwrap().id;
+        let wrap = |items: Vec<Result<GenerateEvent>>| Audited {
+            inner: futures_util::stream::iter(items).boxed(),
+            outcome: Outcome::new(audit.clone(), peer, "m"),
+        };
+        let all: Vec<_> = wrap(vec![token("SECRET-TEXT"), done(5)]).collect().await;
+        assert_eq!(all.len(), 2);
+        let mut s = wrap(vec![token("a"), token("b"), done(2)]);
+        assert!(s.next().await.is_some());
+        drop(s); // the HTTP client went away mid-stream
+        let _: Vec<_> = wrap(vec![Err(CommonError::new(ErrorCode::PeerLost, "gone"))])
+            .collect()
+            .await;
+        let _: Vec<_> = wrap(vec![token("a")]).collect().await;
+        let finished: Vec<(String, u64)> = audit
+            .tail(100)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                assert_eq!(
+                    (e.kind.as_str(), e.fields["phase"].as_str()),
+                    ("remote_request", Some("finished"))
+                );
+                assert_eq!(e.peer_id.as_deref(), Some(peer.to_hex().as_str()));
+                let f = &e.fields;
+                (
+                    f["outcome"].as_str().unwrap().to_string(),
+                    f["completion_tokens"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        let want = [("done", 5), ("cancelled", 0), ("peer_lost", 0), ("incomplete", 0)];
+        assert_eq!(finished, want.map(|(o, n)| (o.to_string(), n)));
+        let text = std::fs::read_to_string(dir.path().join("logs/audit.jsonl")).unwrap();
+        assert!(!text.contains("SECRET-TEXT"), "{text}");
     }
 
     #[test]

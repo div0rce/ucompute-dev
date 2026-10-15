@@ -159,6 +159,103 @@ async fn brute_force_rate_limited() {
     assert!(!a.peers.is_pinned(&b.id()) && !b.peers.is_pinned(&a.id()));
 }
 
+/// F-10-05 / QR join: a node bound to 0.0.0.0 (the LAN default) must put a dialable address in
+/// its QR payload, and joining with nothing but that payload pairs. SINGLE-HOST: both nodes on
+/// this Mac, dialling its own LAN address.
+#[tokio::test]
+async fn qr_payload_from_wildcard_bind_pairs_single_host() {
+    let (a, b) = (Peer::new(), Peer::new());
+    let wildcard = common_network::NetworkConfig {
+        bind_addr: "0.0.0.0".into(),
+        ..Peer::config()
+    };
+    let start = |p: &Peer| {
+        common_network::transport::Node::start(
+            wildcard.clone(),
+            p.identity.clone(),
+            p.peers.clone(),
+            p.policy.clone(),
+            p.audit.clone(),
+        )
+    };
+    let (na, nb) = (start(&a).await.unwrap(), start(&b).await.unwrap());
+    let (session, handle) = pairing::start(na, "a").await.unwrap();
+    let (id, qr_addr, secret) = expected_peer_from_qr(&session.qr_payload).unwrap();
+    assert_eq!(qr_addr.port(), session.port);
+    if qr_addr.ip().is_unspecified() {
+        eprintln!("SKIP qr_payload_from_wildcard_bind_pairs_single_host: this host has no LAN address");
+        handle.abort();
+        return;
+    }
+    assert!(!qr_addr.ip().is_loopback(), "{qr_addr}");
+    let rec = timeout(Duration::from_secs(10), pairing::join(nb, qr_addr, &secret, "b"))
+        .await
+        .expect("the QR address answers")
+        .unwrap();
+    assert_eq!(rec.id, id);
+    assert_eq!(
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .id,
+        b.id()
+    );
+    eprintln!("SINGLE-HOST: QR join via {qr_addr} paired");
+}
+
+/// Reads one `u8 length ‖ bytes` pairing frame.
+async fn raw_blob(r: &mut quinn::RecvStream) -> Vec<u8> {
+    let mut len = [0u8; 1];
+    r.read_exact(&mut len).await.unwrap();
+    let mut b = vec![0u8; usize::from(len[0])];
+    r.read_exact(&mut b).await.unwrap();
+    b
+}
+
+/// A joiner without the code receives the initiator's confirmation MAC and nothing else: the
+/// device name and workload port follow only a verified MAC.
+#[tokio::test]
+async fn wrong_code_learns_no_name_or_port() {
+    use spake2::{Ed25519Group, Identity, Password, Spake2};
+    let (a, b) = (Peer::new(), Peer::new());
+    let na = a.start().await;
+    let (session, handle) = pairing::start(na, "initiator-private-name").await.unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{}", session.port).parse().unwrap();
+    let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    ep.set_default_client_config(tls::client_config(&b.identity, PeerPolicy::AcceptAny, ALPN_PAIRING).unwrap());
+    let conn = ep.connect(addr, "common").unwrap().await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let (_, msg_b) = Spake2::<Ed25519Group>::start_b(
+        &Password::new(wrong(&session.code).as_bytes()),
+        &Identity::new(&a.id().0),
+        &Identity::new(&b.id().0),
+    );
+    let first = [&[msg_b.len() as u8 + 1, 0u8][..], &msg_b].concat();
+    send.write_all(&first).await.unwrap();
+    let _msg_a = raw_blob(&mut recv).await;
+    let their_mac = raw_blob(&mut recv).await;
+    assert_eq!(their_mac.len(), 32, "the confirm frame is the MAC alone");
+    send.write_all(&[&[32u8][..], &[0u8; 32]].concat()).await.unwrap();
+    let mut rest = Vec::new();
+    while let Ok(Some(chunk)) = timeout(Duration::from_secs(5), recv.read_chunk(1024, true))
+        .await
+        .expect("the initiator closes after a bad MAC")
+    {
+        rest.extend_from_slice(&chunk.bytes);
+    }
+    assert!(
+        rest.is_empty(),
+        "nothing after a failed confirmation, got {} bytes",
+        rest.len()
+    );
+    let name = b"initiator-private-name";
+    assert!(!their_mac.windows(name.len()).any(|w| w == name));
+    assert!(!a.peers.is_pinned(&b.id()));
+    handle.abort();
+}
+
 /// A third party M terminates TLS on both legs and forwards every pairing frame byte for byte.
 #[tokio::test]
 async fn mitm_relay_detected() {

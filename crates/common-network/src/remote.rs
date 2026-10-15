@@ -12,6 +12,13 @@
 //!
 //! Text travels inside TLS only: `request_json` and `event_json` are never logged or audited.
 //! Audit entries carry ids, counts, codes and durations.
+//!
+//! The serving side treats the decoded request as untrusted input with the local API's bounds
+//! (`sanitize`: no raw grammar, bounded JSON schema, sampling ranges, this device's timeouts), and
+//! shares the engine with local work through [`ServeOptions`]: the daemon's load options (no
+//! reload, no `Overloaded` for local requests), its engine-slot semaphore (a peer takes a free
+//! slot or is refused, it never queues ahead of local work) and a process-wide cap on peer
+//! generations. Error frames carry codes and this module's own messages, never local paths.
 use crate::proto::{
     control_message::Body, read_frame, write_frame, Cancel, ControlMessage, ErrorMsg, RemoteChunk, RemoteRequest,
 };
@@ -25,9 +32,10 @@ use common_runtime::manager::{LoadOptions, ModelManager};
 use common_runtime::{GenerateEvent, GenerateRequest, GenerateStream, Usage};
 use futures_util::StreamExt;
 use quinn::{ConnectionError, RecvStream, SendStream};
+use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 pub struct RemoteOutcome;
@@ -235,11 +243,163 @@ pub async fn generate_remote(
 
 // ---------------------------------------------------------------- server
 
-fn quotas() -> &'static Quotas {
-    // ponytail: process-wide default QuotaConfig; thread the daemon's configured Quotas through
-    // serve_peer once [network.quotas] exists in the config file.
-    static QUOTAS: OnceLock<Quotas> = OnceLock::new();
-    QUOTAS.get_or_init(|| Quotas::new(QuotaConfig::default()))
+/// How a serving device shares itself with peers. Build one per daemon and clone it into every
+/// `serve_peer_with` call: the semaphores and quotas are shared across all peer connections.
+#[derive(Clone)]
+pub struct ServeOptions {
+    /// The load options local requests use (the API's `AppState::load_options`), so a peer request
+    /// reuses the engine local work loads and never forces an incompatible reload.
+    pub load: LoadOptions,
+    /// Per-peer token buckets (F-06-04).
+    pub quotas: Arc<Quotas>,
+    /// The local admission's engine-slot semaphore (one permit per engine slot). A peer request
+    /// takes a permit only if one is free at that instant, else `Overloaded`; it never waits in
+    /// the local queue. `None`: no shared accounting (tests, CLI one-shots).
+    pub engine_slots: Option<Arc<Semaphore>>,
+    /// Peer generations running at once across all peers; the rest of the engine's slots stay
+    /// with local work. Exhausted → `Overloaded`.
+    pub peer_slots: Arc<Semaphore>,
+}
+
+impl ServeOptions {
+    /// Defaults: default load options, default quotas, no shared engine slots, peer generations
+    /// capped at the per-peer concurrency of `QuotaConfig::default()`.
+    pub fn standalone() -> Self {
+        let cfg = QuotaConfig::default();
+        Self {
+            load: LoadOptions::default(),
+            peer_slots: Arc::new(Semaphore::new(cfg.max_concurrent.max(1) as usize)),
+            quotas: Arc::new(Quotas::new(cfg)),
+            engine_slots: None,
+        }
+    }
+}
+
+/// The process-wide options behind [`serve_peer`], so quotas hold across a peer's connections.
+fn process_defaults() -> &'static ServeOptions {
+    static OPTS: OnceLock<ServeOptions> = OnceLock::new();
+    OPTS.get_or_init(ServeOptions::standalone)
+}
+
+fn overloaded(m: &str) -> CommonError {
+    CommonError::new(ErrorCode::Overloaded, format!("{m}; retry later"))
+}
+
+/// The engine capacity a peer request holds while it runs: one of the peer share and, when the
+/// daemon shares its admission, one engine slot. Neither ever waits.
+fn engine_permits(opts: &ServeOptions) -> Result<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)> {
+    let share = opts
+        .peer_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| overloaded("this device is serving as many peer requests as it allows"))?;
+    let slot = match &opts.engine_slots {
+        Some(s) => Some(
+            s.clone()
+                .try_acquire_owned()
+                .map_err(|_| overloaded("this device's engine is busy with local work"))?,
+        ),
+        None => None,
+    };
+    Ok((share, slot))
+}
+
+/// Bounds on an untrusted JSON schema before it reaches the engine's schema-to-grammar compiler
+/// (F-01-12), the same as the local API's.
+// ponytail: duplicate of common-api `openai::check_schema`; move both into common-runtime so the
+// two cannot drift.
+const SCHEMA_MAX_BYTES: usize = 64 * 1024;
+const SCHEMA_MAX_DEPTH: usize = 32;
+const SCHEMA_MAX_REPEAT: u64 = 1024;
+const MAX_STOP: usize = 16;
+const MAX_STOP_BYTES: usize = 256;
+
+fn check_schema(schema: &Value) -> Result<()> {
+    if schema.to_string().len() > SCHEMA_MAX_BYTES {
+        return Err(CommonError::invalid(format!(
+            "json_schema exceeds {SCHEMA_MAX_BYTES} bytes"
+        )));
+    }
+    check_schema_node(schema, 0)
+}
+
+fn check_schema_node(v: &Value, depth: usize) -> Result<()> {
+    if depth > SCHEMA_MAX_DEPTH {
+        return Err(CommonError::invalid(format!(
+            "json_schema nests deeper than {SCHEMA_MAX_DEPTH} levels"
+        )));
+    }
+    let bad = |m: String| Err(CommonError::invalid(format!("json_schema: {m}")));
+    match v {
+        Value::Object(map) => {
+            for (k, val) in map {
+                match (k.as_str(), val) {
+                    ("$ref", Value::String(r)) if !r.starts_with('#') => {
+                        return bad("only local $ref (#/...) is supported".into())
+                    }
+                    ("pattern", Value::String(p))
+                        if p.len() as u64 > SCHEMA_MAX_REPEAT || pattern_repeat_too_large(p) =>
+                    {
+                        return bad(format!(
+                            "pattern longer than {SCHEMA_MAX_REPEAT} or with a repetition above {SCHEMA_MAX_REPEAT}"
+                        ))
+                    }
+                    (
+                        "minItems" | "maxItems" | "minLength" | "maxLength" | "minProperties" | "maxProperties"
+                        | "minContains" | "maxContains",
+                        Value::Number(n),
+                    ) if n.as_u64().is_none_or(|n| n > SCHEMA_MAX_REPEAT) => {
+                        return bad(format!("{k} must be an integer in 0..={SCHEMA_MAX_REPEAT}"))
+                    }
+                    _ => check_schema_node(val, depth + 1)?,
+                }
+            }
+        }
+        Value::Array(items) => {
+            for i in items {
+                check_schema_node(i, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// True when a regex `{n}` / `{n,}` / `{n,m}` quantifier names a count above `SCHEMA_MAX_REPEAT`.
+fn pattern_repeat_too_large(p: &str) -> bool {
+    p.split('{').skip(1).filter_map(|rest| rest.split('}').next()).any(|q| {
+        q.split(',')
+            .any(|n| n.trim().parse::<u64>().is_ok_and(|n| n > SCHEMA_MAX_REPEAT))
+    })
+}
+
+/// A peer's request with the local API's bounds applied (a buggy or compromised group member
+/// must not be able to stall this device's engine): no raw GBNF grammar, a bounded JSON schema,
+/// sampling in range, bounded stop strings, and this device's own timeouts.
+fn sanitize(mut g: GenerateRequest) -> Result<GenerateRequest> {
+    if g.grammar.is_some() {
+        return Err(CommonError::invalid(
+            "raw grammars are not accepted from peers; send a json_schema",
+        ));
+    }
+    if g.max_tokens == 0 {
+        return Err(CommonError::invalid("max_tokens must be >= 1"));
+    }
+    if !(0.0..=2.0).contains(&g.temperature) || !(0.0..=1.0).contains(&g.top_p) {
+        return Err(CommonError::invalid(
+            "temperature must be in [0, 2] and top_p in [0, 1]",
+        ));
+    }
+    if g.stop.len() > MAX_STOP || g.stop.iter().any(|s| s.len() > MAX_STOP_BYTES) {
+        return Err(CommonError::invalid(format!(
+            "at most {MAX_STOP} stop strings of at most {MAX_STOP_BYTES} bytes"
+        )));
+    }
+    if let Some(schema) = &g.json_schema {
+        check_schema(schema)?;
+    }
+    g.timeouts = Timeouts::default();
+    Ok(g)
 }
 
 /// An admitted request; released on drop so every exit path frees the concurrency slot.
@@ -268,10 +428,32 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// What a peer may read of an error: the message for codes this module or the policy produce
+/// (bounded, path-free); a generic text for codes whose messages can name local paths, binaries
+/// or the account (engine, filesystem, model files).
+fn peer_message(e: &CommonError) -> String {
+    match e.code {
+        ErrorCode::InvalidRequest
+        | ErrorCode::PolicyDenied
+        | ErrorCode::PeerUnauthorized
+        | ErrorCode::Overloaded
+        | ErrorCode::IntegrityMismatch
+        | ErrorCode::ContextTooLong
+        | ErrorCode::Cancelled
+        | ErrorCode::Timeout
+        | ErrorCode::FrameTooLarge
+        | ErrorCode::ProtocolIncompatible => short(&e.message),
+        code => format!(
+            "the serving device could not run this request ({}); details are in its own log",
+            code.as_str()
+        ),
+    }
+}
+
 async fn refuse(send: &mut SendStream, e: &CommonError) {
     let msg = Body::Error(ErrorMsg {
         code: e.code.as_str().into(),
-        message: e.message.clone(),
+        message: peer_message(e),
     })
     .into();
     let _ = write_frame(send, &msg).await;
@@ -317,12 +499,13 @@ fn integrity(model_id: &str, asked: &str, have: &str) -> CommonError {
 /// `Err` before anything was streamed (the caller sends it as the `Error` frame).
 async fn execute(
     manager: &ModelManager,
+    opts: &ServeOptions,
     peer: &PeerId,
     req: RemoteRequest,
     send: &mut SendStream,
     recv: RecvStream,
 ) -> Result<(Usage, &'static str)> {
-    let _slot = admit(quotas(), peer)?;
+    let _slot = admit(&opts.quotas, peer)?;
     if !common_core::paths::safe_name(&req.model_id) {
         return Err(CommonError::invalid(
             "model id may only contain letters, digits, '-', '_' and '.'",
@@ -337,14 +520,17 @@ async fn execute(
     }
     let greq: GenerateRequest = serde_json::from_str(&req.request_json)
         .map_err(|_| CommonError::invalid("request_json is not a GenerateRequest"))?;
-    let model = manager.ensure_loaded(&req.model_id, LoadOptions::default()).await?;
+    let greq = sanitize(greq)?;
+    // Held until the stream ends: the engine slot this generation occupies.
+    let _engine = engine_permits(opts)?;
+    let model = manager.ensure_loaded(&req.model_id, opts.load.clone()).await?;
     let have = &model.info().model_sha256;
     if *have != req.model_sha256 {
         return Err(integrity(&req.model_id, &req.model_sha256, have));
     }
     // ponytail: the whole max_tokens is charged up front (refused as Overloaded when the per-minute
     // budget cannot cover it); refund the unused part if quotas ever bite on LAN use.
-    quotas().charge_tokens(peer, u64::from(greq.max_tokens))?;
+    opts.quotas.charge_tokens(peer, u64::from(greq.max_tokens))?;
     let cancel = CancellationToken::new();
     let _watcher = AbortOnDrop(tokio::spawn(watch_cancel(recv, cancel.clone())));
     let mut stream = model.generate(greq, cancel.clone()).await?;
@@ -388,6 +574,7 @@ async fn handle_stream(
     manager: Arc<ModelManager>,
     policy: Arc<PolicyEngine>,
     audit: Arc<Audit>,
+    opts: ServeOptions,
     mut send: SendStream,
     mut recv: RecvStream,
 ) {
@@ -425,10 +612,12 @@ async fn handle_stream(
         );
         return refuse(&mut send, &e).await;
     }
-    let result = execute(&manager, &peer, req, &mut send, recv).await;
+    let result = execute(&manager, &opts, &peer, req, &mut send, recv).await;
     let (usage, outcome) = match &result {
         Ok((usage, outcome)) => (usage.clone(), *outcome),
         Err(e) => {
+            // The detail stays here; the peer gets `peer_message`.
+            tracing::info!(peer = %peer.short_label(), request_id, code = %e.code, detail = %e.message, "remote request failed");
             refuse(&mut send, e).await;
             (Usage::default(), e.code.as_str())
         }
@@ -450,14 +639,27 @@ async fn handle_stream(
     );
 }
 
-/// Serve remote requests on an accepted connection until it closes. `Ok` when the connection
-/// closed cleanly (either side), the typed loss otherwise. Call only with connections from
-/// `Node::accept`/`Node::connect` (authenticated); `policy.may_serve` is applied per request.
+/// [`serve_peer_with`] using process-wide [`ServeOptions::standalone`] options (default load
+/// options, default quotas, no engine-slot sharing). A daemon that also serves local requests
+/// must use `serve_peer_with` with its own load options and admission semaphore.
 pub async fn serve_peer(
     conn: Arc<PeerConnection>,
     manager: Arc<ModelManager>,
     policy: Arc<PolicyEngine>,
     audit: Arc<Audit>,
+) -> Result<()> {
+    serve_peer_with(conn, manager, policy, audit, process_defaults().clone()).await
+}
+
+/// Serve remote requests on an accepted connection until it closes. `Ok` when the connection
+/// closed cleanly (either side), the typed loss otherwise. Call only with connections from
+/// `Node::accept`/`Node::connect` (authenticated); `policy.may_serve` is applied per request.
+pub async fn serve_peer_with(
+    conn: Arc<PeerConnection>,
+    manager: Arc<ModelManager>,
+    policy: Arc<PolicyEngine>,
+    audit: Arc<Audit>,
+    opts: ServeOptions,
 ) -> Result<()> {
     let limit = Arc::new(Semaphore::new(MAX_STREAMS_PER_CONNECTION));
     loop {
@@ -474,10 +676,16 @@ pub async fn serve_peer(
             tokio::spawn(async move { refuse(&mut send, &e).await });
             continue;
         };
-        let (conn, manager, policy, audit) = (conn.clone(), manager.clone(), policy.clone(), audit.clone());
+        let (conn, manager, policy, audit, opts) = (
+            conn.clone(),
+            manager.clone(),
+            policy.clone(),
+            audit.clone(),
+            opts.clone(),
+        );
         tokio::spawn(async move {
             let _permit = permit;
-            handle_stream(conn, manager, policy, audit, send, recv).await;
+            handle_stream(conn, manager, policy, audit, opts, send, recv).await;
         });
     }
 }
@@ -537,6 +745,100 @@ mod tests {
         drop(first);
         let _third = admit(&q, &peer).unwrap();
         assert_eq!(admit(&q, &peer).err().unwrap().code, ErrorCode::Overloaded);
+    }
+
+    #[test]
+    fn peer_requests_get_the_local_api_bounds() {
+        let ok = GenerateRequest {
+            json_schema: Some(
+                serde_json::json!({"type": "object", "properties": {"a": {"type": "string", "maxLength": 10}}}),
+            ),
+            timeouts: Timeouts {
+                first_token: Duration::from_secs(86_400),
+                ..Timeouts::default()
+            },
+            ..GenerateRequest::default()
+        };
+        let clean = sanitize(ok.clone()).unwrap();
+        assert_eq!(clean.timeouts, Timeouts::default(), "the peer's timeouts are replaced");
+        assert_eq!(clean.json_schema, ok.json_schema);
+        let refused = |g: GenerateRequest| sanitize(g).unwrap_err().code;
+        let with = |f: fn(&mut GenerateRequest)| {
+            let mut g = ok.clone();
+            f(&mut g);
+            g
+        };
+        for g in [
+            with(|g| g.grammar = Some("root ::= \"a\"".into())),
+            with(|g| g.max_tokens = 0),
+            with(|g| g.temperature = 2.5),
+            with(|g| g.temperature = f32::NAN),
+            with(|g| g.top_p = -0.1),
+            with(|g| g.stop = vec!["x".into(); 17]),
+            with(|g| g.stop = vec!["x".repeat(257)]),
+            with(|g| g.json_schema = Some(serde_json::json!({"type": "string", "pattern": "a{100000}"}))),
+            with(|g| g.json_schema = Some(serde_json::json!({"type": "array", "minItems": 5000}))),
+            with(|g| g.json_schema = Some(serde_json::json!({"$ref": "https://example.com/s.json"}))),
+            with(|g| g.json_schema = Some(serde_json::json!({"description": "x".repeat(70_000)}))),
+        ] {
+            assert_eq!(refused(g), ErrorCode::InvalidRequest);
+        }
+        let mut deep = serde_json::json!({"type": "string"});
+        for _ in 0..40 {
+            deep = serde_json::json!({"type": "array", "items": deep});
+        }
+        let deep = GenerateRequest {
+            json_schema: Some(deep),
+            ..ok
+        };
+        assert_eq!(refused(deep), ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn peers_never_see_local_paths() {
+        for code in [
+            ErrorCode::Io,
+            ErrorCode::Internal,
+            ErrorCode::BackendUnavailable,
+            ErrorCode::BackendFailed,
+            ErrorCode::ModelFileInvalid,
+        ] {
+            let e = CommonError::new(
+                code,
+                "model file not found: /Users/someone/.common/models/blobs/sha256-x",
+            );
+            let m = peer_message(&e);
+            assert!(!m.contains("/Users") && m.contains(code.as_str()), "{m}");
+        }
+        let e = CommonError::new(ErrorCode::Overloaded, "device x exceeded its limit; retry later");
+        assert_eq!(peer_message(&e), e.message);
+        assert!(peer_message(&CommonError::invalid("y".repeat(5_000))).len() <= MAX_ECHO);
+    }
+
+    #[test]
+    fn peer_share_and_engine_slots_never_wait() {
+        let opts = ServeOptions {
+            engine_slots: Some(Arc::new(Semaphore::new(2))),
+            peer_slots: Arc::new(Semaphore::new(1)),
+            ..ServeOptions::standalone()
+        };
+        let held = engine_permits(&opts).unwrap();
+        assert!(held.1.is_some());
+        // The peer share (1) is used up although an engine slot is still free.
+        assert_eq!(engine_permits(&opts).unwrap_err().code, ErrorCode::Overloaded);
+        drop(held);
+        // Local work holds every engine slot: a peer is refused, not queued.
+        let local = opts.engine_slots.clone().unwrap().try_acquire_many_owned(2).unwrap();
+        let e = engine_permits(&opts).unwrap_err();
+        assert_eq!(e.code, ErrorCode::Overloaded);
+        assert!(e.message.contains("local work"), "{e}");
+        assert_eq!(
+            opts.peer_slots.available_permits(),
+            1,
+            "the share is returned on refusal"
+        );
+        drop(local);
+        assert!(engine_permits(&opts).is_ok());
     }
 
     #[test]

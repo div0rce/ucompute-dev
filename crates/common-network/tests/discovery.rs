@@ -3,10 +3,14 @@
 //! latency on a loopback-multicast host, never real L2/Wi-Fi discovery time.
 mod common;
 
-use common::Peer;
+use common::{child_home, spawn_child, Peer};
 use common_network::discovery::{Advertiser, Browser};
 use common_network::NetworkConfig;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
+
+/// How long a discovery child runs before it exits on its own.
+const CHILD_RUN: Duration = Duration::from_secs(8);
 
 fn mdns_config() -> NetworkConfig {
     NetworkConfig {
@@ -60,13 +64,25 @@ fn two_instances_discover_within_5s_single_host() {
     assert_eq!(da.proto, "1.0");
     assert!(!da.addr.ip().is_unspecified());
     // Records too old for the caller's window drop out without touching the signature logic.
-    assert!(browser.peers(0).len() <= 2);
+    assert!(
+        browser
+            .peers(0)
+            .iter()
+            .filter(|d| d.id == a.id() || d.id == b.id())
+            .count()
+            <= 2
+    );
     // A refresh re-announces with a fresh ts: the browser re-resolves a's record (seen_utc moves
     // to a later second) and keeps exactly two entries (no duplicates).
     std::thread::sleep(Duration::from_millis(1100));
     _adv_a.refresh().unwrap();
     let refreshed = loop {
-        let peers = browser.peers(10);
+        // Other Common instances on this host (parallel tests) may show up too; count ours.
+        let peers: Vec<_> = browser
+            .peers(10)
+            .into_iter()
+            .filter(|d| d.id == a.id() || d.id == b.id())
+            .collect();
         assert_eq!(peers.len(), 2, "{peers:?}");
         let da_now = peers.iter().find(|d| d.id == a.id()).unwrap().clone();
         if da_now.seen_utc > da.seen_utc {
@@ -82,4 +98,63 @@ fn two_instances_discover_within_5s_single_host() {
         "SINGLE-HOST refresh: a re-resolved at {} (first seen {})",
         refreshed.seen_utc, da.seen_utc
     );
+}
+
+/// Helper, not a test of its own: one Common instance (its own process, identity and store) that
+/// advertises and browses for `CHILD_RUN`, printing `SAW <id hex> <ms since start> <trusted>` once
+/// per id it discovers.
+#[test]
+#[ignore = "child-process helper; run by two_processes_discover_within_5s_single_host"]
+fn child_mdns_process() {
+    let Some(home) = child_home() else { return };
+    let (identity, peers, _, _) = Peer::open(&home);
+    let cfg = mdns_config();
+    let t0 = Instant::now();
+    let browser = Browser::start(&cfg, peers).unwrap();
+    let _adv = Advertiser::start(&cfg, identity.clone(), 40003, None).unwrap();
+    let mut seen = HashSet::new();
+    while t0.elapsed() < CHILD_RUN {
+        for p in browser.peers(10) {
+            if p.id != identity.id && seen.insert(p.id) {
+                println!("SAW {} {} {}", p.id.to_hex(), t0.elapsed().as_millis(), p.trusted);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// F-02-01 `two_processes_discover_within_5s`: two separate OS processes (the test binary re-run
+/// as `child_mdns_process`, each with its own COMMON_HOME and identity) find each other over mDNS
+/// within 5 s and list each other as untrusted (not paired). SINGLE-HOST: two processes on this
+/// one Mac sharing its interfaces, not two machines on an L2 segment.
+#[test]
+fn two_processes_discover_within_5s_single_host() {
+    if std::env::var("COMMON_MDNS").as_deref() == Ok("0") {
+        eprintln!("SKIP two_processes_discover_within_5s_single_host: COMMON_MDNS=0");
+        return;
+    }
+    let (a, b) = (Peer::new(), Peer::new());
+    let children = [
+        spawn_child("child_mdns_process", a.home()),
+        spawn_child("child_mdns_process", b.home()),
+    ];
+    let outputs: Vec<String> = children
+        .into_iter()
+        .map(|c| String::from_utf8(c.wait_with_output().unwrap().stdout).unwrap())
+        .collect();
+    let saw = |out: &str, who: &Peer| -> Option<(u64, bool)> {
+        out.lines().find_map(|l| {
+            let rest = l.split_once("SAW ")?.1;
+            let mut f = rest.split_whitespace();
+            (f.next()? == who.id().to_hex()).then_some(())?;
+            Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?))
+        })
+    };
+    let (a_saw_b, b_saw_a) = (saw(&outputs[0], &b), saw(&outputs[1], &a));
+    eprintln!("SINGLE-HOST two-process discovery: a saw b {a_saw_b:?}, b saw a {b_saw_a:?} (ms since that process started, trusted)");
+    for (who, hit) in [("a", a_saw_b), ("b", b_saw_a)] {
+        let (ms, trusted) = hit.unwrap_or_else(|| panic!("{who} never saw the other process: {outputs:?}"));
+        assert!(ms <= 5_000, "{who} took {ms} ms");
+        assert!(!trusted, "an unpaired peer is listed untrusted");
+    }
 }

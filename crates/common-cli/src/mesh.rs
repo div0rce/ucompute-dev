@@ -4,23 +4,32 @@
 //!
 //! Settings are the API's `common_api::mesh::Settings` in `COMMON_HOME/config.json`
 //! (`{privacy, network_enabled, serve_peers}`, 0600). Pinned peers, groups and revocations live in
-//! `identity/peers.json` (`common_identity::PeerStore`). Every command here is a separate process
-//! that reads both at start; a running `common serve` keeps its own copy, so changes made while it
-//! runs apply when it restarts (said in the output, not hidden).
+//! `identity/peers.json` (`common_identity::PeerStore`).
+//!
+//! A running `common serve` holds both in memory and acts on them (TLS verifier, live sessions,
+//! propagation to peers, policy), so while it runs it owns them: it records its API address in
+//! `COMMON_HOME/serve.json`, and every mutation here (`peers rm|revoke`,
+//! `groups create|add|remove|policy`, `privacy`) goes through its API when that address answers
+//! with this device's id ([`Daemon`]). The daemon applies the change at once and its own later
+//! writes keep it; the file is re-read afterwards to confirm it was persisted. With no daemon the
+//! file is written directly; `peers pair|join` refuse while a daemon runs (their pin and their
+//! endpoint would bypass it).
 
 use crate::shutdown_signal;
 use clap::{Args, Subcommand, ValueEnum};
 use common_artifacts::Store;
 use common_core::{CommonError, ErrorCode, Paths, Result};
-use common_identity::{DeviceIdentity, Group, GroupPolicy, PeerId, PeerRecord, PeerStore};
+use common_identity::{DeviceIdentity, Group, GroupPolicy, PeerId, PeerRecord, PeerStore, Revocation};
 use common_network::discovery::{Advertiser, Browser};
 use common_network::transport::Node;
 use common_network::{pairing, NetworkConfig};
 use common_observability::Audit;
 use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode};
+use reqwest::Method;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Write};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,12 +240,7 @@ impl Mesh {
     /// A pinned peer by 64-hex id, short label (`ab12-cd34-ef56`) or any unique hex prefix.
     /// A revoked id is `PeerRevoked`, an unknown one `PeerUnauthorized`.
     pub fn resolve_peer(&self, s: &str) -> Result<PeerRecord> {
-        let key = s.trim().to_ascii_lowercase().replace('-', "");
-        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(CommonError::invalid(format!(
-                "`{s}` is not a peer id (64 hex) or a short label like ab12-cd34-ef56"
-            )));
-        }
+        let key = hex_key(s)?;
         let mut found: Vec<PeerRecord> = self
             .store
             .list()?
@@ -296,6 +300,192 @@ impl Mesh {
             format!("no known address for device {}", rec.id.short_label()),
         )
         .with_hint("make sure it runs `common serve --network` on this LAN, or pair it again"))
+    }
+}
+
+/// A peer id, short label or hex prefix as lowercase hex without dashes; anything else is invalid.
+fn hex_key(s: &str) -> Result<String> {
+    let key = s.trim().to_ascii_lowercase().replace('-', "");
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CommonError::invalid(format!(
+            "`{s}` is not a peer id (64 hex) or a short label like ab12-cd34-ef56"
+        )));
+    }
+    Ok(key)
+}
+
+/// The one member of `group` named by `s` (id, short label or prefix); none or several is an error.
+fn member_by_prefix(members: &[PeerId], s: &str, group: &str) -> Result<PeerId> {
+    let key = hex_key(s)?;
+    let hits: Vec<PeerId> = members
+        .iter()
+        .filter(|p| p.to_hex().starts_with(&key))
+        .copied()
+        .collect();
+    match hits[..] {
+        [id] => Ok(id),
+        [] => Err(CommonError::invalid(format!("`{s}` is not a member of {group}"))),
+        _ => Err(CommonError::invalid(format!(
+            "`{s}` matches {} members of {group}; use more of the id",
+            hits.len()
+        ))),
+    }
+}
+
+/// `COMMON_HOME/serve.json`: `{"addr", "pid"}` of the `common serve` running on this home. No secrets.
+pub fn serve_file(paths: &Paths) -> PathBuf {
+    paths.root.join("serve.json")
+}
+
+/// Written by `common serve` once its API listener is bound (an unspecified bind is recorded as
+/// loopback, which it also answers on).
+pub fn write_serve_file(paths: &Paths, addr: SocketAddr) -> Result<()> {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let v = json!({ "addr": SocketAddr::new(ip, addr.port()).to_string(), "pid": std::process::id() });
+    std::fs::write(serve_file(paths), serde_json::to_vec(&v)?)?;
+    Ok(())
+}
+
+/// Removed when `common serve` exits, only while it still names this process (a second daemon
+/// on the same home may have replaced it). A crash leaves it behind; [`Daemon::find`] copes.
+pub fn remove_serve_file(paths: &Paths) {
+    let path = serve_file(paths);
+    let ours = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| v["pid"] == std::process::id());
+    if ours {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The `common serve` that owns this home's trust store and settings while it runs (F-06-05,
+/// F-02-09): CLI mutations go through its API so they take effect now and survive its next write.
+pub struct Daemon {
+    pub url: String,
+    http: reqwest::Client,
+    key: Option<String>,
+}
+
+impl Daemon {
+    /// The daemon `serve.json` names, if it answers `GET /api/network` with this device's id
+    /// (`identity/device.pub`). No file, a stale one (crash: nothing answers) or another home's
+    /// daemon on that port is `None`. A daemon that wants an API key this process lacks is
+    /// `Unauthorized`: writing the file instead would be erased by its next write.
+    // ponytail: the bearer key (COMMON_API_KEY) goes to whatever answers on that loopback port;
+    // the re-read in `verify` catches a squatter that lies, not one that keeps the key.
+    pub async fn find(paths: &Paths) -> Result<Option<Daemon>> {
+        let read = |p: PathBuf| std::fs::read_to_string(p).ok();
+        let (Some(file), Some(me)) = (read(serve_file(paths)), read(paths.identity().join("device.pub"))) else {
+            return Ok(None);
+        };
+        let addr = serde_json::from_str::<Value>(&file)
+            .ok()
+            .and_then(|v| v["addr"].as_str()?.parse::<SocketAddr>().ok());
+        let Some(addr) = addr else { return Ok(None) };
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| CommonError::internal(format!("http client: {e}")))?;
+        let d = Daemon {
+            url: format!("http://{addr}"),
+            http,
+            key: std::env::var("COMMON_API_KEY").ok().filter(|k| !k.is_empty()),
+        };
+        match d.call(Method::GET, "/api/network", None).await {
+            Ok(v) if v["peer_id"].as_str() == Some(me.trim()) => Ok(Some(d)),
+            Err(e) if e.code == ErrorCode::Unauthorized => Err(CommonError::new(
+                ErrorCode::Unauthorized,
+                format!(
+                    "`common serve` at {} owns this device's settings and wants an API key",
+                    d.url
+                ),
+            )
+            .with_hint("set COMMON_API_KEY to the key `common serve --api-key` was given, or stop it")),
+            _ => Ok(None),
+        }
+    }
+
+    /// One JSON call; a non-2xx answer becomes the daemon's typed error.
+    pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
+        let mut req = self.http.request(method, format!("{}{path}", self.url));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let io = |e: reqwest::Error| CommonError::io(format!("{}{path}: {e}", self.url));
+        let resp = req.send().await.map_err(io)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(io)?;
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if status.is_success() {
+            Ok(v)
+        } else {
+            Err(daemon_error(&v, status.as_u16()))
+        }
+    }
+
+    /// The daemon persists before it answers; re-read the file so a squatter or a failed write
+    /// shows up as an error, never as a change that only looked applied.
+    fn verify(&self, ok: bool) -> Result<()> {
+        if ok {
+            return Ok(());
+        }
+        Err(CommonError::internal(format!(
+            "`common serve` at {} answered, but the change is not on disk",
+            self.url
+        ))
+        .with_hint("check `common serve` is this COMMON_HOME's daemon, then retry"))
+    }
+}
+
+/// The API's `{"error": {code, message, hint}}` as the `CommonError` it was made from.
+fn daemon_error(v: &Value, status: u16) -> CommonError {
+    let e = &v["error"];
+    let code = serde_json::from_value(e["code"].clone()).unwrap_or(ErrorCode::Internal);
+    let message = e["message"]
+        .as_str()
+        .map_or_else(|| format!("`common serve` answered HTTP {status}"), str::to_string);
+    let err = CommonError::new(code, message);
+    match e["hint"].as_str() {
+        Some(h) => err.with_hint(h),
+        None => err,
+    }
+}
+
+/// `peers pair`/`join` pin through their own endpoint; with a daemon running that pin would never
+/// reach it and the daemon's next write would erase it.
+// ponytail: refuse rather than drive /api/pair/*; upgrade: route it like revoke if CLI pairing
+// next to a running daemon is wanted.
+async fn refuse_if_daemon(paths: &Paths) -> Result<()> {
+    match Daemon::find(paths).await? {
+        Some(d) => Err(CommonError::invalid(format!(
+            "`common serve` at {} owns this device's trust store while it runs",
+            d.url
+        ))
+        .with_hint("pair from the desktop app, or stop `common serve` and retry")),
+        None => Ok(()),
+    }
+}
+
+/// Insert or replace a group: through the daemon when one runs, else straight to the file.
+async fn save_group(m: &Mesh, g: &Group) -> Result<()> {
+    match Daemon::find(&m.paths).await? {
+        Some(d) => {
+            d.call(Method::PUT, "/api/groups", Some(serde_json::to_value(g)?))
+                .await?;
+            d.verify(PeerStore::open(&m.paths)?.groups()?.contains(g))
+        }
+        None => m.store.upsert_group(g.clone()),
     }
 }
 
@@ -375,37 +565,76 @@ pub async fn peers(cmd: &PeersCmd, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        PeersCmd::Pair { name, net } => pair(&m, name.clone(), net, json).await,
+        PeersCmd::Pair { name, net } => {
+            refuse_if_daemon(&m.paths).await?;
+            pair(&m, name.clone(), net, json).await
+        }
         PeersCmd::Join {
             target,
             code,
             name,
             net,
-        } => join(&m, target, code.as_deref(), name.clone(), net, json).await,
+        } => {
+            refuse_if_daemon(&m.paths).await?;
+            join(&m, target, code.as_deref(), name.clone(), net, json).await
+        }
         PeersCmd::Rm { id } => {
             let rec = m.resolve_peer(id)?;
-            m.store.remove(&rec.id)?;
+            let daemon = Daemon::find(&m.paths).await?;
+            match &daemon {
+                Some(d) => {
+                    d.call(Method::DELETE, &format!("/api/peers/{}", rec.id), None).await?;
+                    d.verify(!PeerStore::open(&m.paths)?.is_pinned(&rec.id))?;
+                }
+                None => m.store.remove(&rec.id)?,
+            }
             out(
                 json,
-                &serde_json::json!({ "id": rec.id, "removed": true }),
+                &json!({ "id": rec.id, "removed": true, "daemon_applied": daemon.is_some() }),
                 format!("forgot {} ({})", rec.name, rec.id.short_label()),
             )
         }
         PeersCmd::Revoke { id } => {
             let rec = m.resolve_peer(id)?;
-            let r = m.store.revoke(&rec.id, &m.identity)?;
-            if let Err(e) = m.audit.record(
-                "peer_revoked",
-                Some(&rec.id.to_hex()),
-                serde_json::json!({ "seq": r.seq, "peer": rec.id.short_label() }),
-            ) {
-                tracing::debug!(error = %e, "audit record not written");
-            }
+            let daemon = Daemon::find(&m.paths).await?;
+            let r: Revocation = match &daemon {
+                // The daemon revokes, audits, closes the device's sessions and tells connected peers.
+                Some(d) => {
+                    let v = d
+                        .call(Method::POST, &format!("/api/peers/{}/revoke", rec.id), None)
+                        .await?;
+                    d.verify(PeerStore::open(&m.paths)?.is_revoked(&rec.id))?;
+                    serde_json::from_value(v)?
+                }
+                None => {
+                    let r = m.store.revoke(&rec.id, &m.identity)?;
+                    if let Err(e) = m.audit.record(
+                        "peer_revoked",
+                        Some(&rec.id.to_hex()),
+                        json!({ "seq": r.seq, "peer": rec.id.short_label(), "source": "local" }),
+                    ) {
+                        tracing::debug!(error = %e, "audit record not written");
+                    }
+                    r
+                }
+            };
+            let effect = match &daemon {
+                Some(d) => format!(
+                    "`common serve` at {} closed its sessions with it and sent the revocation to connected devices",
+                    d.url
+                ),
+                None => {
+                    "no `common serve` runs here; group members receive the revocation when they next connect to it"
+                        .into()
+                }
+            };
+            let mut v = serde_json::to_value(&r)?;
+            v["daemon_applied"] = json!(daemon.is_some());
             out(
                 json,
-                &r,
+                &v,
                 format!(
-                    "revoked {} ({}); its key is refused at every later handshake. A running `common serve` applies this when it restarts.",
+                    "revoked {} ({}); its key is refused at every later handshake; {effect}.",
                     rec.name,
                     rec.id.short_label()
                 ),
@@ -568,7 +797,7 @@ async fn join(
     )
 }
 
-pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
+pub async fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
     let m = Mesh::open()?;
     let find = |name: &str| -> Result<Group> {
         m.store
@@ -613,7 +842,7 @@ pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
                     allow_pooled_inference: *allow_pooled,
                 },
             };
-            m.store.upsert_group(g.clone())?;
+            save_group(&m, &g).await?;
             out(
                 json,
                 &g,
@@ -626,19 +855,15 @@ pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
             if !g.members.contains(&rec.id) {
                 g.members.push(rec.id);
             }
-            m.store.upsert_group(g.clone())?;
+            save_group(&m, &g).await?;
             out(json, &g, format!("added {} to {group}", rec.id.short_label()))
         }
         GroupsCmd::Remove { group, peer } => {
             let mut g = find(group)?;
-            let key = peer.trim().to_ascii_lowercase().replace('-', "");
-            let before = g.members.len();
-            g.members.retain(|p| !p.to_hex().starts_with(&key) || key.is_empty());
-            if g.members.len() == before {
-                return Err(CommonError::invalid(format!("`{peer}` is not a member of {group}")));
-            }
-            m.store.upsert_group(g.clone())?;
-            out(json, &g, format!("removed {peer} from {group}"))
+            let id = member_by_prefix(&g.members, peer, group)?;
+            g.members.retain(|p| *p != id);
+            save_group(&m, &g).await?;
+            out(json, &g, format!("removed {} from {group}", id.short_label()))
         }
         GroupsCmd::Policy {
             group,
@@ -652,7 +877,7 @@ pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
             if let Some(v) = allow_pooled {
                 g.policy.allow_pooled_inference = *v;
             }
-            m.store.upsert_group(g.clone())?;
+            save_group(&m, &g).await?;
             out(
                 json,
                 &g,
@@ -665,7 +890,7 @@ pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
     }
 }
 
-pub fn privacy(a: &PrivacyArgs, json: bool) -> Result<()> {
+pub async fn privacy(a: &PrivacyArgs, json: bool) -> Result<()> {
     let paths = Paths::from_env();
     let mut s = load_settings(&paths)?;
     let Some(mode) = a.mode else {
@@ -706,7 +931,25 @@ pub fn privacy(a: &PrivacyArgs, json: bool) -> Result<()> {
             s.network_enabled = true;
         }
     }
-    s.save(&paths)?;
+    match Daemon::find(&paths).await? {
+        // The disclosure was shown and accepted above; the daemon persists config.json itself.
+        Some(d) => {
+            d.call(
+                Method::PUT,
+                "/api/privacy",
+                Some(json!({ "mode": s.privacy, "acknowledged": true })),
+            )
+            .await?;
+            if mode == PrivacyChoice::TrustedDevices {
+                d.call(Method::PUT, "/api/network", Some(json!({ "enabled": true })))
+                    .await?;
+            }
+            let saved = load_settings(&paths)?;
+            d.verify(saved.privacy == s.privacy)?;
+            s = saved;
+        }
+        None => s.save(&paths)?,
+    }
     out(json, &s, format!("privacy {}", privacy_str(&s)))
 }
 
@@ -824,6 +1067,130 @@ mod tests {
         m.store.revoke(&other.id, &m.identity).unwrap();
         let e = m.resolve_peer(&other.id.short_label()).unwrap_err();
         assert_eq!(e.code, ErrorCode::PeerRevoked, "{e}");
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn groups_remove_names_exactly_one_member() {
+        let a = PeerId([0xa1; 32]);
+        let mut k = [0xa1; 32];
+        k[31] = 0;
+        let b = PeerId(k);
+        let c = PeerId([0xc3; 32]);
+        let members = [a, b, c];
+        // `a1` used to drop both a and b; now it is ambiguous and nothing is removed.
+        let e = member_by_prefix(&members, "a1", "home").unwrap_err();
+        assert!(e.message.contains("matches 2 members"), "{e}");
+        assert_eq!(member_by_prefix(&members, &a.to_hex(), "home").unwrap(), a);
+        assert_eq!(member_by_prefix(&members, &c.short_label(), "home").unwrap(), c);
+        assert_eq!(member_by_prefix(&members, "C3C3", "home").unwrap(), c);
+        assert!(member_by_prefix(&members, "ff", "home")
+            .unwrap_err()
+            .message
+            .contains("not a member of home"));
+        for bad in ["", "-", "zz"] {
+            assert_eq!(
+                member_by_prefix(&members, bad, "home").unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_errors_keep_their_code_message_and_hint() {
+        for code in [
+            ErrorCode::PeerRevoked,
+            ErrorCode::Unauthorized,
+            ErrorCode::InvalidRequest,
+        ] {
+            let e = CommonError::new(code, "why").with_hint("do this");
+            let back = daemon_error(&e.to_openai_json(), e.http_status());
+            assert_eq!(
+                (back.code, back.message.as_str(), back.hint.as_deref()),
+                (code, "why", Some("do this"))
+            );
+        }
+        let e = daemon_error(&Value::Null, 502);
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (ErrorCode::Internal, "`common serve` answered HTTP 502")
+        );
+    }
+
+    /// One-thread HTTP server on 127.0.0.1 answering every request with `status` and `body`.
+    fn canned(status: &'static str, body: String) -> SocketAddr {
+        use std::io::Read as _;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        addr
+    }
+
+    /// `serve.json` names the daemon; only one that answers with this device's id is used, a
+    /// stale file or another home's daemon is ignored, and a key-protected one is an error.
+    #[tokio::test]
+    async fn daemon_is_found_only_when_it_answers_with_this_device_id() {
+        let paths = temp();
+        assert!(Daemon::find(&paths).await.unwrap().is_none(), "no serve.json");
+        let me = DeviceIdentity::generate().unwrap().id;
+        std::fs::create_dir_all(paths.identity()).unwrap();
+        std::fs::write(paths.identity().join("device.pub"), format!("{me}\n")).unwrap();
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        write_serve_file(&paths, closed).unwrap();
+        assert!(
+            Daemon::find(&paths).await.unwrap().is_none(),
+            "stale file: nothing answers"
+        );
+
+        let other = canned("200 OK", json!({ "peer_id": PeerId([7; 32]).to_hex() }).to_string());
+        write_serve_file(&paths, other).unwrap();
+        assert!(Daemon::find(&paths).await.unwrap().is_none(), "another home's daemon");
+
+        let ours = canned("200 OK", json!({ "peer_id": me.to_hex() }).to_string());
+        write_serve_file(&paths, SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), ours.port())).unwrap();
+        let file: Value = serde_json::from_slice(&std::fs::read(serve_file(&paths)).unwrap()).unwrap();
+        assert_eq!(file["addr"], ours.to_string(), "0.0.0.0 is recorded as loopback");
+        let d = Daemon::find(&paths).await.unwrap().expect("our daemon");
+        assert_eq!(d.url, format!("http://{ours}"));
+        assert!(d.verify(true).is_ok());
+        assert_eq!(d.verify(false).unwrap_err().code, ErrorCode::Internal);
+        assert_eq!(
+            refuse_if_daemon(&paths).await.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+
+        let keyed = canned(
+            "401 Unauthorized",
+            CommonError::new(ErrorCode::Unauthorized, "missing or invalid API key")
+                .to_openai_json()
+                .to_string(),
+        );
+        write_serve_file(&paths, keyed).unwrap();
+        let e = Daemon::find(&paths).await.err().expect("unauthorized");
+        assert_eq!(e.code, ErrorCode::Unauthorized);
+        assert!(e.hint.unwrap().contains("COMMON_API_KEY"));
+
+        // Removed only while it names this process.
+        remove_serve_file(&paths);
+        assert!(!serve_file(&paths).exists());
+        std::fs::write(serve_file(&paths), br#"{"addr":"127.0.0.1:1","pid":1}"#).unwrap();
+        remove_serve_file(&paths);
+        assert!(serve_file(&paths).exists(), "another daemon's file is left alone");
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 

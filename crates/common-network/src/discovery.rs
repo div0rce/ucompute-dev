@@ -1,12 +1,17 @@
 //! mDNS-SD discovery (ADR-0003 D4): `_common._udp.local.`, signed TXT, no secrets.
 //!
 //! TXT = `v=1`, `id=<64 hex PeerId>`, `pair=0|1`, `pairport=<n>` (only while pairing),
-//! `proto=<major.minor>`, `ts=<unix s>`, `sig=<hex Ed25519 over the canonical string>`. Nothing else:
+//! `proto=<major.minor>`, `ts=<unix s>`, `sig=<hex Ed25519 over the canonical string, which also
+//! covers the SRV port>`. Nothing else:
 //! no hostname beyond SRV, no model names, no hardware, no user names (those go only over the
 //! authenticated channel). A browser drops unsigned, badly signed and stale records (`ts` more
 //! than [`MAX_RECORD_AGE_SECS`] from its own clock, either direction), and marks `trusted` only
 //! for ids pinned in the local store; the TLS verifier enforces trust independently, so a
 //! spoofed record yields at most a failed handshake.
+//!
+//! The browser's table is bounded: entries older than [`MAX_RECORD_AGE_SECS`] are evicted, at most
+//! [`MAX_SEEN`] are kept (oldest dropped), and a record for an id already seen at another address
+//! replaces it only with a strictly newer `ts`, so a replayed record cannot redirect a live entry.
 //!
 //! Disabled (both sides inert, nothing bound) when `NetworkConfig.enabled` or `.mdns` is false
 //! or the environment has `COMMON_MDNS=0`.
@@ -26,6 +31,8 @@ pub const SERVICE_TYPE: &str = "_common._udp.local.";
 pub const MAX_RECORD_AGE_SECS: u64 = 300;
 /// The advertiser re-signs and re-announces at this interval so its `ts` stays fresh.
 const REFRESH: Duration = Duration::from_secs(120);
+/// Most records the browser keeps (anyone on the LAN can mint ids).
+pub const MAX_SEEN: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveredPeer {
@@ -63,6 +70,8 @@ pub fn mdns_enabled(config: &NetworkConfig) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 struct Advert {
     id: PeerId,
+    /// The SRV port (workload endpoint); signed so a replay cannot point it elsewhere.
+    port: u16,
     pairing: bool,
     pair_port: Option<u16>,
     proto: String,
@@ -73,8 +82,9 @@ impl Advert {
     /// The bytes the signature covers: every value in a fixed order, newline-separated.
     fn canonical(&self) -> String {
         format!(
-            "v=1\nid={}\npair={}\npairport={}\nproto={}\nts={}",
+            "v=1\nid={}\nport={}\npair={}\npairport={}\nproto={}\nts={}",
             self.id.to_hex(),
+            self.port,
             u8::from(self.pairing),
             self.pair_port.map(|p| p.to_string()).unwrap_or_default(),
             self.proto,
@@ -99,8 +109,9 @@ impl Advert {
         txt
     }
 
-    /// Parse and verify a TXT record against `now`: version, signature by `id`, freshness.
-    fn verify(txt: &HashMap<String, String>, now: u64) -> Result<Advert> {
+    /// Parse and verify a TXT record (with its SRV `port`) against `now`: version, signature by
+    /// `id`, freshness.
+    fn verify(txt: &HashMap<String, String>, port: u16, now: u64) -> Result<Advert> {
         let bad = |m: &str| CommonError::new(ErrorCode::PeerUnauthorized, format!("discovery record: {m}"));
         let get = |k: &str| txt.get(k).ok_or_else(|| bad(&format!("missing {k}")));
         if get("v")? != "1" {
@@ -119,6 +130,7 @@ impl Advert {
         let ts: u64 = get("ts")?.parse().map_err(|_| bad("bad ts"))?;
         let advert = Advert {
             id,
+            port,
             pairing,
             pair_port,
             proto: get("proto")?.clone(),
@@ -149,6 +161,7 @@ impl AdvertState {
     fn register(&self, probe: bool) -> Result<()> {
         let advert = Advert {
             id: self.identity.id,
+            port: self.port,
             pairing: self.pairing_port.is_some(),
             pair_port: self.pairing_port,
             proto: format!("{PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"),
@@ -253,6 +266,30 @@ struct Seen {
     fullname: String,
 }
 
+impl Seen {
+    fn fresh(&self, now_unix: u64) -> bool {
+        self.at.elapsed().as_secs() <= MAX_RECORD_AGE_SECS && now_unix.abs_diff(self.ts) <= MAX_RECORD_AGE_SECS
+    }
+}
+
+/// Insert a verified record: stale entries are evicted first; an entry for the same id at another
+/// address is replaced only by a strictly newer `ts`; past [`MAX_SEEN`] the oldest entry goes.
+fn remember(map: &mut HashMap<PeerId, Seen>, new: Seen, now_unix: u64) {
+    map.retain(|_, s| s.fresh(now_unix));
+    if let Some(old) = map.get(&new.peer.id) {
+        if old.peer.addr != new.peer.addr && new.ts <= old.ts {
+            tracing::debug!(id = %new.peer.id.short_label(), "discovery record for a known id from another address ignored (not newer)");
+            return;
+        }
+    }
+    if !map.contains_key(&new.peer.id) && map.len() >= MAX_SEEN {
+        if let Some(oldest) = map.iter().min_by_key(|(_, s)| s.at).map(|(id, _)| *id) {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(new.peer.id, new);
+}
+
 pub struct Browser {
     daemon: Option<ServiceDaemon>,
     seen: Arc<Mutex<HashMap<PeerId, Seen>>>,
@@ -286,7 +323,7 @@ impl Browser {
                     ServiceEvent::ServiceResolved(info) => {
                         let txt = info.txt_properties.clone().into_property_map_str();
                         let addr = pick_addr(info.addresses.iter().map(|a| a.to_ip_addr()), info.port);
-                        match (Advert::verify(&txt, now_unix()), addr) {
+                        match (Advert::verify(&txt, info.port, now_unix()), addr) {
                             (Ok(advert), Some(addr)) => {
                                 let peer = DiscoveredPeer {
                                     id: advert.id,
@@ -297,15 +334,13 @@ impl Browser {
                                     trusted: false,
                                     seen_utc: utc_now(),
                                 };
-                                lock(&map).insert(
-                                    advert.id,
-                                    Seen {
-                                        peer,
-                                        ts: advert.ts,
-                                        at: Instant::now(),
-                                        fullname: info.fullname.clone(),
-                                    },
-                                );
+                                let seen = Seen {
+                                    peer,
+                                    ts: advert.ts,
+                                    at: Instant::now(),
+                                    fullname: info.fullname.clone(),
+                                };
+                                remember(&mut lock(&map), seen, now_unix());
                             }
                             (Err(e), _) => {
                                 tracing::debug!(name = %info.fullname, error = %e, "discovery record dropped")
@@ -334,9 +369,11 @@ impl Browser {
     /// Peers seen in the last `max_age_secs` with valid signatures. Unsigned/expired records are dropped.
     pub fn peers(&self, max_age_secs: u64) -> Vec<DiscoveredPeer> {
         let now = now_unix();
-        let mut out: Vec<DiscoveredPeer> = lock(&self.seen)
+        let mut seen = lock(&self.seen);
+        seen.retain(|_, s| s.fresh(now));
+        let mut out: Vec<DiscoveredPeer> = seen
             .values()
-            .filter(|s| s.at.elapsed().as_secs() <= max_age_secs && now.abs_diff(s.ts) <= MAX_RECORD_AGE_SECS)
+            .filter(|s| s.at.elapsed().as_secs() <= max_age_secs)
             .map(|s| DiscoveredPeer {
                 trusted: store_verdict(&self.store, &s.peer.id) == Verdict::Allowed,
                 ..s.peer.clone()
@@ -363,6 +400,7 @@ mod tests {
     fn advert(id: PeerId, ts: u64) -> Advert {
         Advert {
             id,
+            port: 8193,
             pairing: true,
             pair_port: Some(40123),
             proto: "1.0".into(),
@@ -380,7 +418,9 @@ mod tests {
             txt.values().all(|v| v.len() + 10 < 255),
             "TXT entries stay under 255 bytes"
         );
-        assert_eq!(Advert::verify(&txt, 1_760_000_100).unwrap(), a);
+        assert_eq!(Advert::verify(&txt, 8193, 1_760_000_100).unwrap(), a);
+        // The SRV port is signed: the same TXT behind another port does not verify.
+        assert!(Advert::verify(&txt, 8194, 1_760_000_100).is_err());
         // Without a pairing port the key is absent and still verifies.
         let quiet = Advert {
             pairing: false,
@@ -389,7 +429,7 @@ mod tests {
         };
         let txt = quiet.sign(&me);
         assert!(!txt.contains_key("pairport"));
-        assert_eq!(Advert::verify(&txt, 1_760_000_000).unwrap(), quiet);
+        assert_eq!(Advert::verify(&txt, 8193, 1_760_000_000).unwrap(), quiet);
     }
 
     #[test]
@@ -409,18 +449,21 @@ mod tests {
         ] {
             let mut t = good.clone();
             t.insert(key.into(), value.into());
-            let e = Advert::verify(&t, now).unwrap_err();
+            let e = Advert::verify(&t, 8193, now).unwrap_err();
             assert_eq!(e.code, ErrorCode::PeerUnauthorized, "{key}={value}: {e}");
         }
         for key in ["sig", "id", "ts", "v", "pair", "proto"] {
             let mut t = good.clone();
             t.remove(key);
-            assert!(Advert::verify(&t, now).is_err(), "missing {key}");
+            assert!(Advert::verify(&t, 8193, now).is_err(), "missing {key}");
         }
         // Signed by someone else over our id.
         let forged = advert(me.id, now).sign(&other);
-        assert!(Advert::verify(&forged, now).unwrap_err().message.contains("signature"));
-        assert!(Advert::verify(&good, now).is_ok());
+        assert!(Advert::verify(&forged, 8193, now)
+            .unwrap_err()
+            .message
+            .contains("signature"));
+        assert!(Advert::verify(&good, 8193, now).is_ok());
     }
 
     #[test]
@@ -428,11 +471,11 @@ mod tests {
         let me = DeviceIdentity::generate().unwrap();
         let ts = 1_760_000_000;
         let txt = advert(me.id, ts).sign(&me);
-        assert!(Advert::verify(&txt, ts + MAX_RECORD_AGE_SECS).is_ok());
-        assert!(Advert::verify(&txt, ts - MAX_RECORD_AGE_SECS).is_ok());
-        let e = Advert::verify(&txt, ts + MAX_RECORD_AGE_SECS + 1).unwrap_err();
+        assert!(Advert::verify(&txt, 8193, ts + MAX_RECORD_AGE_SECS).is_ok());
+        assert!(Advert::verify(&txt, 8193, ts - MAX_RECORD_AGE_SECS).is_ok());
+        let e = Advert::verify(&txt, 8193, ts + MAX_RECORD_AGE_SECS + 1).unwrap_err();
         assert!(e.message.contains("stale"), "{e}");
-        assert!(Advert::verify(&txt, ts - MAX_RECORD_AGE_SECS - 1).is_err());
+        assert!(Advert::verify(&txt, 8193, ts - MAX_RECORD_AGE_SECS - 1).is_err());
     }
 
     #[test]
@@ -458,6 +501,55 @@ mod tests {
         let b = Browser::start(&off, store).unwrap();
         assert!(!b.active());
         assert!(b.peers(10).is_empty());
+    }
+
+    fn seen(id: PeerId, addr: &str, ts: u64) -> Seen {
+        Seen {
+            peer: DiscoveredPeer {
+                id,
+                addr: addr.parse().unwrap(),
+                pairing: false,
+                pair_port: None,
+                proto: "1.0".into(),
+                trusted: false,
+                seen_utc: String::new(),
+            },
+            ts,
+            at: Instant::now(),
+            fullname: String::new(),
+        }
+    }
+
+    #[test]
+    fn table_is_bounded_and_replays_cannot_redirect() {
+        let now = 1_760_000_000;
+        let id = PeerId([1; 32]);
+        let mut map = HashMap::new();
+        remember(&mut map, seen(id, "10.0.0.2:8193", now), now);
+        // Same ts (a replay) or older from another address: ignored.
+        remember(&mut map, seen(id, "10.0.0.66:8193", now), now);
+        remember(&mut map, seen(id, "10.0.0.66:8193", now - 10), now);
+        assert_eq!(map[&id].peer.addr, "10.0.0.2:8193".parse().unwrap());
+        // A re-announce from the same address, or a strictly newer record from a new one, wins.
+        remember(&mut map, seen(id, "10.0.0.2:8193", now - 5), now);
+        assert_eq!(map[&id].ts, now - 5);
+        remember(&mut map, seen(id, "10.0.0.3:8193", now + 1), now);
+        assert_eq!(map[&id].peer.addr, "10.0.0.3:8193".parse().unwrap());
+        // A stale entry is evicted by the next insert.
+        map.insert(
+            PeerId([2; 32]),
+            seen(PeerId([2; 32]), "10.0.0.4:1", now - MAX_RECORD_AGE_SECS - 1),
+        );
+        remember(&mut map, seen(PeerId([3; 32]), "10.0.0.5:1", now), now);
+        assert!(!map.contains_key(&PeerId([2; 32])));
+        // A flood of fresh ids keeps at most MAX_SEEN entries, dropping the oldest first.
+        for i in 0..(MAX_SEEN as u32 + 50) {
+            let mut b = [9u8; 32];
+            b[..4].copy_from_slice(&i.to_be_bytes());
+            remember(&mut map, seen(PeerId(b), "10.0.1.1:1", now), now);
+        }
+        assert_eq!(map.len(), MAX_SEEN);
+        assert!(!map.contains_key(&id), "the oldest entries went first");
     }
 
     #[test]

@@ -21,7 +21,8 @@ pub struct Hello {
     pub nonce: Vec<u8>,
 }
 
-/// Signed capability record (F-02-04). `hardware_json` is the exact `common hardware --json` document.
+/// Capability record (F-02-04). `hardware_json` is the exact `common hardware --json` document.
+/// Travels only inside [`SignedCapabilities`]; tag 10 (the old in-record `signature`) is retired.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Capabilities {
     #[prost(uint32, tag = "1")]
@@ -42,7 +43,17 @@ pub struct Capabilities {
     pub groups: Vec<String>,
     #[prost(uint64, tag = "9")]
     pub issued_at: u64,
-    #[prost(bytes = "vec", tag = "10")]
+}
+
+/// A `Capabilities` record as the exact bytes its sender signed, plus the Ed25519 signature over
+/// them. The receiver verifies these bytes before decoding, so a newer minor that adds fields
+/// still verifies on an older peer (prost drops unknown fields, a re-encoding would differ).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignedCapabilities {
+    /// Protobuf encoding of `Capabilities`.
+    #[prost(bytes = "vec", tag = "1")]
+    pub record: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
     pub signature: Vec<u8>,
 }
 
@@ -108,7 +119,7 @@ pub struct RemoteChunk {
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct ControlMessage {
-    #[prost(oneof = "control_message::Body", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof = "control_message::Body", tags = "1, 3, 4, 5, 6, 7, 8, 9")]
     pub body: Option<control_message::Body>,
 }
 pub mod control_message {
@@ -116,8 +127,10 @@ pub mod control_message {
     pub enum Body {
         #[prost(message, tag = "1")]
         Hello(super::Hello),
-        #[prost(message, tag = "2")]
-        Capabilities(super::Capabilities),
+        /// Tag 2 (an unsigned-bytes `Capabilities`) is retired: an old peer sees an unknown
+        /// variant and fails with "expected Capabilities", never a signature mismatch.
+        #[prost(message, tag = "9")]
+        Capabilities(super::SignedCapabilities),
         #[prost(message, tag = "3")]
         Status(super::Status),
         #[prost(message, tag = "4")]
@@ -225,7 +238,7 @@ mod tests {
             nonce: vec![1, 2, 3],
         }))
         .await;
-        round_trip(Body::Capabilities(Capabilities {
+        let caps = Capabilities {
             schema_version: 1,
             peer_id: vec![9; 32],
             common_version: "0.1.0".into(),
@@ -235,6 +248,9 @@ mod tests {
             cached_model_sha256: vec!["ab".into(), "cd".into()],
             groups: vec!["home".into()],
             issued_at: 1_760_000_000,
+        };
+        round_trip(Body::Capabilities(SignedCapabilities {
+            record: caps.encode_to_vec(),
             signature: vec![0xAA; 64],
         }))
         .await;

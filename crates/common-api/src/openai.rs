@@ -26,7 +26,6 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -541,9 +540,12 @@ fn sse_response(
     cancel: CancellationToken,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Response {
+    // Only a local run holds a permit; tokens a peer decoded are not this device's generation
+    // metrics (`common_remote_requests_total` counts those requests).
+    let local = permit.is_some();
     let chunks = gen
         .flat_map(move |ev| {
-            if let Ok(GenerateEvent::Done { usage, timings, .. }) = &ev {
+            if let (true, Ok(GenerateEvent::Done { usage, timings, .. })) = (local, &ev) {
                 st.metrics.record_done(usage, timings);
             }
             stream::iter(fmt.stream_events(ev))
@@ -654,47 +656,19 @@ async fn run_remote(
         .as_str()
         .unwrap_or("local_only")
         .to_string();
-    let started = Instant::now();
-    let gen = common_network::remote::generate_remote(conn, model_id, &sha, req, &privacy, cancel.clone()).await?;
+    // Audited here before the request frame leaves, and again with the outcome (F-06-10).
+    let gen =
+        crate::mesh::generate_remote_audited(st.audit.clone(), conn, model_id, &sha, req, &privacy, cancel.clone())
+            .await?;
     st.metrics
         .remote_requests
         .with_label_values(&[&peer.short_label()])
         .inc();
-    let gen = audited(st.clone(), gen, peer, model_id.to_string(), started);
     if sampling.stream {
         return Ok(sse_response(st, fmt, gen, cancel, None));
     }
     let collected = collect(gen).await?;
-    st.metrics.record_done(&collected.usage, &collected.timings);
     Ok(axum::Json(fmt.final_json(&collected)).into_response())
-}
-
-/// Audits the outcome of a remote request on this side: peer, model id, outcome code, counts and
-/// duration. Never the text. (ponytail: a client that disconnects before Done leaves no entry here;
-/// the serving side audits every request regardless.)
-fn audited(st: Arc<AppState>, gen: GenerateStream, peer: PeerId, model_id: String, started: Instant) -> GenerateStream {
-    gen.inspect(move |ev| {
-        let outcome = match ev {
-            Ok(GenerateEvent::Done { usage, .. }) => Some(("done", usage.completion_tokens)),
-            Err(e) => Some((e.code.as_str(), 0)),
-            Ok(_) => None,
-        };
-        if let Some((outcome, completion_tokens)) = outcome {
-            st.audit(
-                "remote_request",
-                Some(&peer),
-                json!({
-                    "role": "client",
-                    "peer": peer.short_label(),
-                    "model_id": model_id,
-                    "outcome": outcome,
-                    "completion_tokens": completion_tokens,
-                    "duration_ms": started.elapsed().as_millis() as u64,
-                }),
-            );
-        }
-    })
-    .boxed()
 }
 
 pub async fn chat(

@@ -8,9 +8,14 @@
 //!   // ponytail: JSON trust store; move to SQLite when groups/audit need queries.
 //! - The secret never implements Serialize; Debug prints `Ed25519Secret(<redacted>)`.
 //!
+//! - Every process on one `COMMON_HOME` (daemon, CLI) shares `peers.json`: writes lock
+//!   `peers.json.lock`, re-read the file and skip unchanged writes; reads reload it when it changed.
+//!
 //! Revocation semantics (F-06-05): `revoke` removes the pin and group memberships, appends a
-//! signed `Revocation` and returns it for propagation. A revoked id is refused by `pin` until a
-//! fresh pairing calls `pin_after_pairing`, which clears the local revocation. Trust is per store:
+//! signed `Revocation` and returns it for propagation. A received revocation applies only when
+//! its issuer and target share a group here (ADR-0003 D7). A revoked id is refused by `pin` until
+//! a fresh pairing calls `pin_after_pairing`, which marks this store's revocations of that id
+//! superseded, so a member replaying them later does not undo the re-pair. Trust is per store:
 //! other group members keep their copy of the revocation until they re-pair too (household model).
 
 use common_core::{CommonError, ErrorCode, Paths, Result};
@@ -319,6 +324,9 @@ struct StoreData {
     groups: Vec<Group>,
     #[serde(default)]
     revocations: Vec<Revocation>,
+    /// Revocations cleared by a later `pin_after_pairing`; replays of them are refused.
+    #[serde(default)]
+    superseded: Vec<Revocation>,
     #[serde(default = "first_seq")]
     next_seq: u64,
 }
@@ -331,6 +339,7 @@ impl Default for StoreData {
             peers: vec![],
             groups: vec![],
             revocations: vec![],
+            superseded: vec![],
             next_seq: first_seq(),
         }
     }
@@ -341,6 +350,11 @@ impl StoreData {
     }
     fn is_revoked(&self, id: &PeerId) -> bool {
         self.revocations.iter().any(|r| &r.peer_id == id)
+    }
+    fn share_group(&self, a: &PeerId, b: &PeerId) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.members.contains(a) && g.members.contains(b))
     }
     /// Drop the pin and every group membership.
     fn unpin(&mut self, id: &PeerId) {
@@ -357,13 +371,47 @@ impl StoreData {
     }
 }
 
+/// Identifies one version of `peers.json`. Every write is a rename, so the inode changes;
+/// mtime and length cover filesystems that reuse inode numbers. `None` = no file.
+type Stamp = Option<(u64, Option<std::time::SystemTime>, u64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let m = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&m);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((ino, m.modified().ok(), m.len()))
+}
+
+/// Read `peers.json`; a missing file is an empty store.
+fn load(path: &Path) -> Result<StoreData> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|e| CommonError::io(format!("{} is not valid: {e}", path.display())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoreData::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Debug)]
+struct Cache {
+    data: StoreData,
+    stamp: Stamp,
+}
+
 /// Pinned peers, groups and revocations. Persisted to `identity/peers.json` (0600) atomically.
-/// All methods take `&self` (the network crate shares it behind `Arc`); `is_pinned`/`is_revoked`
-/// read memory only, so the TLS verifier never touches the disk.
+/// All methods take `&self` (the network crate shares it behind `Arc`). Writers (this process or
+/// another, e.g. `common peers revoke` next to `common serve`) serialize on `peers.json.lock` and
+/// re-read the file first, so nobody writes back a stale copy. Readers (`is_pinned`, `is_revoked`,
+/// the TLS verifier) stat the file and reload it only when it changed, so a running daemon sees
+/// another process's revocation at its next handshake or policy check.
+// ponytail: one stat(2) per read; use a file watcher if handshake rates ever make it show up.
 #[derive(Debug)]
 pub struct PeerStore {
     pub path: PathBuf,
-    data: Mutex<StoreData>,
+    cache: Mutex<Cache>,
 }
 
 impl PeerStore {
@@ -371,31 +419,62 @@ impl PeerStore {
         let dir = paths.identity();
         ensure_private_dir(&dir)?;
         let path = dir.join("peers.json");
-        let data = if path.is_file() {
+        if path.is_file() {
             tighten_mode(&path)?;
-            serde_json::from_slice(&std::fs::read(&path)?)
-                .map_err(|e| CommonError::io(format!("{} is not valid: {e}", path.display())))?
-        } else {
-            StoreData::default()
-        };
+        }
+        let stamp = stamp(&path); // before the read: a write in between only causes a reload
+        let data = load(&path)?;
         Ok(PeerStore {
             path,
-            data: Mutex::new(data),
+            cache: Mutex::new(Cache { data, stamp }),
         })
     }
 
     fn read<T>(&self, f: impl FnOnce(&StoreData) -> T) -> T {
-        f(&self.data.lock().unwrap_or_else(|e| e.into_inner()))
+        let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let now = stamp(&self.path);
+        if now != c.stamp {
+            match load(&self.path) {
+                Ok(d) => c.data = d,
+                // Writers rename complete files, so this is an external edit; keep the last good copy.
+                Err(e) => {
+                    tracing::warn!(error = %e.message, "peers.json changed but is unreadable; keeping the previous copy")
+                }
+            }
+            c.stamp = now;
+        }
+        f(&c.data)
     }
 
-    /// Mutate a copy, persist it, then commit: a failed write leaves memory and disk unchanged.
+    /// Under the cross-process lock: re-read the file, mutate a copy, persist it if it changed,
+    /// then commit to memory. A failed write leaves memory and disk unchanged.
     fn mutate<T>(&self, f: impl FnOnce(&mut StoreData) -> Result<T>) -> Result<T> {
-        let mut guard = self.data.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = guard.clone();
+        let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = self.lock_file()?; // released on drop
+        let current = load(&self.path)?; // never write over a copy older than the disk
+        let mut next = current.clone();
         let out = f(&mut next)?;
-        write_private(&self.path, &serde_json::to_vec_pretty(&next)?)?;
-        *guard = next;
+        if next != current {
+            write_private(&self.path, &serde_json::to_vec_pretty(&next)?)?;
+        }
+        c.stamp = stamp(&self.path);
+        c.data = next;
         Ok(out)
+    }
+
+    /// Exclusive advisory lock on `peers.json.lock` (the data file itself is replaced by rename,
+    /// so it cannot carry the lock).
+    fn lock_file(&self) -> Result<std::fs::File> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let f = opts.open(self.path.with_file_name("peers.json.lock"))?;
+        f.lock()?;
+        Ok(f)
     }
 
     pub fn list(&self) -> Result<Vec<PeerRecord>> {
@@ -424,11 +503,16 @@ impl PeerStore {
             Ok(())
         })
     }
-    /// Pin after a successful pairing: clears any local revocation of this id first. Only the
-    /// pairing flow (which proved possession of the key and the code) may call this.
+    /// Pin after a successful pairing: moves every local revocation of this id to `superseded`
+    /// first, so a member replaying one of them later cannot undo this pairing. Only the pairing
+    /// flow (which proved possession of the key and the code) may call this.
     pub fn pin_after_pairing(&self, record: PeerRecord) -> Result<()> {
         self.mutate(|d| {
-            d.revocations.retain(|r| r.peer_id != record.id);
+            let (old, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut d.revocations)
+                .into_iter()
+                .partition(|r| r.peer_id == record.id);
+            d.revocations = keep;
+            d.superseded.extend(old);
             d.upsert_peer(record);
             Ok(())
         })
@@ -479,12 +563,24 @@ impl PeerStore {
             Ok(r)
         })
     }
-    /// Apply a revocation received from a group member: `revoked_by` must be pinned here and not
-    /// itself revoked, and the signature must verify. Idempotent for an identical record.
+    /// Apply a revocation received from a group member (ADR-0003 D7). `revoked_by` must be pinned
+    /// here and not itself revoked, the signature must verify, the target must be another device,
+    /// and issuer and target must share a group here. Idempotent (Ok, no write) for a record this
+    /// store already holds. Refused: a record superseded by a later pairing of its target, and a
+    /// new record for a target already revoked here (`PeerRevoked`). So each issuer can add at most
+    /// one record per fellow group member.
+    // ponytail: a record this store never saw (a member offline at the re-pair) still re-revokes a
+    // re-paired device that is back in a group with its issuer; fail-closed, the user re-pairs
+    // again. Upgrade path: a pairing epoch in the wire record.
     pub fn apply_revocation(&self, r: &Revocation) -> Result<()> {
         self.mutate(|d| {
             if d.revocations.contains(r) {
                 return Ok(());
+            }
+            if d.superseded.contains(r) {
+                return Err(CommonError::invalid(
+                    "revocation predates a later pairing of that device here; ignored",
+                ));
             }
             if d.is_revoked(&r.revoked_by) {
                 return Err(CommonError::new(
@@ -503,6 +599,21 @@ impl PeerStore {
                 return Err(CommonError::new(
                     ErrorCode::PeerUnauthorized,
                     "revocation signature is invalid",
+                ));
+            }
+            if r.peer_id == r.revoked_by {
+                return Err(CommonError::invalid("a device cannot revoke itself"));
+            }
+            if d.is_revoked(&r.peer_id) {
+                return Err(CommonError::new(
+                    ErrorCode::PeerRevoked,
+                    "that device is already revoked here",
+                ));
+            }
+            if !d.share_group(&r.revoked_by, &r.peer_id) {
+                return Err(CommonError::new(
+                    ErrorCode::PeerUnauthorized,
+                    "revocation issuer and target share no group here",
                 ));
             }
             d.unpin(&r.peer_id);
@@ -538,6 +649,24 @@ mod tests {
             paired_at_utc: utc_now(),
             last_seen_utc: None,
             last_addr: None,
+        }
+    }
+    fn group(name: &str, members: Vec<PeerId>) -> Group {
+        Group {
+            name: name.into(),
+            members,
+            policy: GroupPolicy::default(),
+        }
+    }
+    /// A revocation signed by `by`, as a peer would send it.
+    fn signed(by: &DeviceIdentity, seq: u64, target: PeerId) -> Revocation {
+        let at_utc = utc_now();
+        Revocation {
+            seq,
+            peer_id: target,
+            revoked_by: by.id,
+            signature: hex::encode(by.sign(&revocation_message(seq, &target, &at_utc))),
+            at_utc,
         }
     }
     #[cfg(unix)]
@@ -577,6 +706,7 @@ mod tests {
         assert_eq!(mode(&p.identity().join("device.key")), 0o600);
         assert_eq!(mode(&p.identity().join("device.pub")), 0o600);
         assert_eq!(mode(&p.identity().join("peers.json")), 0o600);
+        assert_eq!(mode(&p.identity().join("peers.json.lock")), 0o600);
         assert!(!p.identity().join("device.key.tmp").exists(), "tmp renamed away");
         // Loosened on disk → tightened on load.
         use std::os::unix::fs::PermissionsExt;
@@ -778,6 +908,7 @@ mod tests {
         sa.pin(record(c.id, "c")).unwrap();
         sb.pin(record(a.id, "a")).unwrap();
         sb.pin(record(c.id, "c")).unwrap();
+        sb.upsert_group(group("home", vec![a.id, c.id])).unwrap();
 
         let r = sa.revoke(&c.id, &a).unwrap();
         assert_eq!(r.revoked_by, a.id);
@@ -788,6 +919,7 @@ mod tests {
         let wire: Revocation = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         sb.apply_revocation(&wire).unwrap();
         assert!(!sb.is_pinned(&c.id) && sb.is_revoked(&c.id));
+        assert!(sb.groups_of(&c.id).unwrap().is_empty());
         sb.apply_revocation(&wire).unwrap(); // idempotent
         assert_eq!(sb.revocations_since(0).unwrap().len(), 1);
         assert_eq!(sb.revocations_since(0).unwrap(), sa.revocations_since(0).unwrap());
@@ -805,6 +937,7 @@ mod tests {
         sa.pin(record(c.id, "c")).unwrap();
         sb.pin(record(a.id, "a")).unwrap();
         sb.pin(record(c.id, "c")).unwrap();
+        sb.upsert_group(group("home", vec![a.id, c.id])).unwrap();
         let good = sa.revoke(&c.id, &a).unwrap();
 
         // Tampered signature.
@@ -865,6 +998,151 @@ mod tests {
         assert!(s.is_pinned(&c));
         assert!(!s.is_revoked(&c));
         assert!(s.revocations_since(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revocation_requires_issuer_and_target_in_a_common_group() {
+        let (_t, p) = paths();
+        let s = PeerStore::open(&p).unwrap();
+        let a = DeviceIdentity::generate().unwrap(); // group member
+        let e = DeviceIdentity::generate().unwrap(); // paired, in no group
+        let c = PeerId([3; 32]);
+        let d = PeerId([4; 32]);
+        for (id, n) in [(a.id, "a"), (e.id, "e"), (c, "c"), (d, "d")] {
+            s.pin(record(id, n)).unwrap();
+        }
+        s.upsert_group(group("home", vec![a.id, c])).unwrap();
+        s.upsert_group(group("other", vec![d])).unwrap();
+        let file = stamp(&s.path);
+        let code = |r: &Revocation| s.apply_revocation(r).unwrap_err().code;
+        assert_eq!(
+            code(&signed(&e, 1, c)),
+            ErrorCode::PeerUnauthorized,
+            "issuer in no group"
+        );
+        assert_eq!(
+            code(&signed(&a, 1, d)),
+            ErrorCode::PeerUnauthorized,
+            "target outside a's groups"
+        );
+        assert_eq!(code(&signed(&a, 1, a.id)), ErrorCode::InvalidRequest, "self-revocation");
+        assert_eq!(stamp(&s.path), file, "refused revocations never rewrite peers.json");
+        assert!(s.is_pinned(&c) && s.is_pinned(&d) && s.is_pinned(&e.id));
+
+        s.apply_revocation(&signed(&a, 1, c)).unwrap();
+        assert!(!s.is_pinned(&c) && s.is_revoked(&c));
+        // A second record for the same target is refused, not stored: one record per member.
+        assert_eq!(code(&signed(&a, 2, c)), ErrorCode::PeerRevoked);
+        assert_eq!(s.revocations_since(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn idempotent_apply_does_not_rewrite_the_file() {
+        let (_t, p) = paths();
+        let s = PeerStore::open(&p).unwrap();
+        let a = DeviceIdentity::generate().unwrap();
+        let c = PeerId([3; 32]);
+        s.pin(record(a.id, "a")).unwrap();
+        s.pin(record(c, "c")).unwrap();
+        s.upsert_group(group("home", vec![a.id, c])).unwrap();
+        let r = signed(&a, 1, c);
+        s.apply_revocation(&r).unwrap();
+        let file = stamp(&s.path);
+        assert!(file.is_some());
+        s.apply_revocation(&r).unwrap();
+        assert_eq!(stamp(&s.path), file, "a replayed record is a no-op on disk");
+    }
+
+    #[test]
+    fn repaired_device_survives_replay_of_an_old_revocation() {
+        // B revokes C, A applies it, A re-pairs C (and puts it back in B's group), B reconnects
+        // and resends its list: C stays pinned at A.
+        let (_t, p) = paths();
+        let sa = PeerStore::open(&p).unwrap();
+        let b = DeviceIdentity::generate().unwrap();
+        let c = PeerId([3; 32]);
+        sa.pin(record(b.id, "b")).unwrap();
+        sa.pin(record(c, "c")).unwrap();
+        sa.upsert_group(group("home", vec![b.id, c])).unwrap();
+        let old = signed(&b, 1, c);
+        sa.apply_revocation(&old).unwrap();
+        assert!(sa.is_revoked(&c));
+
+        sa.pin_after_pairing(record(c, "c again")).unwrap();
+        sa.upsert_group(group("home", vec![b.id, c])).unwrap();
+        assert!(
+            sa.revocations_since(0).unwrap().is_empty(),
+            "superseded records are not relayed"
+        );
+        let replayed: Revocation = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert!(sa.apply_revocation(&replayed).is_err(), "caller must not disconnect c");
+        assert!(sa.is_pinned(&c) && !sa.is_revoked(&c));
+        // Survives a reopen.
+        let sa = PeerStore::open(&p).unwrap();
+        assert!(sa.apply_revocation(&old).is_err());
+        assert!(sa.is_pinned(&c));
+        // A fresh decision by B after the re-pair still applies.
+        sa.apply_revocation(&signed(&b, 2, c)).unwrap();
+        assert!(!sa.is_pinned(&c) && sa.is_revoked(&c));
+    }
+
+    #[test]
+    fn stale_handle_does_not_undo_another_handles_revocation() {
+        // `common serve` holds one store; `common peers revoke` opens another on the same file.
+        let (_t, p) = paths();
+        let me = DeviceIdentity::generate().unwrap();
+        let x = PeerId([5; 32]);
+        let y = PeerId([6; 32]);
+        let daemon = PeerStore::open(&p).unwrap();
+        daemon.pin(record(x, "x")).unwrap();
+        daemon.upsert_group(group("home", vec![x])).unwrap();
+        let cli = PeerStore::open(&p).unwrap();
+        cli.revoke(&x, &me).unwrap();
+        // The daemon writes next, without reading first (PUT /api/groups, a pairing, ...).
+        daemon.pin(record(y, "y")).unwrap();
+        daemon.upsert_group(group("other", vec![y])).unwrap();
+        let disk = PeerStore::open(&p).unwrap();
+        assert!(disk.is_revoked(&x) && !disk.is_pinned(&x), "revocation kept on disk");
+        assert!(disk.groups_of(&x).unwrap().is_empty());
+        assert!(disk.is_pinned(&y) && disk.groups().unwrap().len() == 2);
+        // The daemon's own view picks the change up without a restart (TLS verifier, policy).
+        assert!(daemon.is_revoked(&x) && !daemon.is_pinned(&x));
+        // Both handles share one sequence counter.
+        assert_eq!(daemon.revoke(&y, &me).unwrap().seq, 2);
+        assert_eq!(cli.revocations_since(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn concurrent_handles_lose_no_update() {
+        // Separate handles lock separate open files, as separate processes do.
+        let (_t, p) = paths();
+        std::thread::scope(|scope| {
+            for t in 0..8u8 {
+                let p = &p;
+                scope.spawn(move || {
+                    let s = PeerStore::open(p).unwrap();
+                    for i in 0..5u8 {
+                        s.pin(record(PeerId([t * 10 + i + 1; 32]), "n")).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(PeerStore::open(&p).unwrap().list().unwrap().len(), 40);
+    }
+
+    #[test]
+    fn unreadable_external_edit_keeps_last_good_copy() {
+        let (_t, p) = paths();
+        let s = PeerStore::open(&p).unwrap();
+        let a = PeerId([1; 32]);
+        s.pin(record(a, "a")).unwrap();
+        std::fs::write(&s.path, b"{ not json").unwrap();
+        assert!(s.is_pinned(&a), "reader keeps the last good copy");
+        assert!(
+            s.pin(record(PeerId([2; 32]), "b")).is_err(),
+            "writer refuses to clobber"
+        );
+        assert_eq!(std::fs::read(&s.path).unwrap(), b"{ not json");
     }
 
     #[test]

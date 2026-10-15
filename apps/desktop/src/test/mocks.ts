@@ -202,7 +202,10 @@ export interface FakeDaemon {
   pairLocked: boolean;
   /** Redacted bundle served by /api/diagnostics; null means the endpoint does not exist (404 like the daemon). */
   diagnostics: Record<string, unknown> | null;
-  /** Simulates the other device finishing the pairing: pins `peer` and makes /api/pair/status report it. */
+  /**
+   * Simulates the other device finishing the pairing: pins `peer` and makes /api/pair/status report it. Like the
+   * daemon, a just-paired device has no open connection (`connected: false`) until a request targets it.
+   */
   completePairing: (peer?: Peer) => void;
   /** Simulates the other device failing the window (wrong code); the window closes with a typed error. */
   failPairing: (code?: string, message?: string) => void;
@@ -227,7 +230,7 @@ export function installFakeDaemon(
     pairLocked: false,
     diagnostics: null,
     completePairing: (peer = PEER) => {
-      fake.peers.push({ ...peer, groups: [] });
+      fake.peers.push({ ...peer, groups: [], connected: false });
       const { short_label: _l, groups: _g, connected: _c, health: _h, ...record } = peer;
       fake.pairing.result = { peer: record };
     },
@@ -320,7 +323,7 @@ export function installFakeDaemon(
       const body = JSON.parse(String(init?.body ?? "{}")) as { addr?: string; code: string; name: string };
       if (!body.code.startsWith("common-pair:") && !body.addr) return apiError("invalid_request", "addr (ip:port of the other device's pairing endpoint) is required with a code", 400);
       if (body.code !== JOIN_CODE && body.code !== QR_PAYLOAD) return apiError("pairing_failed", "confirmation MAC mismatch", 403);
-      fake.peers.push({ ...PEER, groups: [] });
+      fake.peers.push({ ...PEER, groups: [], connected: false });
       fake.discovered = fake.discovered.filter((x) => x.id !== PEER.id);
       return json(PEER_RECORD);
     }
@@ -347,7 +350,10 @@ export function installFakeDaemon(
       const target = body.target ?? "local";
       if (target !== "local") {
         if (fake.privacy.mode === "local_only") return apiError("policy_denied", "privacy mode is local_only", 403);
-        if (!fake.peers.some((p) => `peer:${p.id}` === target)) return apiError("peer_unauthorized", "not a paired device", 403);
+        const peer = fake.peers.find((p) => `peer:${p.id}` === target);
+        if (!peer) return apiError("peer_unauthorized", "not a paired device", 403);
+        // The daemon connects on demand (mesh.rs `peer_connection`); the connection then stays open.
+        peer.connected = true;
       }
       const n = fake.chat.chunks.length;
       const chunks: unknown[] = fake.chat.chunks.map((c, i) => ({

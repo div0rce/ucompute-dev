@@ -1,5 +1,5 @@
 // F-10-10: leaving local-only needs the disclosure acknowledged; the peer selector only exists outside local-only.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
@@ -93,7 +93,8 @@ describe("Run on selector", () => {
     render(<App poll={false} />);
     const sel = await screen.findByRole("combobox", { name: "Run on" });
     await screen.findByRole("option", { name: "Studio Mac" });
-    expect(screen.getByRole("option", { name: "Asleep (offline)" })).toHaveProperty("disabled", true);
+    // No open connection is not a reason to refuse: the daemon connects on demand.
+    expect(screen.getByRole("option", { name: "Asleep" })).toHaveProperty("disabled", false);
     await user.selectOptions(sel, `peer:${PEER.id}`);
 
     await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi{Enter}");
@@ -101,6 +102,30 @@ describe("Run on selector", () => {
     const body = JSON.parse(String((fake.fetchMock.mock.calls.find(([u]) => String(u).endsWith("/v1/chat/completions"))![1] as RequestInit).body));
     expect(body.target).toBe(`peer:${PEER.id}`);
     expect(chatHistory.get().messages[1].target).toBe(`peer:${PEER.id}`);
+  });
+
+  it("a device paired after the chat opened shows up on focus and can be chosen without an open connection", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON, privacy: { ...PRIVACY, mode: "trusted_group" } });
+    fake.loaded = LOADED;
+    await refreshStatus();
+    window.location.hash = "#/chat";
+    render(<App poll={false} />);
+    const sel = await screen.findByRole("combobox", { name: "Run on" });
+    expect(within(sel).getAllByRole("option").map((o) => o.textContent)).toEqual(["This Mac"]);
+
+    // Paired from the Peers view (or the other device) while the chat was open: the daemon reports connected: false.
+    fake.completePairing();
+    expect(fake.peers[0].connected).toBe(false);
+    fireEvent.focus(sel);
+    const opt = await screen.findByRole("option", { name: "Studio Mac" });
+    expect(opt).toHaveProperty("disabled", false);
+    await user.selectOptions(sel, `peer:${PEER.id}`);
+
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi{Enter}");
+    await screen.findByText(/Ran on Studio Mac\./);
+    const body = JSON.parse(String((fake.fetchMock.mock.calls.find(([u]) => String(u).endsWith("/v1/chat/completions"))![1] as RequestInit).body));
+    expect(body.target).toBe(`peer:${PEER.id}`);
   });
 
   it("is shown on Home only outside local-only", async () => {

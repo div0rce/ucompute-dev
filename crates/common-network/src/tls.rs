@@ -5,8 +5,9 @@
 //! verifier. The verifier parses the peer's SubjectPublicKeyInfo into a `PeerId` and decides
 //! **inside the handshake**: an unpinned key fails with `unknown_ca`, a revoked key with
 //! `certificate_revoked`, so the rejected side never opens a stream. The pairing endpoint uses
-//! `PeerPolicy::AcceptAny` (records the peer id; no trust). No X.509, no CA, no TLS 1.2 (the
-//! `tls12` feature is off, see `tls12_is_not_available`).
+//! `PeerPolicy::AcceptAny` (records the peer id; no trust). No X.509, no CA, no TLS 1.2 (every
+//! config pins TLS 1.3, see `tls12_downgrade_attempt_fails`), no session resumption (a resumed
+//! handshake would skip the verifier).
 use common_core::{CommonError, ErrorCode, Result};
 use common_identity::{DeviceIdentity, PeerId, PeerStore};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -225,6 +226,12 @@ pub(crate) fn server_config_with(pkcs8: &[u8], check: Check, alpn: &[u8]) -> Res
     cfg.alpn_protocols = vec![alpn.to_vec()];
     // No 0-RTT: QUIC allows only 0 or u32::MAX here and 0 is the no-early-data value.
     cfg.max_early_data_size = 0;
+    // No resumption: a resumed TLS 1.3 handshake restores the client key from the session and
+    // never calls `verify_client_cert`, so a revoked or unpinned device could reconnect with a
+    // cached ticket. No tickets, no session cache (`revoked_client_cannot_resume_with_cached_session`).
+    cfg.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    cfg.send_tls13_tickets = 0;
+    cfg.max_tls13_tickets = 0;
     let quic = QuicServerConfig::try_from(cfg).map_err(tls_err)?;
     let mut sc = quinn::ServerConfig::with_crypto(Arc::new(quic));
     sc.transport_config(crate::transport::transport_config(&crate::NetworkConfig::default()));
@@ -247,6 +254,8 @@ pub(crate) fn client_config_with(pkcs8: &[u8], check: Check, alpn: &[u8]) -> Res
         )));
     cfg.alpn_protocols = vec![alpn.to_vec()];
     cfg.enable_early_data = false;
+    // Every handshake runs the verifier on the server key too (see `server_config_with`).
+    cfg.resumption = rustls::client::Resumption::disabled();
     let quic = QuicClientConfig::try_from(cfg).map_err(tls_err)?;
     let mut cc = quinn::ClientConfig::new(Arc::new(quic));
     cc.transport_config(crate::transport::transport_config(&crate::NetworkConfig::default()));
@@ -429,6 +438,52 @@ mod tests {
         let e = rejected(&s, &c, server_check, only(s.id, Verdict::Unpinned), ALPN_WORKLOAD).await;
         assert!(by_peer(&e), "{e:?}");
         assert_eq!(map_conn_error(&e).code, ErrorCode::PeerRevoked, "{e:?}");
+    }
+
+    /// A client that keeps its rustls session cache (one `ClientConfig` reused) must not resume
+    /// its way past a revocation: TLS 1.3 resumption restores the client key from the ticket and
+    /// skips `verify_client_cert`, so resumption is off on both sides.
+    #[tokio::test]
+    async fn revoked_client_cannot_resume_with_cached_session() {
+        let (s, c) = (key(), key());
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (flag, cid) = (revoked.clone(), c.id);
+        let server_check: Check =
+            Arc::new(
+                move |id| match (*id == cid, flag.load(std::sync::atomic::Ordering::SeqCst)) {
+                    (true, false) => Verdict::Allowed,
+                    (true, true) => Verdict::Revoked,
+                    _ => Verdict::Unpinned,
+                },
+            );
+        let server = server(&s, server_check);
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Some(i) = server.accept().await {
+                tokio::spawn(async move {
+                    let conn = match i.accept() {
+                        Ok(connecting) => connecting.await,
+                        Err(e) => Err(e),
+                    };
+                    if let Ok(conn) = conn {
+                        let _ = conn.closed().await;
+                    }
+                });
+            }
+        });
+        let client = client(&c, only(s.id, Verdict::Unpinned), ALPN_WORKLOAD);
+        let first = client.connect(addr, "common").unwrap().await.unwrap();
+        // Give the server time to deliver any post-handshake session tickets.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        first.close(0u32.into(), b"");
+        revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        let second = match client.connect(addr, "common").unwrap().await {
+            Ok(conn) => tokio::time::timeout(Duration::from_secs(5), conn.closed())
+                .await
+                .expect("a revoked client must be closed by the server"),
+            Err(e) => e,
+        };
+        assert_eq!(map_conn_error(&second).code, ErrorCode::PeerRevoked, "{second:?}");
     }
 
     #[tokio::test]

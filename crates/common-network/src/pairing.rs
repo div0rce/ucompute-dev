@@ -7,9 +7,11 @@
 //! 1. B → A: `selector ‖ SPAKE2 msg_B` (selector 0 = 6-digit code, 1 = QR secret).
 //! 2. A → B: `SPAKE2 msg_A`. Both derive `K` (`spake2` hashes pw, idA, idB, X, Y into it).
 //! 3. Both: `ekm = export_keying_material(32, "common-pair/1 confirm", "")`, then send
-//!    `HMAC-SHA256(K, side ‖ ekm ‖ idA ‖ idB)` (side `A`/`B`) `‖ u16 workload port ‖ device name`
-//!    and verify the other side's MAC in constant time.
-//! 4. Both pin the other id (`pin_after_pairing`) and audit `pairing_succeeded`.
+//!    `HMAC-SHA256(K, side ‖ ekm ‖ idA ‖ idB)` (side `A`/`B`) and verify the other side's MAC in
+//!    constant time.
+//! 4. Only after a verified MAC: both send `u16 workload port ‖ device name`, so a party without
+//!    the code never learns either (the CLI defaults the name to the hostname).
+//! 5. Both pin the other id (`pin_after_pairing`) and audit `pairing_succeeded`.
 //!
 //! A relay that terminates TLS on both legs presents its own key on each, so `idA`/`idB` and `ekm`
 //! differ per leg and step 3 fails on both ends (`mitm_relay_detected`). More than 5 failed
@@ -45,8 +47,8 @@ const PW_QR: u8 = 1;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_WINDOW: Duration = Duration::from_secs(60);
 const MAX_FAILURES: usize = 5;
-// The confirm frame (MAC + port + name) always fits one u8-length frame.
-const _: () = assert!(MAC_LEN + 2 + MAX_NAME_BYTES <= 255);
+// The info frame (port + name) always fits one u8-length frame.
+const _: () = assert!(2 + MAX_NAME_BYTES <= 255);
 
 pub struct PairingSession {
     /// 6 decimal digits, single use, valid for the window.
@@ -200,25 +202,22 @@ async fn exchange(
     let k = state.finish(&theirs).map_err(|_| failed("malformed SPAKE2 message"))?;
     let ekm = exporter(conn)?;
     let (mine, theirs) = if initiator { (b"A", b"B") } else { (b"B", b"A") };
-    let mut frame = confirm_mac(&k, mine, &ekm, &id_a, &id_b)
-        .finalize()
-        .into_bytes()
-        .to_vec();
-    frame.extend_from_slice(&port.to_be_bytes());
-    frame.extend_from_slice(name.as_bytes());
-    write_blob(&mut send, &frame).await?;
+    let mac = confirm_mac(&k, mine, &ekm, &id_a, &id_b).finalize().into_bytes();
+    write_blob(&mut send, &mac).await?;
     let got = read_blob(&mut recv).await?;
-    if got.len() < MAC_LEN + 2
-        || confirm_mac(&k, theirs, &ekm, &id_a, &id_b)
-            .verify_slice(&got[..MAC_LEN])
-            .is_err()
-    {
+    if got.len() != MAC_LEN || confirm_mac(&k, theirs, &ekm, &id_a, &id_b).verify_slice(&got).is_err() {
         return Err(failed(
             "confirmation MAC mismatch: wrong code or the connection is relayed",
         ));
     }
-    let their_port = u16::from_be_bytes([got[MAC_LEN], got[MAC_LEN + 1]]);
-    let their_name = clean_name(&String::from_utf8_lossy(&got[MAC_LEN + 2..]));
+    // The other side proved the code: only now port and name, inside the same TLS session.
+    write_blob(&mut send, &[&port.to_be_bytes()[..], name.as_bytes()].concat()).await?;
+    let info = read_blob(&mut recv).await?;
+    let [p0, p1, rest @ ..] = info.as_slice() else {
+        return Err(failed("malformed pairing info frame"));
+    };
+    let their_port = u16::from_be_bytes([*p0, *p1]);
+    let their_name = clean_name(&String::from_utf8_lossy(rest));
     // `Connection::close` discards unsent stream data: wait until the peer acknowledged our
     // confirm frame (or 2 s) so the caller's close cannot eat it.
     let _ = send.finish();
@@ -365,12 +364,11 @@ pub async fn start(
     let endpoint = quinn::Endpoint::server(sc, SocketAddr::new(ip, 0))?;
     let port = endpoint.local_addr()?.port();
     let window = Duration::from_secs(node.config.pairing_window_secs);
-    // ponytail: the QR carries the bind address; for 0.0.0.0 the CLI substitutes the LAN IP
-    // (mDNS already advertises it with `pairport`).
+    // The QR must carry an address the other device can dial, never 0.0.0.0.
     let qr_payload = format!(
         "{QR_PREFIX}{}:{}:{}",
         node.identity.id.to_hex(),
-        SocketAddr::new(ip, port),
+        routable(SocketAddr::new(ip, port)),
         secret
     );
     let session = PairingSession {
@@ -457,6 +455,35 @@ pub async fn join(node: Arc<Node>, addr: SocketAddr, code: &str, device_name: &s
     }
 }
 
+/// `addr` unless it is unspecified (`0.0.0.0` / `::`); then the same port on this host's first
+/// LAN address of the same family (interface list, no socket: see `tests/invariants.rs`), private
+/// ranges first. Falls back to `addr` when there is none.
+// ponytail: one address; a multi-homed host may pick the wrong LAN. A v2 QR could carry every
+// candidate if that bites.
+pub fn routable(addr: SocketAddr) -> SocketAddr {
+    if !addr.ip().is_unspecified() {
+        return addr;
+    }
+    let ips: Vec<IpAddr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_p2p() && !i.is_link_local())
+        .map(|i| i.ip())
+        .collect();
+    first_routable(&ips, addr.is_ipv4()).map_or(addr, |ip| SocketAddr::new(ip, addr.port()))
+}
+
+fn first_routable(ips: &[IpAddr], v4: bool) -> Option<IpAddr> {
+    let private = |ip: &IpAddr| match ip {
+        IpAddr::V4(v) => v.is_private(),
+        IpAddr::V6(v) => v.is_unique_local(),
+    };
+    ips.iter()
+        .filter(|ip| ip.is_ipv4() == v4 && !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+        .min_by_key(|ip| !private(ip))
+        .copied()
+}
+
 /// Parse `common-pair:v1:<peer hex>:<ip:port>:<secret hex>`; the secret is passed to [`join`] as
 /// the code. The caller compares the returned id with the pinned record's id after joining.
 pub fn expected_peer_from_qr(payload: &str) -> Result<(PeerId, SocketAddr, String)> {
@@ -515,6 +542,32 @@ mod tests {
             let e = expected_peer_from_qr(bad).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidRequest, "{bad}");
         }
+    }
+
+    #[test]
+    fn qr_address_is_routable() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let ips = [
+            ip("127.0.0.1"),
+            ip("100.64.0.7"),
+            ip("192.168.1.20"),
+            ip("fd00::5"),
+            ip("10.0.0.3"),
+        ];
+        assert_eq!(
+            first_routable(&ips, true),
+            Some(ip("192.168.1.20")),
+            "private, first wins"
+        );
+        assert_eq!(first_routable(&ips[..2], true), Some(ip("100.64.0.7")));
+        assert_eq!(first_routable(&ips[..1], true), None);
+        assert_eq!(first_routable(&ips, false), Some(ip("fd00::5")));
+        let fixed: SocketAddr = "127.0.0.1:41234".parse().unwrap();
+        assert_eq!(routable(fixed), fixed);
+        let any = routable("0.0.0.0:41234".parse().unwrap());
+        assert_eq!(any.port(), 41234);
+        assert!(any.ip().is_unspecified() || !any.ip().is_loopback(), "{any}");
+        eprintln!("this host's QR address for 0.0.0.0: {any}");
     }
 
     #[test]

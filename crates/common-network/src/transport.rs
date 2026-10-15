@@ -4,7 +4,14 @@
 //! bidirectional stream (the control stream); both sides exchange `Hello` (major must match,
 //! minor = min), then signed `Capabilities` (≤ 64 KiB, signature and `peer_id` checked against
 //! the TLS identity). Anything else closes the connection with a typed application code.
-use crate::proto::{control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello};
+//!
+//! Inbound connections from an unvalidated source address get a QUIC Retry first (a spoofed
+//! source cannot answer it), and `peer_rejected` audit lines are capped per minute, so a LAN
+//! flood costs neither TLS work per spoofed packet nor unbounded audit growth.
+use crate::health::{HealthTracker, PeerHealth};
+use crate::proto::{
+    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, SignedCapabilities,
+};
 use crate::tls::{self, Check, PeerPolicy, Verdict};
 use crate::{NetworkConfig, ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 use common_core::{CommonError, ErrorCode, Result};
@@ -13,10 +20,12 @@ use common_observability::Audit;
 use common_policy::PolicyEngine;
 use prost::Message;
 use quinn::{ConnectionError, IdleTimeout, TransportConfig, TransportErrorCode, VarInt};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Application close codes (QUIC CONNECTION_CLOSE, application layer).
 pub const CLOSE_OK: u32 = 0;
@@ -30,6 +39,11 @@ pub const CLOSE_PROTOCOL: u32 = 0x5056;
 pub const CLOSE_FRAME_TOO_LARGE: u32 = 0x4654;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// `peer_rejected` lines written per minute from inbound connections; the rest are counted.
+const REJECTIONS_PER_MINUTE: u32 = 20;
+/// Domain separation: a capabilities signature can never be replayed as another signed message
+/// (mDNS record, revocation) of the same device key.
+const CAPABILITIES_CONTEXT: &[u8] = b"common/1 capabilities\0";
 
 /// The first bidirectional stream (opened by the connector): Hello/Capabilities, then Status and
 /// Revocation messages from later modules. Other work opens its own streams on `conn`.
@@ -75,6 +89,45 @@ pub struct Node {
     transport: Arc<TransportConfig>,
     conns: Mutex<Vec<Arc<PeerConnection>>>,
     inbound: tokio::sync::Mutex<mpsc::Receiver<Arc<PeerConnection>>>,
+    /// Per-peer liveness (F-02-05), driven by `health::watch` and `health::supervise`.
+    pub(crate) health: Mutex<HashMap<PeerId, HealthTracker>>,
+    /// Cancelled by `shutdown`/drop: ends watchers and supervisors.
+    pub(crate) stop: CancellationToken,
+    me: Weak<Node>,
+    rejections: Mutex<RejectionLog>,
+}
+
+/// Fixed one-minute window over inbound `peer_rejected` audit lines.
+// ponytail: one global window, not per source address; a flooder also crowds out other rejection
+// lines for the rest of that minute (the `suppressed` count says so). Per-source buckets if needed.
+#[derive(Debug)]
+struct RejectionLog {
+    window: Instant,
+    written: u32,
+    suppressed: u64,
+}
+
+impl RejectionLog {
+    fn new(now: Instant) -> Self {
+        Self {
+            window: now,
+            written: 0,
+            suppressed: 0,
+        }
+    }
+    /// `Some(dropped since the last written line)` when this rejection may be written now.
+    fn admit(&mut self, now: Instant) -> Option<u64> {
+        if now.saturating_duration_since(self.window) >= Duration::from_secs(60) {
+            self.window = now;
+            self.written = 0;
+        }
+        if self.written >= REJECTIONS_PER_MINUTE {
+            self.suppressed += 1;
+            return None;
+        }
+        self.written += 1;
+        Some(std::mem::take(&mut self.suppressed))
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -86,7 +139,7 @@ pub fn transport_config(cfg: &NetworkConfig) -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(Duration::from_millis(cfg.keep_alive_ms)));
     let idle = IdleTimeout::try_from(Duration::from_millis(cfg.idle_timeout_ms))
-        .unwrap_or_else(|_| IdleTimeout::from(VarInt::from_u32(6000)));
+        .unwrap_or_else(|_| IdleTimeout::from(VarInt::from_u32(4000)));
     t.max_idle_timeout(Some(idle));
     t.stream_receive_window(VarInt::from_u32(8 << 20));
     t.receive_window(VarInt::from_u32(64 << 20));
@@ -213,7 +266,7 @@ pub fn local_capabilities(
     identity: &DeviceIdentity,
     groups: &[String],
     cached_models: &[String],
-) -> Result<Capabilities> {
+) -> Result<SignedCapabilities> {
     let hw = common_hardware::probe()?;
     sign_capabilities(
         identity,
@@ -224,15 +277,28 @@ pub fn local_capabilities(
     )
 }
 
-/// Sign a Capabilities record: Ed25519 over the protobuf encoding with `signature` empty.
+fn capabilities_message(record: &[u8]) -> Vec<u8> {
+    [CAPABILITIES_CONTEXT, record].concat()
+}
+
+/// Sign already-encoded `Capabilities` bytes as they will travel (a newer minor may carry fields
+/// this build does not know; the signature covers whatever bytes are sent).
+pub fn sign_capabilities_record(identity: &DeviceIdentity, record: Vec<u8>) -> SignedCapabilities {
+    SignedCapabilities {
+        signature: identity.sign(&capabilities_message(&record)).to_vec(),
+        record,
+    }
+}
+
+/// Build and sign this device's Capabilities record; refuses one over the 64 KiB frame bound.
 pub fn sign_capabilities(
     identity: &DeviceIdentity,
     hardware_json: String,
     free_memory_bytes: u64,
     groups: &[String],
     cached_models: &[String],
-) -> Result<Capabilities> {
-    let mut c = Capabilities {
+) -> Result<SignedCapabilities> {
+    let c = Capabilities {
         schema_version: 1,
         peer_id: identity.id.0.to_vec(),
         common_version: common_core::VERSION.into(),
@@ -242,36 +308,46 @@ pub fn sign_capabilities(
         cached_model_sha256: cached_models.to_vec(),
         groups: groups.to_vec(),
         issued_at: now_unix(),
-        signature: vec![],
     };
-    c.signature = identity.sign(&c.encode_to_vec()).to_vec();
-    let len = c.encoded_len();
+    let signed = sign_capabilities_record(identity, c.encode_to_vec());
+    let len = ControlMessage::from(Body::Capabilities(signed.clone())).encoded_len();
     if len > MAX_CAPABILITIES_BYTES {
         return Err(CommonError::new(
             ErrorCode::FrameTooLarge,
-            format!("own capabilities record is {len} bytes, bound is {MAX_CAPABILITIES_BYTES}"),
+            format!("own capabilities frame is {len} bytes, bound is {MAX_CAPABILITIES_BYTES}"),
         ));
     }
-    Ok(c)
+    Ok(signed)
 }
 
-/// `peer_id` must be the TLS identity and the signature must verify under it.
-pub fn verify_capabilities(c: &Capabilities, peer: &PeerId) -> Result<()> {
-    if c.peer_id != peer.0 {
-        return Err(CommonError::new(
-            ErrorCode::PeerUnauthorized,
-            "capabilities peer_id does not match the TLS identity",
-        ));
+/// The signature must verify under the TLS identity over the exact bytes received, and only then
+/// is the record decoded; its `peer_id` must be that identity too.
+pub fn verify_capabilities(c: &SignedCapabilities, peer: &PeerId) -> Result<Capabilities> {
+    let unauthorized = |m: &str| CommonError::new(ErrorCode::PeerUnauthorized, m);
+    if !common_identity::verify(peer, &capabilities_message(&c.record), &c.signature) {
+        return Err(unauthorized("capabilities signature does not verify"));
     }
-    let mut unsigned = c.clone();
-    unsigned.signature.clear();
-    if !common_identity::verify(peer, &unsigned.encode_to_vec(), &c.signature) {
-        return Err(CommonError::new(
-            ErrorCode::PeerUnauthorized,
-            "capabilities signature does not verify",
-        ));
+    let caps = Capabilities::decode(c.record.as_slice())
+        .map_err(|_| CommonError::new(ErrorCode::ProtocolIncompatible, "undecodable capabilities record"))?;
+    if caps.peer_id != peer.0 {
+        return Err(unauthorized("capabilities peer_id does not match the TLS identity"));
     }
-    Ok(())
+    Ok(caps)
+}
+
+/// The store's current verdict on `peer` as a typed error (`Ok` only when pinned, not revoked).
+fn allowed(store: &PeerStore, peer: &PeerId) -> Result<()> {
+    match tls::store_verdict(store, peer) {
+        Verdict::Allowed => Ok(()),
+        Verdict::Revoked => Err(CommonError::new(
+            ErrorCode::PeerRevoked,
+            format!("peer {} is revoked", peer.short_label()),
+        )),
+        Verdict::Unpinned => Err(CommonError::new(
+            ErrorCode::PeerUnauthorized,
+            format!("peer {} is not paired", peer.short_label()),
+        )),
+    }
 }
 
 impl Node {
@@ -295,26 +371,37 @@ impl Node {
         sc.transport_config(transport.clone());
         let endpoint = quinn::Endpoint::server(sc, addr)?;
         let hw = common_hardware::probe()?;
+        let hardware_json = serde_json::to_string(&hw)?;
         let (tx, rx) = mpsc::channel(16);
-        let node = Arc::new(Node {
+        let node = Arc::new_cyclic(|me| Node {
             config,
             identity,
             peers,
             policy,
             audit,
             endpoint: endpoint.clone(),
-            hardware_json: serde_json::to_string(&hw)?,
+            hardware_json,
             free_memory_bytes: hw.memory.available_bytes,
             cached_models: Mutex::new(vec![]),
             transport,
             conns: Mutex::new(vec![]),
             inbound: tokio::sync::Mutex::new(rx),
+            health: Mutex::new(HashMap::new()),
+            stop: CancellationToken::new(),
+            me: me.clone(),
+            rejections: Mutex::new(RejectionLog::new(Instant::now())),
         });
         tracing::info!(addr = %endpoint.local_addr()?, "peer endpoint listening");
         // The loop holds only a Weak: dropping the last Node closes the endpoint (Drop) and ends it.
         let weak = Arc::downgrade(&node);
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
+                // Address validation before any TLS work or audit line: a sender that cannot
+                // receive at its source address (spoofed Initial) never gets past the Retry.
+                if !incoming.remote_address_validated() {
+                    let _ = incoming.retry();
+                    continue;
+                }
                 let Some(node) = weak.upgrade() else { break };
                 let tx = tx.clone();
                 tokio::spawn(async move { node.serve_incoming(incoming, tx).await });
@@ -346,7 +433,7 @@ impl Node {
         }
     }
 
-    fn capabilities(&self) -> Result<Capabilities> {
+    fn capabilities(&self) -> Result<SignedCapabilities> {
         // ponytail: every local group counts as "mine"; membership semantics belong to F-02-09.
         let groups: Vec<String> = self
             .peers
@@ -408,7 +495,7 @@ impl Node {
         if connector {
             write_frame(&mut send, &Body::Capabilities(mine.clone()).into()).await?;
         }
-        let caps = match read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await? {
+        let signed = match read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await? {
             Some(ControlMessage {
                 body: Some(Body::Capabilities(c)),
             }) => c,
@@ -420,7 +507,7 @@ impl Node {
             }
             None => return Err(lost("peer closed the control stream before Capabilities")),
         };
-        verify_capabilities(&caps, &peer)?;
+        let caps = verify_capabilities(&signed, &peer)?;
         if !connector {
             write_frame(&mut send, &Body::Capabilities(mine).into()).await?;
         }
@@ -448,6 +535,8 @@ impl Node {
         })
     }
 
+    /// Makes the connection visible to `disconnect`, then checks the store once more: a revoke
+    /// that ran between the TLS handshake and here found nothing to close (F-06-05).
     fn register(
         &self,
         conn: quinn::Connection,
@@ -455,7 +544,7 @@ impl Node {
         control: ControlStream,
         caps: Capabilities,
         minor: u32,
-    ) -> Arc<PeerConnection> {
+    ) -> Result<Arc<PeerConnection>> {
         let pc = Arc::new(PeerConnection {
             peer_id: peer,
             remote_addr: conn.remote_address(),
@@ -465,17 +554,45 @@ impl Node {
             control: tokio::sync::Mutex::new(control),
         });
         lock(&self.conns).push(pc.clone());
-        pc
+        if let Err(e) = allowed(&self.peers, &peer) {
+            lock(&self.conns).retain(|c| !Arc::ptr_eq(c, &pc));
+            pc.conn
+                .close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+            return Err(e);
+        }
+        self.update_health(&peer, HealthTracker::on_heartbeat);
+        tokio::spawn(crate::health::watch(
+            self.me.clone(),
+            pc.clone(),
+            Duration::from_millis(self.config.keep_alive_ms.max(100)),
+        ));
+        Ok(pc)
+    }
+
+    pub(crate) fn update_health(&self, peer: &PeerId, f: impl FnOnce(&mut HealthTracker)) {
+        f(lock(&self.health)
+            .entry(*peer)
+            .or_insert_with(|| HealthTracker::new(crate::health::MISS_THRESHOLD)));
+    }
+
+    /// Liveness of `peer` (F-02-05): `None` until this node was first connected to it or asked to
+    /// keep it connected (`health::supervise`).
+    pub fn health(&self, peer: &PeerId) -> Option<PeerHealth> {
+        lock(&self.health).get(peer).map(|t| t.state)
     }
 
     async fn serve_incoming(self: Arc<Self>, incoming: quinn::Incoming, tx: mpsc::Sender<Arc<PeerConnection>>) {
         let addr = incoming.remote_address().to_string();
         let rejected = |peer: Option<&PeerId>, e: CommonError| {
+            let Some(suppressed) = lock(&self.rejections).admit(Instant::now()) else {
+                tracing::debug!(addr, code = %e.code, "peer rejected (audit line suppressed)");
+                return;
+            };
             tracing::info!(addr, code = %e.code, "peer rejected");
             self.audit(
                 "peer_rejected",
                 peer,
-                serde_json::json!({ "addr": addr, "reason": e.code.as_str(), "detail": e.message }),
+                serde_json::json!({ "addr": addr, "reason": e.code.as_str(), "detail": e.message, "suppressed": suppressed }),
             );
         };
         let connecting = match incoming.accept() {
@@ -493,9 +610,18 @@ impl Node {
                 return rejected(None, e);
             }
         };
-        match self.finish_handshake(&conn, peer, false).await {
-            Ok((control, caps, minor)) => {
-                let pc = self.register(conn, peer, control, caps, minor);
+        // The verifier decided inside the handshake; nothing (Capabilities included) is exchanged
+        // with a key the store does not allow right now.
+        if let Err(e) = allowed(&self.peers, &peer) {
+            conn.close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+            return rejected(Some(&peer), e);
+        }
+        let registered = self
+            .finish_handshake(&conn, peer, false)
+            .await
+            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor)?, minor)));
+        match registered {
+            Ok((pc, minor)) => {
                 tracing::info!(peer = %peer.short_label(), addr, minor, "peer connected (inbound)");
                 self.audit(
                     "peer_connected",
@@ -511,21 +637,7 @@ impl Node {
     /// Connect to a pinned peer; Hello/Capabilities exchanged; typed errors: PeerUnauthorized,
     /// PeerRevoked, ProtocolIncompatible, PeerLost.
     pub async fn connect(&self, addr: SocketAddr, expected: PeerId) -> Result<Arc<PeerConnection>> {
-        match tls::store_verdict(&self.peers, &expected) {
-            Verdict::Revoked => {
-                return Err(CommonError::new(
-                    ErrorCode::PeerRevoked,
-                    format!("peer {} is revoked", expected.short_label()),
-                ))
-            }
-            Verdict::Unpinned => {
-                return Err(CommonError::new(
-                    ErrorCode::PeerUnauthorized,
-                    format!("peer {} is not paired", expected.short_label()),
-                ))
-            }
-            Verdict::Allowed => {}
-        }
+        allowed(&self.peers, &expected)?;
         // Exactly the expected key, still pinned and not revoked, checked inside the handshake.
         let store = self.peers.clone();
         let check: Check = Arc::new(move |id| {
@@ -551,14 +663,17 @@ impl Node {
             }
         };
         let peer = tls::peer_id_of(&conn)?;
-        let (control, caps, minor) = match self.finish_handshake(&conn, peer, true).await {
+        let registered = self
+            .finish_handshake(&conn, peer, true)
+            .await
+            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor)?, minor)));
+        let (pc, minor) = match registered {
             Ok(v) => v,
             Err(e) => {
                 self.audit("peer_rejected", Some(&peer), fields(&e));
                 return Err(e);
             }
         };
-        let pc = self.register(conn, peer, control, caps, minor);
         tracing::info!(peer = %peer.short_label(), %addr, minor, "peer connected (outbound)");
         self.audit(
             "peer_connected",
@@ -601,6 +716,7 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        self.stop.cancel();
         let conns: Vec<Arc<PeerConnection>> = lock(&self.conns).drain(..).collect();
         for c in conns {
             c.conn.close(VarInt::from_u32(CLOSE_OK), b"shutdown");
@@ -612,6 +728,7 @@ impl Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
+        self.stop.cancel();
         self.endpoint.close(VarInt::from_u32(CLOSE_OK), b"node dropped");
     }
 }
@@ -695,6 +812,55 @@ mod tests {
             assert_eq!(close_code(&CommonError::new(ec, "")), code);
             assert_eq!(map_conn_error(&app(code)).code, ec);
         }
+    }
+
+    #[test]
+    fn rejection_audit_lines_are_capped_per_minute() {
+        let t0 = Instant::now();
+        let mut log = RejectionLog::new(t0);
+        for _ in 0..REJECTIONS_PER_MINUTE {
+            assert_eq!(log.admit(t0), Some(0));
+        }
+        for _ in 0..1000 {
+            assert_eq!(log.admit(t0 + Duration::from_secs(59)), None);
+        }
+        // The next window writes again and reports what was dropped, once.
+        let t1 = t0 + Duration::from_secs(60);
+        assert_eq!(log.admit(t1), Some(1000));
+        assert_eq!(log.admit(t1), Some(0));
+    }
+
+    #[test]
+    fn capabilities_signature_covers_the_bytes_sent() {
+        let me = DeviceIdentity::generate().unwrap();
+        let other = DeviceIdentity::generate().unwrap();
+        let signed = sign_capabilities(&me, "{}".into(), 7, &["home".into()], &[]).unwrap();
+        let caps = verify_capabilities(&signed, &me.id).unwrap();
+        assert_eq!(
+            (caps.free_memory_bytes, caps.groups.clone()),
+            (7, vec!["home".to_string()])
+        );
+        // A newer minor's extra field (tag 99, varint 1) is unknown here but still verifies.
+        let mut newer = caps.encode_to_vec();
+        newer.extend_from_slice(&[0x98, 0x06, 0x01]);
+        let newer = sign_capabilities_record(&me, newer);
+        assert_eq!(verify_capabilities(&newer, &me.id).unwrap(), caps);
+        let unauthorized = |s: &SignedCapabilities, id: &PeerId| verify_capabilities(s, id).unwrap_err().code;
+        assert_eq!(unauthorized(&signed, &other.id), ErrorCode::PeerUnauthorized);
+        let mut flipped = signed.clone();
+        *flipped.record.last_mut().unwrap() ^= 1;
+        assert_eq!(unauthorized(&flipped, &me.id), ErrorCode::PeerUnauthorized);
+        // Signed by `other` over a record naming `me`: the signature check fails first.
+        let foreign = sign_capabilities_record(&other, signed.record.clone());
+        assert_eq!(unauthorized(&foreign, &me.id), ErrorCode::PeerUnauthorized);
+        // Validly signed by `other`, but the record claims `me`.
+        assert_eq!(unauthorized(&foreign, &other.id), ErrorCode::PeerUnauthorized);
+        // A bare signature over the record without the context does not verify.
+        let bare = SignedCapabilities {
+            signature: me.sign(&signed.record).to_vec(),
+            record: signed.record.clone(),
+        };
+        assert_eq!(unauthorized(&bare, &me.id), ErrorCode::PeerUnauthorized);
     }
 
     #[test]

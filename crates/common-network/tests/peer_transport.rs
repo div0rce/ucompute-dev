@@ -2,16 +2,27 @@
 //! Every test runs two nodes on this one Mac: SINGLE-HOST evidence only.
 mod common;
 
-use common::{audit_kinds, pair, Peer};
+use common::{audit_kinds, child_home, child_value, pair, poll_until, spawn_child, start_relay, Peer};
 use common_core::ErrorCode;
-use common_network::proto::{control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello};
-use common_network::transport::{
-    map_conn_error, sign_capabilities, verify_capabilities, Node, CLOSE_FRAME_TOO_LARGE, CLOSE_PROTOCOL, CLOSE_REVOKED,
+use common_network::health::{supervise, PeerHealth};
+use common_network::proto::{
+    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, SignedCapabilities,
 };
-use common_network::{MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
+use common_network::tls::{self, PeerPolicy};
+use common_network::transport::{
+    map_conn_error, sign_capabilities, sign_capabilities_record, verify_capabilities, Node, CLOSE_FRAME_TOO_LARGE,
+    CLOSE_PROTOCOL, CLOSE_REVOKED,
+};
+use common_network::{ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
+use prost::Message;
 use quinn::ConnectionError;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
+
+/// F-02-05 bound: a dead peer is noticed within 3 heartbeat intervals, default <= 6 s.
+const DETECTION_BOUND: Duration = Duration::from_secs(6);
 
 fn app_close(e: &ConnectionError) -> Option<u64> {
     match e {
@@ -129,21 +140,17 @@ async fn capabilities_exchanged_after_handshake() {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         assert_eq!(from_a.engines, vec!["llama.cpp b11609 macos-arm64".to_string()]);
     }
-    verify_capabilities(&from_a, &a.id()).unwrap();
-    assert_eq!(
-        verify_capabilities(&from_a, &b.id()).unwrap_err().code,
-        ErrorCode::PeerUnauthorized
-    );
-    let mut forged = from_a.clone();
-    forged.free_memory_bytes += 1;
-    assert_eq!(
-        verify_capabilities(&forged, &a.id()).unwrap_err().code,
-        ErrorCode::PeerUnauthorized
-    );
-    // A record a signs itself verifies and stays under the bound.
+    // A record a signs itself verifies under a's key only and stays under the bound.
     let mine = common_network::transport::local_capabilities(&a.identity, &["home".into()], &[]).unwrap();
-    verify_capabilities(&mine, &a.id()).unwrap();
-    assert!(prost::Message::encoded_len(&mine) <= MAX_CAPABILITIES_BYTES);
+    assert_eq!(
+        verify_capabilities(&mine, &a.id()).unwrap().groups,
+        vec!["home".to_string()]
+    );
+    assert_eq!(
+        verify_capabilities(&mine, &b.id()).unwrap_err().code,
+        ErrorCode::PeerUnauthorized
+    );
+    assert!(ControlMessage::from(Body::Capabilities(mine)).encoded_len() <= MAX_CAPABILITIES_BYTES);
 }
 
 /// Hand-written client: TLS handshake as `me`, then the control stream up to and including Hello.
@@ -186,17 +193,16 @@ async fn oversized_capability_message_rejected() {
     let nb = b.start().await;
     let (_ep, conn, mut send, _recv, _) =
         raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, 0)).await;
-    let mut caps = sign_capabilities(&a.identity, "x".repeat(MAX_CAPABILITIES_BYTES + 1), 0, &[], &[]);
+    let caps = sign_capabilities(&a.identity, "x".repeat(MAX_CAPABILITIES_BYTES + 1), 0, &[], &[]);
     // Signing refuses an over-bound record locally; build the wire message by hand instead.
-    assert_eq!(caps.as_ref().unwrap_err().code, ErrorCode::FrameTooLarge);
-    caps = Ok(Capabilities {
+    assert_eq!(caps.unwrap_err().code, ErrorCode::FrameTooLarge);
+    let big = Capabilities {
         peer_id: a.id().0.to_vec(),
         hardware_json: "x".repeat(MAX_CAPABILITIES_BYTES + 1),
         ..Default::default()
-    });
-    write_frame(&mut send, &Body::Capabilities(caps.unwrap()).into())
-        .await
-        .unwrap();
+    };
+    let big = sign_capabilities_record(&a.identity, big.encode_to_vec());
+    write_frame(&mut send, &Body::Capabilities(big).into()).await.unwrap();
     let reason = timeout(Duration::from_secs(5), conn.closed())
         .await
         .expect("server must close");
@@ -284,10 +290,136 @@ async fn minor_negotiation_is_min() {
     match read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await.unwrap() {
         Some(ControlMessage {
             body: Some(Body::Capabilities(c)),
-        }) => verify_capabilities(&c, &b.id()).unwrap(),
+        }) => assert_eq!(verify_capabilities(&c, &b.id()).unwrap().peer_id, b.id().0),
         other => panic!("expected Capabilities, got {:?}", other.map(|m| m.body.is_some())),
     }
     assert!(conn.close_reason().is_none());
+}
+
+/// F-08-10 old/new interop: a newer peer (higher minor) sends a Capabilities record carrying a
+/// field this build does not know, signed over the bytes it sends. The handshake completes, the
+/// unknown field is skipped, the known ones arrive intact. SINGLE-HOST.
+#[tokio::test]
+async fn old_new_peer_interop_single_host() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let (_ep, conn, mut send, mut recv, theirs) = raw_after_hello(
+        &a,
+        nb.local_addr().unwrap(),
+        hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR + 1),
+    )
+    .await;
+    assert_eq!(theirs.minor, PROTOCOL_MINOR);
+    let known = Capabilities {
+        schema_version: 2,
+        peer_id: a.id().0.to_vec(),
+        common_version: "9.9.9".into(),
+        hardware_json: "{}".into(),
+        free_memory_bytes: 42,
+        engines: vec!["llama.cpp b99999 macos-arm64".into()],
+        groups: vec!["home".into()],
+        issued_at: 1_800_000_000,
+        ..Default::default()
+    };
+    // Minor 1 adds `string accelerator_note = 11;` (length-delimited, key 0x5a) and a varint at tag 99.
+    let mut record = known.encode_to_vec();
+    record.extend_from_slice(&[0x5a, 0x03, b'n', b'p', b'u', 0x98, 0x06, 0x07]);
+    write_frame(
+        &mut send,
+        &Body::Capabilities(sign_capabilities_record(&a.identity, record)).into(),
+    )
+    .await
+    .unwrap();
+    let accepted = timeout(Duration::from_secs(5), nb.accept())
+        .await
+        .expect("the newer peer is accepted")
+        .unwrap();
+    assert_eq!(accepted.negotiated_minor, PROTOCOL_MINOR);
+    assert_eq!(accepted.capabilities.lock().unwrap().clone().unwrap(), known);
+    assert!(matches!(
+        read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await.unwrap(),
+        Some(ControlMessage {
+            body: Some(Body::Capabilities(SignedCapabilities { .. }))
+        })
+    ));
+    assert!(conn.close_reason().is_none());
+}
+
+/// F-06-05: a revocation that lands after the TLS handshake but before the control exchange
+/// finishes still closes the connection (it is never registered as connected).
+#[tokio::test]
+async fn revoked_during_control_handshake_is_closed() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let (_ep, conn, mut send, _recv, _) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR)).await;
+    // TLS and Hello are done; b revokes a now, then a sends its Capabilities.
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    nb.disconnect(&a.id(), "revoked").await; // finds nothing: not registered yet
+    let caps = sign_capabilities(&a.identity, "{}".into(), 1, &[], &[]).unwrap();
+    write_frame(&mut send, &Body::Capabilities(caps).into()).await.unwrap();
+    let reason = timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("closed although the revoke raced the handshake");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_REVOKED)), "{reason:?}");
+    assert!(timeout(Duration::from_millis(300), nb.accept()).await.is_err());
+    assert!(nb.connections().is_empty());
+}
+
+/// The workload endpoint never resumes a TLS session: a revoked device that reuses its client
+/// config (and so its rustls session cache) is still refused inside the handshake.
+#[tokio::test]
+async fn revoked_key_cannot_reconnect_with_cached_session() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let addr = nb.local_addr().unwrap();
+    let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    ep.set_default_client_config(
+        tls::client_config(&a.identity, PeerPolicy::Pinned(a.peers.clone()), ALPN_WORKLOAD).unwrap(),
+    );
+    let first = ep.connect(addr, "common").unwrap().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await; // any session ticket would arrive now
+    first.close(0u32.into(), b"");
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    let e = match ep.connect(addr, "common").unwrap().await {
+        Ok(conn) => timeout(Duration::from_secs(5), conn.closed())
+            .await
+            .expect("the server must close a revoked client"),
+        Err(e) => e,
+    };
+    assert_eq!(map_conn_error(&e).code, ErrorCode::PeerRevoked, "{e:?}");
+    assert!(timeout(Duration::from_millis(300), nb.accept()).await.is_err());
+}
+
+/// Unauthenticated connection attempts write at most 20 `peer_rejected` lines per minute.
+#[tokio::test]
+async fn rejection_audit_is_rate_limited() {
+    let (a, b) = (Peer::new(), Peer::new());
+    a.pin(&b);
+    let nb = b.start().await;
+    let addr = nb.local_addr().unwrap();
+    let na = a.start().await;
+    for _ in 0..30 {
+        assert_eq!(
+            na.connect(addr, b.id()).await.unwrap_err().code,
+            ErrorCode::PeerUnauthorized
+        );
+    }
+    let rejected = || {
+        b.audit
+            .tail(100)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "peer_rejected")
+            .count()
+    };
+    poll_until(Duration::from_secs(2), || rejected() >= 20).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        rejected(),
+        20,
+        "audit lines beyond the per-minute cap are counted, not written"
+    );
 }
 
 #[tokio::test]
@@ -323,8 +455,9 @@ async fn disconnect_within_5s() {
 }
 
 /// F-02-05: the server vanishes without a close (its runtime is torn down, so no CONNECTION_CLOSE
-/// is ever sent); the client must observe the loss within the 6 s idle timeout + 1 s.
-/// SINGLE-HOST: both nodes run on this Mac.
+/// is ever sent); the client must observe the loss within 6 s (idle 4 s + one 1 s keep-alive
+/// worst case). SINGLE-HOST: both nodes run in this process on this Mac; see
+/// `sigkill_peer_process_detected_within_bound_single_host` for a separate, SIGKILLed process.
 #[tokio::test]
 async fn kill_peer_detected_within_bound_single_host() {
     let (a, b) = pair();
@@ -351,13 +484,135 @@ async fn kill_peer_detected_within_bound_single_host() {
     );
     let t0 = Instant::now();
     server_rt.shutdown_background();
-    let reason = timeout(Duration::from_secs(7), out.conn.closed())
+    let reason = timeout(DETECTION_BOUND, out.conn.closed())
         .await
-        .expect("peer loss must be detected within idle 6 s + 1 s");
+        .expect("peer loss must be detected within 6 s");
     let took = t0.elapsed();
     assert!(matches!(reason, ConnectionError::TimedOut), "{reason:?}");
     assert_eq!(map_conn_error(&reason).code, ErrorCode::PeerLost);
-    assert!(took <= Duration::from_secs(7), "{took:?}");
-    eprintln!("SINGLE-HOST: peer kill detected in {took:?} (bound 6 s idle + 1 s)");
+    assert!(took <= DETECTION_BOUND, "{took:?}");
+    eprintln!("SINGLE-HOST: in-process peer teardown detected in {took:?} (bound 6 s)");
     assert!(na.connections().is_empty());
+    assert_eq!(na.health(&b_id), Some(PeerHealth::Reconnecting));
+}
+
+/// Helper, not a test of its own: the serving node of
+/// `sigkill_peer_process_detected_within_bound_single_host`, run as a separate process.
+#[test]
+#[ignore = "child-process helper; run by sigkill_peer_process_detected_within_bound_single_host"]
+fn child_node_process() {
+    let Some(home) = child_home() else { return };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (identity, peers, audit, policy) = Peer::open(&home);
+        let node = Node::start(Peer::config(), identity, peers, policy, audit)
+            .await
+            .unwrap();
+        println!("CHILD_ADDR {}", node.local_addr().unwrap());
+        let _held = node.accept().await;
+        std::future::pending::<()>().await;
+    });
+}
+
+/// F-02-05 as written: a peer **process** is SIGKILLed (no close, no goodbye) and the loss is
+/// detected within 3 heartbeat intervals (<= 6 s). SINGLE-HOST: the child is a second process
+/// on this Mac (the test binary re-run as `child_node_process`), not a second machine.
+#[tokio::test]
+async fn sigkill_peer_process_detected_within_bound_single_host() {
+    let (a, c) = pair();
+    let mut child = spawn_child("child_node_process", c.home());
+    let addr: std::net::SocketAddr = child_value(&mut child, "CHILD_ADDR ").await.parse().unwrap();
+    let na = a.start().await;
+    let out = na.connect(addr, c.id()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(out.conn.close_reason().is_none(), "alive while the child runs");
+    assert_eq!(na.health(&c.id()), Some(PeerHealth::Connected));
+    let t0 = Instant::now();
+    child.kill().unwrap(); // SIGKILL
+    child.wait().unwrap();
+    let reason = timeout(DETECTION_BOUND, out.conn.closed())
+        .await
+        .expect("SIGKILLed peer must be detected within 6 s");
+    let took = t0.elapsed();
+    assert!(matches!(reason, ConnectionError::TimedOut), "{reason:?}");
+    assert!(took <= DETECTION_BOUND, "{took:?}");
+    assert_eq!(na.health(&c.id()), Some(PeerHealth::Reconnecting));
+    eprintln!("SINGLE-HOST bench:disconnect-detection: SIGKILLed peer process detected in {took:?} (bound 6 s, keep-alive 1 s, idle 4 s)");
+}
+
+/// F-02-05 partition and recovery: a relay between a and b drops every datagram (partition);
+/// a's view of b goes Unhealthy after 3 missed keep-alives and the connection is declared lost
+/// within 6 s; when the relay passes traffic again, `supervise` reconnects and health returns to
+/// Connected. SINGLE-HOST: an in-process UDP relay on loopback, not a real network.
+#[tokio::test]
+async fn partition_detected_and_recovered_single_host() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let accepter = nb.clone();
+    tokio::spawn(async move { while accepter.accept().await.is_some() {} });
+    let (front, _, _, blocked, _relay) = start_relay(nb.local_addr().unwrap()).await;
+    let na = a.start().await;
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counter = connects.clone();
+    let _sup = supervise(&na, b.id(), front, move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+    let health = || na.health(&b.id());
+    poll_until(Duration::from_secs(5), || {
+        connects.load(Ordering::SeqCst) == 1 && health() == Some(PeerHealth::Connected)
+    })
+    .await
+    .expect("supervisor connects");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(health(), Some(PeerHealth::Connected), "keep-alives count as heartbeats");
+
+    blocked.store(true, Ordering::SeqCst);
+    let t0 = Instant::now();
+    let unhealthy = poll_until(DETECTION_BOUND, || health() == Some(PeerHealth::Unhealthy))
+        .await
+        .expect("3 missed keep-alives mark the peer unhealthy");
+    let lost = poll_until(DETECTION_BOUND, || na.connections().is_empty())
+        .await
+        .map(|_| t0.elapsed())
+        .expect("partition detected within 6 s");
+    assert!(lost <= DETECTION_BOUND, "{lost:?}");
+    assert!(matches!(health(), Some(PeerHealth::Reconnecting)), "{:?}", health());
+
+    tokio::time::sleep(Duration::from_secs(2)).await; // a reconnect attempt fails into the partition
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    blocked.store(false, Ordering::SeqCst);
+    let recovered = poll_until(Duration::from_secs(15), || {
+        connects.load(Ordering::SeqCst) == 2 && health() == Some(PeerHealth::Connected)
+    })
+    .await
+    .expect("recovery restores Connected");
+    assert_eq!(na.connections().len(), 1);
+    eprintln!(
+        "SINGLE-HOST bench:disconnect-detection partition: unhealthy after {unhealthy:?}, lost after {lost:?} (bound 6 s); reconnected {recovered:?} after the partition healed"
+    );
+}
+
+/// A supervised peer that revokes this device ends supervision: no reconnect storm.
+#[tokio::test]
+async fn supervise_stops_when_the_peer_refuses() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let accepter = nb.clone();
+    tokio::spawn(async move { while accepter.accept().await.is_some() {} });
+    let na = a.start().await;
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counter = connects.clone();
+    let sup = supervise(&na, b.id(), nb.local_addr().unwrap(), move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+    poll_until(Duration::from_secs(5), || connects.load(Ordering::SeqCst) == 1)
+        .await
+        .unwrap();
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    nb.disconnect(&a.id(), "revoked").await;
+    timeout(Duration::from_secs(5), sup)
+        .await
+        .expect("supervisor ends after the peer refuses")
+        .unwrap();
+    assert_eq!(na.health(&b.id()), Some(PeerHealth::Disconnected));
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
 }

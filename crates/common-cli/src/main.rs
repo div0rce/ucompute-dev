@@ -155,8 +155,8 @@ async fn dispatch(cli: &Cli) -> Result<()> {
         Cmd::Bench(a) => run::bench(a, cli.json).await,
         Cmd::Replay(a) => run::replay(a, cli.json).await,
         Cmd::Peers { cmd } => mesh::peers(cmd, cli.json).await,
-        Cmd::Groups { cmd } => mesh::groups(cmd, cli.json),
-        Cmd::Privacy(a) => mesh::privacy(a, cli.json),
+        Cmd::Groups { cmd } => mesh::groups(cmd, cli.json).await,
+        Cmd::Privacy(a) => mesh::privacy(a, cli.json).await,
         Cmd::Audit(a) => mesh::audit(a, cli.json),
         Cmd::Diagnostics(a) => mesh::diagnostics(a),
     }
@@ -453,15 +453,22 @@ async fn serve(a: &ServeArgs) -> Result<()> {
     };
     // PolicyDenied (non-loopback without a key) before anything is printed or bound.
     let addr = common_api::bind_addr(&config)?;
+    let paths = m.paths.clone();
     let state = Arc::new(common_api::AppState::new(
         config.clone(),
         m.paths.clone(),
         common_artifacts::Catalog::builtin()?,
         m,
     )?);
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| CommonError::io(format!("cannot bind {addr}: {e}")))?;
+    let addr = listener.local_addr()?;
+    // While this runs it owns peers.json and config.json; CLI mesh commands find it here.
+    mesh::write_serve_file(&paths, addr)?;
     println!("listening on http://{addr}");
     if settings.network_enabled {
-        // serve() binds the peer endpoint before the HTTP listener; a failure there is logged
+        // serve_on() starts the peer endpoint before it accepts HTTP; a failure there is logged
         // (warn) and the API still serves with peer networking off.
         println!("peer id {}", state.identity.id);
         println!(
@@ -472,9 +479,9 @@ async fn serve(a: &ServeArgs) -> Result<()> {
             if config.network.mdns { "on" } else { "off" }
         );
     }
-    // serve() stops the peer Node and unloads the model (stops the engine) once this future resolves.
+    // serve_on() stops the peer Node and unloads the model (stops the engine) once this future resolves.
     let exit_with_parent = a.exit_with_parent;
-    common_api::serve(state, async move {
+    let r = common_api::serve_on(state, listener, async move {
         tokio::select! {
             _ = shutdown_signal() => {}
             _ = parent_exited(exit_with_parent) => {
@@ -482,7 +489,9 @@ async fn serve(a: &ServeArgs) -> Result<()> {
             }
         }
     })
-    .await
+    .await;
+    mesh::remove_serve_file(&paths);
+    r
 }
 
 async fn setup(fixtures: bool) -> Result<()> {

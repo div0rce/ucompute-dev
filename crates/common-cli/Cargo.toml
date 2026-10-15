@@ -26,6 +26,8 @@ clap = { workspace = true }
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
+# Already built for common-api (same features): CLI mesh mutations go through a running daemon's API.
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

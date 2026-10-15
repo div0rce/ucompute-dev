@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -125,12 +125,17 @@ pub struct AppState {
     pub peers: Arc<PeerStore>,
     /// Append-only audit of every off-device action (`logs/audit.jsonl`); ids and counts only.
     pub audit: Arc<Audit>,
-    /// Privacy mode and network switches (default all off), persisted to `config.json` (0600).
-    /// `mesh::AppState::policy` builds the `PolicyEngine` from this on every call.
-    settings: RwLock<mesh::Settings>,
+    /// Privacy mode and network switches (default all off), persisted to `config.json` (0600) and
+    /// re-read when that file changes (`common privacy` from another process applies to the next
+    /// request). `mesh::AppState::policy` builds the `PolicyEngine` from this on every call.
+    settings: Mutex<mesh::SettingsCell>,
+    /// Serialises peer-store writes made here that must not race each other (an address refresh
+    /// must never re-pin a device that was just unpaired).
+    peer_writes: Mutex<()>,
     /// The peer Node, discovery handles and inbound accept loop; `Some` only while enabled.
     pub net: tokio::sync::Mutex<mesh::Net>,
-    /// The one pairing session at a time (ADR-0003 D2: single-use code).
+    /// The one pairing session at a time (ADR-0003 D2: single-use code). Lock order: `pairing`
+    /// before `net`, so a network stop can close the pairing window first.
     pairing: tokio::sync::Mutex<Option<mesh::Pairing>>,
     /// Revocations issued here, forwarded by every connection's control loop (ADR-0003 D7).
     revocations: tokio::sync::broadcast::Sender<common_network::proto::ControlMessage>,
@@ -158,10 +163,7 @@ impl AppState {
         let identity = Arc::new(DeviceIdentity::load_or_create(&paths)?);
         let peers = Arc::new(PeerStore::open(&paths)?);
         let audit = Arc::new(Audit::open(&paths)?);
-        let settings = mesh::Settings::load(&paths)?.unwrap_or(mesh::Settings {
-            network_enabled: config.network.enabled,
-            ..Default::default()
-        });
+        let settings = mesh::SettingsCell::load(&paths, &config)?;
         Ok(Self {
             store: manager.store.clone(),
             config,
@@ -175,7 +177,8 @@ impl AppState {
             identity,
             peers,
             audit,
-            settings: RwLock::new(settings),
+            settings: Mutex::new(settings),
+            peer_writes: Mutex::new(()),
             net: tokio::sync::Mutex::new(mesh::Net::default()),
             pairing: tokio::sync::Mutex::new(None),
             revocations: tokio::sync::broadcast::channel(64).0,

@@ -14,9 +14,10 @@ const HEALTH: Record<NonNullable<Peer["health"]>, string> = {
   connected: "Connected",
   unhealthy: "Not responding",
   reconnecting: "Reconnecting",
-  disconnected: "Offline",
+  // Not "Offline": the daemon opens a connection only when a request targets the device.
+  disconnected: "Not connected",
 };
-/** Daemons without heartbeat health only say whether the device is connected. */
+/** Daemons without heartbeat health only say whether a connection is open right now. */
 const healthOf = (p: Peer): NonNullable<Peer["health"]> => p.health ?? (p.connected ? "connected" : "disconnected");
 const nameOf = (p: PeerRecord & { short_label?: string }) => p.name || p.short_label || shortLabel(p.id);
 /** The code field takes either the six digits or a pasted `common-pair:v1:...` payload (which carries the address). */

@@ -608,8 +608,26 @@ mod tests {
             PooledInference
         }
     }
-    const ITERATIONS: usize = 2_000;
+    /// F-06-07 acceptance: "a fuzzed mix of 10,000 requests".
+    const ITERATIONS: usize = 10_000;
     const STORES: usize = 40;
+
+    /// Live group-state churn between requests: roughly 1 in 50 requests first rewrites a group's
+    /// membership and policy, or revokes a peer, in the store it is about to hit. Decisions must
+    /// follow the store as it is now, not as it was.
+    fn churn(rng: &mut Rng, s: &PeerStore, ids: &[PeerId], me: &common_identity::DeviceIdentity) {
+        match rng.below(100) {
+            0 => {
+                let members = ids.iter().copied().filter(|_| rng.bool()).collect();
+                let name = format!("g{}", rng.below(4));
+                s.upsert_group(group(&name, members, rng.bool(), rng.bool())).unwrap();
+            }
+            1 => {
+                s.revoke(&ids[rng.below(ids.len() as u64) as usize], me).unwrap();
+            }
+            _ => {}
+        }
+    }
 
     /// F-06-02: with `PolicyConfig::default()` no peer target is ever allowed and nothing is ever
     /// served, whatever the store (pins, groups, revocations) and the request say.
@@ -617,9 +635,11 @@ mod tests {
     fn default_deny() {
         let mut rng = Rng(0x6f06_0200_dead_beef);
         let stores: Vec<_> = (0..STORES).map(|_| random_store(&mut rng)).collect();
+        let me = common_identity::DeviceIdentity::generate().unwrap();
         let mut local_allowed = 0;
         for i in 0..ITERATIONS {
             let (_t, s, ids) = &stores[i % STORES];
+            churn(&mut rng, s, ids, &me);
             let e = PolicyEngine::new(PolicyConfig::default(), s.clone());
             let (privacy, target, kind) = (
                 random_privacy(&mut rng),
@@ -651,9 +671,11 @@ mod tests {
     fn local_only_never_leaves_device_fuzz() {
         let mut rng = Rng(0x6f06_0700_c0ff_ee00);
         let stores: Vec<_> = (0..STORES).map(|_| random_store(&mut rng)).collect();
+        let me = common_identity::DeviceIdentity::generate().unwrap();
         let mut allowed = 0;
         for i in 0..ITERATIONS {
             let (_t, s, ids) = &stores[i % STORES];
+            churn(&mut rng, s, ids, &me);
             let config = random_config(&mut rng);
             let e = PolicyEngine::new(config.clone(), s.clone());
             let (privacy, target, kind) = (
@@ -703,6 +725,60 @@ mod tests {
             allowed > 0,
             "fuzz never produced an authorized TrustedGroup request; generator is broken"
         );
+    }
+
+    /// F-06-07 "policy evaluation overhead <1 ms p99": 10,000 timed `evaluate` calls over a mixed
+    /// request stream against a populated store (32 peers, 8 groups, revocations). Runs in the
+    /// unoptimized test build, so it upper-bounds the release build.
+    // ponytail: a timing assertion in a unit test, not a criterion bench; 1 ms is ~2 orders of
+    // magnitude above the measured cost, so scheduler noise cannot flip it. Add a bench when a
+    // regression budget tighter than 1 ms matters.
+    #[test]
+    fn policy_overhead_p99_under_1ms() {
+        let (_t, s) = store();
+        let me = common_identity::DeviceIdentity::generate().unwrap();
+        let ids: Vec<PeerId> = (1..=32).map(pid).collect();
+        for id in &ids {
+            s.pin(rec(*id)).unwrap();
+        }
+        for g in 0..8u8 {
+            let members = ids.iter().copied().filter(|p| p.0[0] % 8 != g).collect();
+            s.upsert_group(group(&format!("g{g}"), members, g % 2 == 0, g % 3 == 0))
+                .unwrap();
+        }
+        for id in ids.iter().step_by(7) {
+            s.revoke(id, &me).unwrap();
+        }
+        let e = PolicyEngine::new(open_config(), s);
+        let mut rng = Rng(0x6f06_07be_0c00_0001);
+        let reqs: Vec<_> = (0..ITERATIONS)
+            .map(|_| {
+                (
+                    random_privacy(&mut rng),
+                    random_target(&mut rng, &ids),
+                    random_kind(&mut rng),
+                )
+            })
+            .collect();
+        for &(p, t, k) in reqs.iter().take(1_000) {
+            std::hint::black_box(e.evaluate(p, t, k)); // warm-up
+        }
+        let mut ns: Vec<u128> = reqs
+            .iter()
+            .map(|&(p, t, k)| {
+                let t0 = Instant::now();
+                std::hint::black_box(e.evaluate(p, t, k));
+                t0.elapsed().as_nanos()
+            })
+            .collect();
+        ns.sort_unstable();
+        let pct = |q: usize| ns[(ns.len() * q / 100).min(ns.len() - 1)];
+        let (p50, p99, max) = (pct(50), pct(99), ns[ns.len() - 1]);
+        eprintln!(
+            "policy evaluate overhead over {} calls: p50 {p50} ns, p99 {p99} ns, max {max} ns",
+            ns.len()
+        );
+        assert!(p99 < 1_000_000, "p99 {p99} ns >= 1 ms");
     }
 
     // ---- quotas ----

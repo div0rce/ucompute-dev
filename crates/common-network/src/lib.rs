@@ -38,7 +38,7 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL_MINOR: u32 = 0;
 /// Hard bound on one control frame.
 pub const MAX_CONTROL_FRAME: usize = 1 << 20;
-/// Bound on the Capabilities record (F-02-04).
+/// Bound on the Capabilities control frame: signed record plus signature (F-02-04).
 pub const MAX_CAPABILITIES_BYTES: usize = 64 << 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,11 +70,12 @@ fn default_bind() -> String {
 fn default_true() -> bool {
     true
 }
+/// Keep-alive 1 s / idle 4 s: a dead peer is detected within 5 s worst case (see `health`).
 fn default_keep_alive_ms() -> u64 {
-    2000
+    1000
 }
 fn default_idle_ms() -> u64 {
-    6000
+    4000
 }
 fn default_pair_window_s() -> u64 {
     120
@@ -87,8 +88,8 @@ impl Default for NetworkConfig {
             listen_port: 8193,
             bind_addr: default_bind(),
             mdns: true,
-            keep_alive_ms: 2000,
-            idle_timeout_ms: 6000,
+            keep_alive_ms: default_keep_alive_ms(),
+            idle_timeout_ms: default_idle_ms(),
             pairing_window_secs: 120,
         }
     }
