@@ -243,6 +243,32 @@ fn orphans(ps: &str, binary: &Path) -> Vec<u32> {
 
 /// Die quietly on a closed stdout (`common models list | head`) like every other Unix CLI,
 /// instead of Rust's default "failed printing to stdout: Broken pipe" panic.
+/// A server must survive losing whoever reads its output (the desktop app holds the read end of the
+/// daemon's stdout/stderr pipes): ignore SIGPIPE so a write fails with EPIPE instead of killing the
+/// process before it has stopped its engine.
+fn ignore_sigpipe() {
+    // SAFETY: only changes the process-wide disposition of SIGPIPE; no handler, no shared state.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Point stdout and stderr at /dev/null. Called when the parent is gone: its end of our output pipes
+/// went with it, and every later write (println!, eprintln!, the log) would fail or panic.
+fn detach_stdio() {
+    #[cfg(unix)]
+    // SAFETY: open(2) and dup2(2) on fds 1 and 2; nothing else holds raw copies of them.
+    unsafe {
+        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+        if fd >= 0 {
+            libc::dup2(fd, 1);
+            libc::dup2(fd, 2);
+            libc::close(fd);
+        }
+    }
+}
+
 fn reset_sigpipe() {
     // SAFETY: only changes the process-wide disposition of SIGPIPE to the default; no handler, no shared state.
     #[cfg(unix)]
@@ -262,6 +288,8 @@ fn init_logging(verbose: u8) {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        // A failed log write must not turn into an eprintln! that panics on a broken pipe.
+        .log_internal_errors(false)
         .init();
 }
 
@@ -438,6 +466,7 @@ fn mesh_settings(a: &ServeArgs, paths: &Paths) -> Result<mesh::Settings> {
 }
 
 async fn serve(a: &ServeArgs) -> Result<()> {
+    ignore_sigpipe();
     let m = Arc::new(context().await?);
     let settings = mesh_settings(a, &m.paths)?;
     let config = common_api::ApiConfig {
@@ -485,7 +514,10 @@ async fn serve(a: &ServeArgs) -> Result<()> {
         tokio::select! {
             _ = shutdown_signal() => {}
             _ = parent_exited(exit_with_parent) => {
-                eprintln!("parent process exited; shutting down");
+                // The app is gone and so is the reader of our stdout/stderr; detach before anything
+                // writes, so the shutdown below (unload the model, stop the engine) always completes.
+                detach_stdio();
+                tracing::warn!("parent process exited; shutting down");
             }
         }
     })

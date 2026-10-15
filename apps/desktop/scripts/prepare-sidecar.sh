@@ -1,5 +1,7 @@
 #!/bin/sh
-# Copies the Common daemon binary to where Tauri expects a sidecar:
+# Copies a Common daemon binary to where Tauri expects a sidecar. Prefer scripts/build-sidecar.sh, which
+# builds the daemon from this checkout first; `pnpm tauri build` runs it automatically.
+# Destination:
 #   src-tauri/binaries/common-<rust target triple>   (e.g. common-aarch64-apple-darwin)
 # Usage: scripts/prepare-sidecar.sh [target-triple]     (COMMON_BIN overrides the source path)
 set -eu
