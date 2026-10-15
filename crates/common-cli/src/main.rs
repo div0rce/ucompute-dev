@@ -419,32 +419,62 @@ async fn parent_exited(enabled: bool) {
     }
 }
 
+/// `--network` / `--serve-peers` switch the persisted settings on (the same `config.json` the API's
+/// `PUT /api/network` writes; the API reads it in `AppState::new`), so the flags and the desktop
+/// toggle are one switch. Nothing listens for peers unless that switch is on (SD-04/SD-05).
+// ponytail: persisting is the only way in, `AppState::set_settings` is pub(crate); a run-only
+// override needs that to become pub (said in the report).
+fn mesh_settings(a: &ServeArgs, paths: &Paths) -> Result<mesh::Settings> {
+    let before = mesh::load_settings(paths)?;
+    let after = mesh::Settings {
+        network_enabled: before.network_enabled || a.network || a.serve_peers,
+        serve_peers: before.serve_peers || a.serve_peers,
+        ..before
+    };
+    if after != before {
+        after.save(paths)?;
+    }
+    Ok(after)
+}
+
 async fn serve(a: &ServeArgs) -> Result<()> {
     let m = Arc::new(context().await?);
+    let settings = mesh_settings(a, &m.paths)?;
     let config = common_api::ApiConfig {
         host: a.host.clone(),
         port: a.port,
         api_key: a.api_key.clone(),
         max_concurrent: a.max_concurrent,
+        network: common_network::NetworkConfig {
+            enabled: settings.network_enabled,
+            ..a.net.config()
+        },
         ..Default::default()
     };
     // PolicyDenied (non-loopback without a key) before anything is printed or bound.
     let addr = common_api::bind_addr(&config)?;
-    // Flags enable for this run; config.json (written by `common privacy` and the API) persists.
-    // Nothing listens for peers unless one of the two says so (SD-04/SD-05).
-    let mesh = mesh::Mesh::open()?;
-    let serve_peers = a.serve_peers || mesh.settings.serve_peers;
-    let network = a.network || serve_peers || mesh.settings.network_enabled;
-    let peer = if network {
-        Some(mesh::PeerDaemon::start(&mesh, a.net.config(), serve_peers, m.clone()).await?)
-    } else {
-        None
-    };
+    let state = Arc::new(common_api::AppState::new(
+        config.clone(),
+        m.paths.clone(),
+        common_artifacts::Catalog::builtin()?,
+        m,
+    )?);
     println!("listening on http://{addr}");
-    let state = common_api::AppState::new(config, m.paths.clone(), common_artifacts::Catalog::builtin()?, m);
-    // serve() unloads the model (stops the engine) once this future resolves.
+    if settings.network_enabled {
+        // serve() binds the peer endpoint before the HTTP listener; a failure there is logged
+        // (warn) and the API still serves with peer networking off.
+        println!("peer id {}", state.identity.id);
+        println!(
+            "peer endpoint udp://{}:{} (serving peers: {}, mdns: {})",
+            config.network.bind_addr,
+            config.network.listen_port,
+            if settings.serve_peers { "yes" } else { "no" },
+            if config.network.mdns { "on" } else { "off" }
+        );
+    }
+    // serve() stops the peer Node and unloads the model (stops the engine) once this future resolves.
     let exit_with_parent = a.exit_with_parent;
-    let r = common_api::serve(Arc::new(state), async move {
+    common_api::serve(state, async move {
         tokio::select! {
             _ = shutdown_signal() => {}
             _ = parent_exited(exit_with_parent) => {
@@ -452,11 +482,7 @@ async fn serve(a: &ServeArgs) -> Result<()> {
             }
         }
     })
-    .await;
-    if let Some(p) = peer {
-        p.stop().await;
-    }
-    r
+    .await
 }
 
 async fn setup(fixtures: bool) -> Result<()> {
@@ -739,6 +765,180 @@ garbage line
         assert_eq!(cli.verbose, 2);
         let Cmd::Bench(b) = cli.cmd else { panic!("not bench") };
         assert_eq!((b.runs, b.max_tokens), (5, 16));
+    }
+
+    /// Every mesh command parses, with its flags, into the expected variant (F-02-*, F-06-05, F-10-10).
+    #[test]
+    fn parses_mesh_commands() {
+        use mesh::{GroupsCmd, PeersCmd, PrivacyChoice};
+        let peers = |args: &[&str]| -> PeersCmd {
+            let cli = Cli::try_parse_from([&["common", "peers"][..], args].concat()).unwrap();
+            let Cmd::Peers { cmd } = cli.cmd else {
+                panic!("not peers")
+            };
+            cmd
+        };
+        assert!(matches!(peers(&["list"]), PeersCmd::List));
+        assert!(matches!(
+            peers(&["discover", "--wait-secs", "5"]),
+            PeersCmd::Discover { wait_secs: 5, .. }
+        ));
+        let PeersCmd::Pair { name, net } = peers(&["pair", "--name", "alpha", "--listen-port", "40001", "--no-mdns"])
+        else {
+            panic!("not pair")
+        };
+        assert_eq!(name.as_deref(), Some("alpha"));
+        let cfg = net.config();
+        assert!(cfg.enabled && !cfg.mdns && cfg.listen_port == 40001 && cfg.bind_addr == "0.0.0.0");
+        let PeersCmd::Join {
+            target,
+            code,
+            name,
+            net,
+        } = peers(&["join", "10.0.0.2:5000", "123456", "--listen-addr", "127.0.0.1"])
+        else {
+            panic!("not join")
+        };
+        assert_eq!(
+            (target.as_str(), code.as_deref(), name),
+            ("10.0.0.2:5000", Some("123456"), None)
+        );
+        assert_eq!((net.listen_port, net.listen_addr.as_str()), (8193, "127.0.0.1"));
+        // A QR payload carries the secret, so the code is optional.
+        assert!(matches!(
+            peers(&["join", "common-pair:v1:ab:1.2.3.4:5:cd"]),
+            PeersCmd::Join { code: None, .. }
+        ));
+        assert!(matches!(peers(&["rm", "ab12-cd34-ef56"]), PeersCmd::Rm { id } if id == "ab12-cd34-ef56"));
+        assert!(matches!(peers(&["revoke", "ab12"]), PeersCmd::Revoke { id } if id == "ab12"));
+
+        let groups = |args: &[&str]| -> GroupsCmd {
+            let cli = Cli::try_parse_from([&["common", "groups"][..], args].concat()).unwrap();
+            let Cmd::Groups { cmd } = cli.cmd else {
+                panic!("not groups")
+            };
+            cmd
+        };
+        assert!(matches!(groups(&["list"]), GroupsCmd::List));
+        assert!(matches!(
+            groups(&["create", "home", "--allow-remote"]),
+            GroupsCmd::Create { name, allow_remote: true, allow_pooled: false } if name == "home"
+        ));
+        assert!(matches!(
+            groups(&["create", "lab", "--allow-pooled"]),
+            GroupsCmd::Create {
+                allow_remote: false,
+                allow_pooled: true,
+                ..
+            }
+        ));
+        assert!(
+            matches!(groups(&["add", "home", "ab12"]), GroupsCmd::Add { group, peer } if group == "home" && peer == "ab12")
+        );
+        assert!(matches!(groups(&["remove", "home", "ab12"]), GroupsCmd::Remove { .. }));
+        assert!(matches!(
+            groups(&["policy", "home", "--allow-remote=false", "--allow-pooled=true"]),
+            GroupsCmd::Policy {
+                allow_remote: Some(false),
+                allow_pooled: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            groups(&["policy", "home"]),
+            GroupsCmd::Policy {
+                allow_remote: None,
+                allow_pooled: None,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["common", "groups", "policy", "home", "--allow-remote", "true"]).is_err(),
+            "the policy flags take `=value` only"
+        );
+
+        let cli = Cli::try_parse_from(["common", "privacy"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Privacy(ref p) if p.mode.is_none() && !p.yes));
+        let cli = Cli::try_parse_from(["common", "privacy", "trusted-devices", "--yes"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Privacy(ref p) if p.mode == Some(PrivacyChoice::TrustedDevices) && p.yes));
+        let cli = Cli::try_parse_from(["common", "privacy", "local-only"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Privacy(ref p) if p.mode == Some(PrivacyChoice::LocalOnly)));
+        assert!(
+            Cli::try_parse_from(["common", "privacy", "swarm"]).is_err(),
+            "no swarm mode in M3"
+        );
+
+        let cli = Cli::try_parse_from(["common", "audit"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Audit(ref a) if a.n == 50));
+        let cli = Cli::try_parse_from(["common", "audit", "--n", "7", "--json"]).unwrap();
+        assert!(cli.json && matches!(cli.cmd, Cmd::Audit(ref a) if a.n == 7));
+        let cli = Cli::try_parse_from(["common", "diagnostics", "--out", "/tmp/d.json"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Diagnostics(ref d) if d.out.as_deref() == Some(Path::new("/tmp/d.json"))));
+        assert!(matches!(
+            Cli::try_parse_from(["common", "diagnostics"]).unwrap().cmd,
+            Cmd::Diagnostics(ref d) if d.out.is_none()
+        ));
+    }
+
+    /// `serve` grows the peer flags without changing its defaults; `run --peer` excludes the
+    /// local-engine knobs.
+    #[test]
+    fn parses_serve_network_and_run_peer() {
+        let cli = Cli::try_parse_from(["common", "serve"]).unwrap();
+        let Cmd::Serve(s) = cli.cmd else { panic!("not serve") };
+        assert!(!s.network && !s.serve_peers && !s.net.no_mdns);
+        assert_eq!((s.net.listen_port, s.net.listen_addr.as_str()), (8193, "0.0.0.0"));
+        let cli = Cli::try_parse_from([
+            "common",
+            "serve",
+            "--network",
+            "--serve-peers",
+            "--listen-port",
+            "40002",
+            "--listen-addr",
+            "127.0.0.1",
+            "--no-mdns",
+        ])
+        .unwrap();
+        let Cmd::Serve(s) = cli.cmd else { panic!("not serve") };
+        assert!(s.network && s.serve_peers && s.net.no_mdns);
+        assert_eq!((s.net.listen_port, s.net.listen_addr.as_str()), (40002, "127.0.0.1"));
+
+        let cli = Cli::try_parse_from(["common", "run", "m", "-p", "x", "--peer", "ab12-cd34-ef56"]).unwrap();
+        let Cmd::Run(a) = cli.cmd else { panic!("not run") };
+        assert_eq!(a.peer.as_deref(), Some("ab12-cd34-ef56"));
+        assert!(
+            Cli::try_parse_from(["common", "run", "m", "-p", "x", "--peer", "ab12", "--device", "cpu"]).is_err(),
+            "--peer and --device are exclusive"
+        );
+        assert!(Cli::try_parse_from(["common", "run", "m", "-p", "x", "--peer", "ab12", "--threads", "2"]).is_err());
+    }
+
+    /// The persisted switch only ever moves towards "on" from the flags; no flag means no write.
+    #[test]
+    fn serve_flags_persist_settings_only_when_they_turn_something_on() {
+        let dir = std::env::temp_dir().join(format!("common-cli-serve-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths::at(dir.clone());
+        let parse = |args: &[&str]| -> ServeArgs {
+            let cli = Cli::try_parse_from([&["common", "serve"][..], args].concat()).unwrap();
+            let Cmd::Serve(s) = cli.cmd else { panic!("not serve") };
+            s
+        };
+        let s = mesh_settings(&parse(&[]), &paths).unwrap();
+        assert!(!s.network_enabled && !s.serve_peers);
+        assert!(!mesh::Settings::path(&paths).exists(), "default serve writes nothing");
+        let s = mesh_settings(&parse(&["--network"]), &paths).unwrap();
+        assert!(s.network_enabled && !s.serve_peers);
+        assert_eq!(mesh::load_settings(&paths).unwrap(), s, "persisted");
+        let s = mesh_settings(&parse(&["--serve-peers"]), &paths).unwrap();
+        assert!(s.network_enabled && s.serve_peers, "--serve-peers implies --network");
+        assert_eq!(
+            mesh::load_settings(&paths).unwrap().privacy,
+            common_policy::PrivacyMode::LocalOnly
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

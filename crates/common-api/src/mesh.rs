@@ -33,7 +33,8 @@ use tokio::sync::broadcast;
 
 /// Shown before a non-local privacy mode can be selected (F-10-10, THREAT_MODEL §4). Returned by
 /// `GET /api/privacy` and, as the error message, by an unacknowledged `PUT /api/privacy`.
-pub const DISCLOSURE: &str = "Trusted devices: a request you send to a paired device travels encrypted, but that device \
+pub const DISCLOSURE: &str =
+    "Trusted devices: a request you send to a paired device travels encrypted, but that device \
 decrypts it and runs the model on your prompt in plain text inside its own process. It can read, log or keep what you \
 send and what the model answers; Common cannot prevent that. Only \"local only\" keeps everything on this computer. \
 Pair only devices you trust with your prompts.";
@@ -131,7 +132,12 @@ impl Net {
             return Ok(());
         };
         self.advertiser = None; // goodbye for the old record before the new one is registered
-        self.advertiser = Some(Advertiser::start(cfg, identity, node.local_addr()?.port(), pairing_port)?);
+        self.advertiser = Some(Advertiser::start(
+            cfg,
+            identity,
+            node.local_addr()?.port(),
+            pairing_port,
+        )?);
         Ok(())
     }
 
@@ -164,7 +170,9 @@ impl AppState {
         *self.settings.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn set_settings(&self, s: Settings) {
+    /// Replace the in-memory settings (not persisted; `Settings::save` does that). The CLI uses it
+    /// for run-only flags.
+    pub fn set_settings(&self, s: Settings) {
         *self.settings.write().unwrap_or_else(PoisonError::into_inner) = s;
     }
 
@@ -259,11 +267,10 @@ impl AppState {
             .collect();
         match hits.as_slice() {
             [id] => Ok(*id),
-            [] => Err(CommonError::new(
-                ErrorCode::PeerUnauthorized,
-                format!("no paired device {label}"),
-            )
-            .with_hint("GET /api/peers")),
+            [] => Err(
+                CommonError::new(ErrorCode::PeerUnauthorized, format!("no paired device {label}"))
+                    .with_hint("GET /api/peers"),
+            ),
             _ => Err(CommonError::invalid(format!(
                 "short label {label} matches more than one paired device; use the full id"
             ))),
@@ -276,16 +283,13 @@ impl AppState {
         if let Some(m) = self.store.get(model_id)? {
             return Ok(m.sha256);
         }
-        self.catalog
-            .get(model_id)
-            .map(|e| e.sha256.clone())
-            .ok_or_else(|| {
-                CommonError::new(
-                    ErrorCode::ModelNotFound,
-                    format!("no model named {model_id} in the catalog or the local store"),
-                )
-                .with_hint("GET /v1/models")
-            })
+        self.catalog.get(model_id).map(|e| e.sha256.clone()).ok_or_else(|| {
+            CommonError::new(
+                ErrorCode::ModelNotFound,
+                format!("no model named {model_id} in the catalog or the local store"),
+            )
+            .with_hint("GET /v1/models")
+        })
     }
 
     /// An authenticated connection to `id`: the open one when there is one, else a new connect to
@@ -357,9 +361,13 @@ impl AppState {
 /// `xxxx-xxxx-xxxx` (12 hex in three groups), lowercased; `None` for anything else.
 fn short_label(s: &str) -> Option<String> {
     let ok = s.len() == 14
-        && s.bytes()
-            .enumerate()
-            .all(|(i, b)| if i == 4 || i == 9 { b == b'-' } else { b.is_ascii_hexdigit() });
+        && s.bytes().enumerate().all(|(i, b)| {
+            if i == 4 || i == 9 {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        });
     ok.then(|| s.to_ascii_lowercase())
 }
 
@@ -847,7 +855,10 @@ mod tests {
             signature: vec![1; 63],
             ..m.clone()
         };
-        assert_eq!(revocation_from_msg(short_sig).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            revocation_from_msg(short_sig).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
         let bad_id = RevocationMsg {
             peer_id: vec![1; 31],
             ..m

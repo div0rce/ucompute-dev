@@ -185,6 +185,12 @@ async fn auth_required_on_every_route_except_health() {
         "/api/status",
         "/api/models",
         "/api/hardware",
+        "/api/network",
+        "/api/peers",
+        "/api/pair/status",
+        "/api/groups",
+        "/api/privacy",
+        "/api/audit",
     ] {
         let r = c.get(srv.url(path)).send().await.unwrap();
         assert_eq!(r.status(), 401, "{path}");

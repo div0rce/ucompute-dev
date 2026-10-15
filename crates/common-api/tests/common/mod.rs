@@ -37,18 +37,24 @@ pub fn engine_dir(paths: &Paths) -> PathBuf {
 }
 
 /// COMMON_HOME when the pinned engine and the stories15M fixture are present, else None (printed).
+/// With `COMMON_REQUIRE_FIXTURES=1` (the evidence/CI job) a missing asset fails the test instead,
+/// so a green run can never mean "nothing was generated".
 pub fn fixture_home() -> Option<PathBuf> {
     let home = common_home();
     let paths = Paths::at(&home);
-    if !common_artifacts::backend::binary(&engine_dir(&paths), "llama-server").is_file() {
-        eprintln!("SKIP: pinned llama-server missing at {}", engine_dir(&paths).display());
-        return None;
-    }
-    if Store::new(paths).resolve(MODEL_ID).is_err() {
-        eprintln!("SKIP: fixture model {MODEL_ID} missing under {}", home.display());
-        return None;
-    }
-    Some(home)
+    let missing = if !common_artifacts::backend::binary(&engine_dir(&paths), "llama-server").is_file() {
+        format!("pinned llama-server missing at {}", engine_dir(&paths).display())
+    } else if Store::new(paths).resolve(MODEL_ID).is_err() {
+        format!("fixture model {MODEL_ID} missing under {}", home.display())
+    } else {
+        return Some(home);
+    };
+    assert!(
+        std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+        "COMMON_REQUIRE_FIXTURES=1: {missing}"
+    );
+    eprintln!("SKIP: {missing}");
+    None
 }
 
 pub fn has_model(home: &std::path::Path, id: &str) -> bool {
@@ -62,12 +68,14 @@ pub fn app(config: ApiConfig, home: PathBuf, hardware: HardwareReport) -> Arc<Ap
     paths.ensure_dirs().unwrap();
     let backend = common_runtime::backend_by_name("llama.cpp", engine_dir(&paths), paths.clone()).unwrap();
     let manager = ModelManager::new(paths.clone(), Store::new(paths.clone()), backend, hardware);
-    Arc::new(AppState::new(
-        config,
-        paths,
-        common_artifacts::Catalog::builtin().unwrap(),
-        Arc::new(manager),
-    ))
+    app_with(config, paths, Arc::new(manager))
+}
+
+/// AppState whose identity, peers, audit and settings live under `paths` while `manager` (and so
+/// the model store) may point elsewhere, e.g. the real COMMON_HOME for a peer that serves models.
+pub fn app_with(config: ApiConfig, paths: Paths, manager: Arc<ModelManager>) -> Arc<AppState> {
+    paths.ensure_dirs().unwrap();
+    Arc::new(AppState::new(config, paths, common_artifacts::Catalog::builtin().unwrap(), manager).unwrap())
 }
 
 pub struct Server {
@@ -88,9 +96,10 @@ impl Server {
         format!("http://{}{}", self.addr, path)
     }
 
-    /// Unload whatever is loaded (kills the engine) and stop serving.
+    /// Unload whatever is loaded (kills the engine), close the peer endpoint and stop serving.
     pub async fn stop(self) {
         let _ = self.state.manager.unload().await;
+        self.state.stop_network().await;
         self.task.abort();
     }
 }

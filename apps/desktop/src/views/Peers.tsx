@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, expiresAtMs, type Discovered, type Group, type NetworkState, type PairingSession, type Peer } from "../api/client";
-import { explain, type MappedError } from "../api/errors";
+import { api, expiresAtMs, pairingAddr, shortLabel, type Discovered, type Group, type NetworkState, type PairingSession, type Peer, type PeerRecord } from "../api/client";
+import { explain, mapError, type MappedError } from "../api/errors";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { Groups } from "../components/Groups";
 import { daemon, settings } from "../state/stores";
@@ -10,12 +10,17 @@ export const grouped = (hex: string) => (hex.match(/.{1,8}/g) ?? [hex]).join(" "
 /** "123456" -> "123 456": easier to read aloud across a room. */
 const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
 
-const HEALTH: Record<Peer["health"], string> = {
+const HEALTH: Record<NonNullable<Peer["health"]>, string> = {
   connected: "Connected",
   unhealthy: "Not responding",
   reconnecting: "Reconnecting",
   disconnected: "Offline",
 };
+/** Daemons without heartbeat health only say whether the device is connected. */
+const healthOf = (p: Peer): NonNullable<Peer["health"]> => p.health ?? (p.connected ? "connected" : "disconnected");
+const nameOf = (p: PeerRecord & { short_label?: string }) => p.name || p.short_label || shortLabel(p.id);
+/** The code field takes either the six digits or a pasted `common-pair:v1:...` payload (which carries the address). */
+const isPayload = (code: string) => code.trim().startsWith("common-pair:");
 
 type Confirm = { id: string; action: "revoke" | "remove" } | null;
 
@@ -37,7 +42,7 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
   const [join, setJoin] = useState({ addr: "", code: "" });
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<MappedError | null>(null);
-  const [joined, setJoined] = useState<Peer | null>(null);
+  const [joined, setJoined] = useState<PeerRecord | null>(null);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const codeRef = useRef<HTMLInputElement>(null);
@@ -79,10 +84,14 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
       try {
         const st = await api.pairStatus();
         if (stopped) return;
-        if (st.result) {
-          setPairResult(`Paired with ${st.result.name || st.result.short_label}.`);
+        if (st.result && "peer" in st.result) {
+          setPairResult(`Paired with ${nameOf(st.result.peer)}.`);
           setSession(null);
           reload();
+        } else if (st.result && "error" in st.result) {
+          // The other side sent a wrong code or dropped out; the daemon reports it as a typed error.
+          setError(mapError(st.result.error.code, st.result.error.message, st.result.error.hint ?? null));
+          setSession(null);
         } else if (!st.active) {
           setPairResult("The code expired before another device joined. Start again for a fresh one.");
           setSession(null);
@@ -127,15 +136,19 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
     }
   }
 
+  const payload = isPayload(join.code);
+  const canJoin = payload || (!!join.addr.trim() && join.code.replace(/\D/g, "").length === 6);
+
   async function submitJoin(e: React.FormEvent) {
     e.preventDefault();
-    const code = join.code.replace(/\D/g, "");
-    if (!join.addr.trim() || code.length !== 6) return;
+    if (!canJoin) return;
+    const code = payload ? join.code.trim() : join.code.replace(/\D/g, "");
+    const addr = join.addr.trim();
     setJoining(true);
     setJoinError(null);
     setJoined(null);
     try {
-      const peer = await api.pairJoin({ addr: join.addr.trim(), code, name: s.device_name.trim() || "This Mac" });
+      const peer = await api.pairJoin({ ...(addr ? { addr } : {}), code, name: s.device_name.trim() || "This Mac" });
       setJoined(peer);
       setJoin({ addr: "", code: "" });
       reload();
@@ -158,7 +171,7 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
   }
 
   function pairWith(x: Discovered) {
-    setJoin({ addr: x.addr, code: "" });
+    setJoin({ addr: pairingAddr(x), code: "" });
     setJoined(null);
     setJoinError(null);
     setTimeout(() => codeRef.current?.focus(), 0);
@@ -189,8 +202,8 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
               Let this Mac talk to paired devices
             </label>
             <p id="net-help" className="help muted small" style={{ maxWidth: "64ch" }}>
-              Off by default. When on, Common listens on <code>{net.listen_addr}</code> for connections from paired devices only, encrypted and
-              checked against the key saved at pairing.{net.mdns ? " It also announces its id on this network so paired devices can find it." : ""}
+              Off by default. When on, Common listens{net.listen_addr ? <> on <code>{net.listen_addr}</code></> : ""} for connections from paired devices
+              only, encrypted and checked against the key saved at pairing.{net.mdns ? " It also announces its id on this network so paired devices can find it." : ""}
             </p>
             <label className="check" style={{ marginTop: 10 }}>
               <input type="checkbox" checked={net.serve_peers} disabled={!net.enabled} aria-describedby="serve-help" onChange={(e) => setNetwork({ serve_peers: e.target.checked })} />
@@ -262,7 +275,7 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
                 <div className="field">
                   <label htmlFor="join-addr">Address</label>
                   <input id="join-addr" type="text" value={join.addr} placeholder="192.168.1.20:54321" autoComplete="off" disabled={!enabled} onChange={(e) => setJoin({ ...join, addr: e.target.value })} />
-                  <span className="help">Shown under the code on the other device, or pick a nearby device below.</span>
+                  <span className="help">Shown under the code on the other device, or pick a nearby device below. Not needed with a pasted QR text.</span>
                 </div>
                 <div className="field">
                   <label htmlFor="join-code">Code</label>
@@ -270,17 +283,14 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
                     id="join-code"
                     ref={codeRef}
                     type="text"
-                    inputMode="numeric"
-                    pattern="[0-9 ]*"
-                    maxLength={7}
                     value={join.code}
                     autoComplete="one-time-code"
                     disabled={!enabled}
                     onChange={(e) => setJoin({ ...join, code: e.target.value })}
                   />
-                  <span className="help">The six digits on the other device's screen.</span>
+                  <span className="help">The six digits on the other device's screen, or the text behind its QR code.</span>
                 </div>
-                <button type="submit" className="btn btn-primary" disabled={!enabled || joining || !join.addr.trim() || join.code.replace(/\D/g, "").length !== 6}>
+                <button type="submit" className="btn btn-primary" disabled={!enabled || joining || !canJoin}>
                   {joining ? "Joining" : "Join"}
                 </button>
               </form>
@@ -291,7 +301,7 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
               )}
               {joined && (
                 <div className="notice ok" role="status" style={{ marginTop: 10 }}>
-                  <div className="title">Paired with {joined.name || joined.short_label}.</div>
+                  <div className="title">Paired with {nameOf(joined)}.</div>
                   <div>Add it to a group to let it run work for this Mac.</div>
                 </div>
               )}
@@ -342,7 +352,7 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
                           )}
                         </td>
                         <td>
-                          <span className={p.health === "connected" ? "ok" : p.health === "disconnected" ? "muted" : "warn"}>{HEALTH[p.health] ?? p.health}</span>
+                          <span className={healthOf(p) === "connected" ? "ok" : healthOf(p) === "disconnected" ? "muted" : "warn"}>{HEALTH[healthOf(p)]}</span>
                         </td>
                         <td>{p.groups.length ? p.groups.join(", ") : <span className="muted">none</span>}</td>
                         <td>{p.last_seen_utc ? new Date(p.last_seen_utc).toLocaleString() : "never"}</td>
@@ -388,14 +398,14 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
                   {discovered.map((x) => (
                     <tr key={x.id}>
                       <td>
-                        <div className="model-name">{x.short_label}</div>
+                        <div className="model-name">{shortLabel(x.id)}</div>
                         <div className="model-meta">Not trusted</div>
                       </td>
                       <td>{x.addr}</td>
                       <td>
                         <div className="row-actions">
                           {x.pairing ? (
-                            <button type="button" className="btn btn-sm" aria-label={`Pair with ${x.short_label}`} onClick={() => pairWith(x)}>
+                            <button type="button" className="btn btn-sm" aria-label={`Pair with ${shortLabel(x.id)}`} onClick={() => pairWith(x)}>
                               Pair
                             </button>
                           ) : (

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type Group, type Peer } from "../api/client";
+import { api, shortLabel, type Group, type Peer } from "../api/client";
 
 /**
  * Household groups (ADR-0003 D7): which paired devices may run inference for each other. The daemon's
@@ -8,19 +8,23 @@ import { api, type Group, type Peer } from "../api/client";
 export function Groups({ groups, peers, onChange, onError }: { groups: Group[]; peers: Peer[]; onChange: (g: Group[]) => void; onError: (e: unknown) => void }) {
   const [newName, setNewName] = useState("");
   const [saving, setSaving] = useState(false);
-  const nameOf = (id: string) => peers.find((p) => p.id === id)?.name || `${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8, 12)}`;
+  const nameOf = (id: string) => peers.find((p) => p.id === id)?.name || shortLabel(id);
 
-  async function save(next: Group[]) {
+  /** PUT one group; the daemon returns the whole list. */
+  async function save(group: Group) {
     setSaving(true);
     try {
-      onChange(await api.setGroups(next));
+      onChange(await api.putGroup(group));
     } catch (e) {
       onError(e);
     } finally {
       setSaving(false);
     }
   }
-  const update = (name: string, f: (g: Group) => Group) => save(groups.map((g) => (g.name === name ? f(g) : g)));
+  const update = (name: string, f: (g: Group) => Group) => {
+    const g = groups.find((x) => x.name === name);
+    if (g) save(f(g));
+  };
 
   return (
     <div className="section">
@@ -83,7 +87,7 @@ export function Groups({ groups, peers, onChange, onError }: { groups: Group[]; 
           const name = newName.trim();
           if (!name || groups.some((g) => g.name === name)) return;
           setNewName("");
-          save([...groups, { name, members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } }]);
+          save({ name, members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } });
         }}
       >
         <label>

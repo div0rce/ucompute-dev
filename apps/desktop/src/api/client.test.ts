@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, parseMetrics, sseData, UNREACHABLE } from "./client";
-import { apiError, installFakeDaemon, sse } from "../test/mocks";
+import { apiError, installFakeDaemon, PEER, sse } from "../test/mocks";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -72,7 +72,7 @@ describe("api.chat", () => {
 
 describe("api.chat target", () => {
   it("omits target for local runs and echoes the daemon's target for a peer", async () => {
-    const fake = installFakeDaemon({ privacy: { mode: "trusted_group", disclosure: "" }, peers: [{ id: "ab".repeat(32), short_label: "abab-abab-abab", name: "x", groups: [], last_seen_utc: null, connected: true, health: "connected" }] });
+    const fake = installFakeDaemon({ privacy: { mode: "trusted_group", disclosure: "" }, peers: [{ ...PEER, id: "ab".repeat(32), short_label: "abab-abab-abab", groups: [] }] });
     fake.loaded = { model_id: "x" } as never;
     const local = await api.chat({ model: "x", messages: [] }, () => undefined);
     expect(local.target).toBe("local");

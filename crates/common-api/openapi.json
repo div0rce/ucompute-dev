@@ -11,7 +11,8 @@
   "tags": [
     { "name": "ops", "description": "Liveness, readiness, metrics, this document." },
     { "name": "openai", "description": "OpenAI-compatible endpoints; official OpenAI clients work with only base_url changed." },
-    { "name": "common", "description": "Common extensions used by the CLI and the desktop app." }
+    { "name": "common", "description": "Common extensions used by the CLI and the desktop app." },
+    { "name": "mesh", "description": "Common Mesh (M3): peer networking, pairing, trust, privacy and audit. Everything is off by default; nothing leaves this device unless privacy is `trusted_group` and the request names a paired device with `target`." }
   ],
   "paths": {
     "/health": {
@@ -70,12 +71,15 @@
         "tags": ["openai"],
         "summary": "Chat completion",
         "description": "Loads `model` on demand (single slot). Models whose GGUF has a chat template get the template applied by the engine; models without one (e.g. the stories15M fixture) are prompted with plain `role: content` lines. `response_format` of type json_schema/json_object enables constrained decoding. With `stream: true` the response is text/event-stream: OpenAI chat chunks, a final chunk with finish_reason, a usage chunk when stream_options.include_usage is set, then `data: [DONE]`. Closing the connection cancels generation.",
+        "parameters": [{ "$ref": "#/components/parameters/Target" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatRequest" } } } },
         "responses": {
           "200": { "description": "Completion (JSON) or SSE stream", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatResponse" } }, "text/event-stream": { "schema": { "type": "string" } } } },
           "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
           "404": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" },
+          "502": { "$ref": "#/components/responses/Error" },
           "503": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -85,12 +89,15 @@
         "tags": ["openai"],
         "summary": "Text completion",
         "description": "Raw prompt (string or single-element array), no chat template. Same sampling, streaming and admission rules as chat.",
+        "parameters": [{ "$ref": "#/components/parameters/Target" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompletionRequest" } } } },
         "responses": {
           "200": { "description": "Completion (JSON) or SSE stream", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompletionResponse" } }, "text/event-stream": { "schema": { "type": "string" } } } },
           "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
           "404": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" },
+          "502": { "$ref": "#/components/responses/Error" },
           "503": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -174,12 +181,116 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "path": { "type": "string" }, "id": { "type": "string" }, "license": { "type": "string" } }, "required": ["path"] } } } },
         "responses": { "200": { "description": "Manifest", "content": { "application/json": { "schema": { "type": "object" } } } }, "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
       }
+    },
+    "/api/network": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Peer networking status",
+        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NetworkStatus" } } } } }
+      },
+      "put": {
+        "tags": ["mesh"],
+        "summary": "Switch peer networking and serving on or off",
+        "description": "Persisted in `COMMON_HOME/config.json` (0600). `enabled` binds (or closes) the authenticated QUIC endpoint, mDNS advertising/browsing and the inbound accept loop; `serve_peers` lets paired devices in a group whose policy allows it run models here. A change restarts the endpoint, so open peer connections are re-established. When the endpoint cannot start, networking is recorded as off and the error is returned.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" } } } } } },
+        "responses": { "200": { "description": "Status after the change", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NetworkStatus" } } } }, "400": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/peers": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Paired, discovered and revoked devices",
+        "description": "`peers` are pinned devices with `connected` and their groups. `discovered` are devices mDNS currently sees; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
+        "responses": { "200": { "description": "Peers", "content": { "application/json": { "schema": { "type": "object", "properties": { "peers": { "type": "array", "items": { "$ref": "#/components/schemas/PeerRecord" } }, "discovered": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveredPeer" } }, "revocations": { "type": "array", "items": { "$ref": "#/components/schemas/Revocation" } } } } } } } }
+      }
+    },
+    "/api/peers/{id}": {
+      "delete": {
+        "tags": ["mesh"],
+        "summary": "Unpair a device",
+        "description": "Removes the pin and closes its connections. The device may pair again (use revoke to forbid that).",
+        "parameters": [{ "$ref": "#/components/parameters/PeerId" }],
+        "responses": { "204": { "description": "Removed" }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/peers/{id}/revoke": {
+      "post": {
+        "tags": ["mesh"],
+        "summary": "Revoke a device",
+        "description": "Unpins it, records a revocation signed by this device, closes every connection to it with the REVOKED close code and sends the revocation to every connected group member, which applies it too. The revoked key fails inside the TLS handshake from now on; audit `peer_revoked`.",
+        "parameters": [{ "$ref": "#/components/parameters/PeerId" }],
+        "responses": { "200": { "description": "The signed revocation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Revocation" } } } }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/pair/start": {
+      "post": {
+        "tags": ["mesh"],
+        "summary": "Open a pairing window and show the code",
+        "description": "Requires peer networking on. One window at a time (409 `overloaded` while one is open). Opens the separate accept-any pairing endpoint for `expires_at - now` seconds, advertises `pair=1` on mDNS and returns the single-use 6-digit code plus the QR payload (`common-pair:v1:<peer id>:<ip:port>:<secret>`). More than 5 wrong codes lock the window (`pairing_locked`). `GET /api/pair/status` reports the outcome.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string", "description": "This device's name as the other side will see it (<= 64 bytes)." } } } } } },
+        "responses": { "200": { "description": "Pairing window", "content": { "application/json": { "schema": { "type": "object", "properties": { "code": { "type": "string" }, "port": { "type": "integer" }, "qr_payload": { "type": "string" }, "expires_at": { "type": "integer", "description": "Unix seconds" } } } } } }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/pair/status": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Outcome of the current or last pairing window",
+        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "type": "object", "properties": { "active": { "type": "boolean" }, "port": { "type": "integer" }, "expires_at": { "type": "integer" }, "result": { "oneOf": [{ "type": "null" }, { "type": "object", "properties": { "peer": { "$ref": "#/components/schemas/PeerRecord" } } }, { "type": "object", "properties": { "error": { "type": "object" } } }] } } } } } } }
+      }
+    },
+    "/api/pair/join": {
+      "post": {
+        "tags": ["mesh"],
+        "summary": "Join another device's pairing window",
+        "description": "Connects from this device's peer endpoint (networking must be on) to `addr` (the other device's pairing endpoint `ip:port`, required with a 6-digit code) and runs the SPAKE2 exchange bound to the TLS session. `code` may instead be the whole QR payload, whose address and expected peer id are then used. On success both devices pin each other; a wrong code is `pairing_failed` (401), a locked window `pairing_locked` (429).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "addr": { "type": "string" }, "code": { "type": "string" }, "name": { "type": "string" } }, "required": ["code"] } } } },
+        "responses": { "200": { "description": "The newly pinned device", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PeerRecord" } } } }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "429": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/groups": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Trust groups",
+        "responses": { "200": { "description": "Groups", "content": { "application/json": { "schema": { "type": "object", "properties": { "groups": { "type": "array", "items": { "$ref": "#/components/schemas/Group" } } } } } } } }
+      },
+      "put": {
+        "tags": ["mesh"],
+        "summary": "Create or replace one group",
+        "description": "A paired device can run or serve a workload only through a group whose policy allows that kind; the default policy denies everything. Returns the full list.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Group" } } } },
+        "responses": { "200": { "description": "Groups", "content": { "application/json": { "schema": { "type": "object", "properties": { "groups": { "type": "array", "items": { "$ref": "#/components/schemas/Group" } } } } } } }, "400": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/privacy": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Privacy mode and the disclosure text",
+        "responses": { "200": { "description": "Mode", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PrivacyStatus" } } } } }
+      },
+      "put": {
+        "tags": ["mesh"],
+        "summary": "Change the privacy mode",
+        "description": "`local_only` (default) always succeeds. `trusted_group` requires `\"acknowledged\": true`; without it the response is 403 `policy_denied` whose message is the disclosure text the user must see (a paired device decrypts and reads the prompt it runs). `swarm_allowed` is refused until its security gate. Persisted; audited as `privacy_changed`.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "mode": { "type": "string", "enum": ["local_only", "trusted_group", "swarm_allowed"] }, "acknowledged": { "type": "boolean", "default": false } }, "required": ["mode"] } } } },
+        "responses": { "200": { "description": "Mode after the change", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PrivacyStatus" } } } }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "tags": ["mesh"],
+        "summary": "Recent audit events",
+        "description": "The last `n` events (1..=1000, default 100) of `COMMON_HOME/logs/audit.jsonl`, oldest first: pairing, connections, revocations, settings changes and remote requests. Ids, counts, codes and durations only; never prompt text or key material.",
+        "parameters": [{ "name": "n", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }],
+        "responses": { "200": { "description": "Events", "content": { "application/json": { "schema": { "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/AuditEvent" } } } } } } }, "500": { "$ref": "#/components/responses/Error" } }
+      }
     }
   },
   "components": {
     "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer" } },
     "parameters": {
-      "ModelId": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$" }, "description": "Catalog or store id." }
+      "ModelId": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$" }, "description": "Catalog or store id." },
+      "PeerId": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "A device's 64-hex peer id, or the `xxxx-xxxx-xxxx` short label of a paired device." },
+      "Target": { "name": "X-Common-Target", "in": "header", "required": false, "schema": { "type": "string" }, "description": "Same as the body field `target`; the body wins when both are present." }
     },
     "responses": {
       "Error": { "description": "Error in the OpenAI shape with a stable Common code", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
@@ -193,7 +304,7 @@
             "properties": {
               "message": { "type": "string" },
               "type": { "type": "string", "enum": ["invalid_request_error", "authentication_error", "permission_error", "not_found_error", "rate_limit_error", "server_error"] },
-              "code": { "type": "string", "enum": ["invalid_request", "model_not_found", "model_not_downloaded", "model_file_invalid", "integrity_mismatch", "insufficient_memory", "context_too_long", "backend_unavailable", "backend_failed", "gpu_unavailable", "timeout", "cancelled", "overloaded", "download_failed", "not_implemented", "policy_denied", "unauthorized", "io", "internal"] },
+              "code": { "type": "string", "enum": ["invalid_request", "model_not_found", "model_not_downloaded", "model_file_invalid", "integrity_mismatch", "insufficient_memory", "context_too_long", "backend_unavailable", "backend_failed", "gpu_unavailable", "timeout", "cancelled", "overloaded", "download_failed", "not_implemented", "policy_denied", "unauthorized", "io", "internal", "peer_unauthorized", "peer_revoked", "pairing_locked", "pairing_failed", "peer_lost", "protocol_incompatible", "frame_too_large"] },
               "param": { "type": "null" },
               "hint": { "type": ["string", "null"] }
             },
@@ -240,7 +351,8 @@
           "stream": { "type": "boolean", "default": false },
           "stream_options": { "type": "object", "properties": { "include_usage": { "type": "boolean" } } },
           "response_format": { "type": "object", "properties": { "type": { "type": "string", "enum": ["text", "json_object", "json_schema"] }, "json_schema": { "type": "object", "properties": { "name": { "type": "string" }, "schema": { "type": "object" } } } } },
-          "n": { "type": "integer", "const": 1 }
+          "n": { "type": "integer", "const": 1 },
+          "target": { "type": "string", "default": "local", "description": "Common extension. `local` runs here. `peer:<peer id or short label>` runs the whole request on that paired device (remote execution; the device decrypts and reads the prompt). Allowed only when privacy is `trusted_group`, networking is on and the device is pinned, not revoked and in a group allowing remote inference; otherwise 403 `policy_denied` / `peer_unauthorized` / `peer_revoked` before anything runs or connects. Every response echoes `target`." }
         },
         "required": ["model"]
       },
@@ -257,7 +369,8 @@
         "properties": {
           "id": { "type": "string" }, "object": { "const": "chat.completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
           "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "message": { "type": "object", "properties": { "role": { "const": "assistant" }, "content": { "type": ["string", "null"] }, "tool_calls": { "type": "array", "items": { "type": "object" } } } }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
-          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" }
+          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" },
+          "target": { "type": "string", "description": "Where it ran: `local` or `peer:<peer id>`." }
         }
       },
       "CompletionRequest": {
@@ -271,7 +384,8 @@
         "properties": {
           "id": { "type": "string" }, "object": { "const": "text_completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
           "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "text": { "type": "string" }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
-          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" }
+          "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" },
+          "target": { "type": "string", "description": "Where it ran: `local` or `peer:<peer id>`." }
         }
       },
       "EmbeddingsRequest": {
@@ -287,6 +401,35 @@
           "model": { "type": "string" },
           "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "total_tokens": { "type": "integer" } } }
         }
+      },
+      "NetworkStatus": {
+        "type": "object",
+        "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" }, "listen_addr": { "type": ["string", "null"], "description": "`ip:port` of the QUIC endpoint while enabled." }, "mdns": { "type": "boolean" }, "peer_id": { "type": "string", "description": "This device's 64-hex id (its Ed25519 public key)." }, "short_label": { "type": "string" }, "connections": { "type": "integer" } }
+      },
+      "PeerRecord": {
+        "type": "object",
+        "properties": { "id": { "type": "string" }, "short_label": { "type": "string" }, "name": { "type": "string" }, "paired_at_utc": { "type": "string" }, "last_seen_utc": { "type": ["string", "null"] }, "last_addr": { "type": ["string", "null"] }, "connected": { "type": "boolean" }, "groups": { "type": "array", "items": { "type": "string" } } }
+      },
+      "DiscoveredPeer": {
+        "type": "object",
+        "properties": { "id": { "type": "string" }, "addr": { "type": "string" }, "pairing": { "type": "boolean" }, "pair_port": { "type": ["integer", "null"] }, "proto": { "type": "string" }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } }
+      },
+      "Group": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "maxLength": 64 }, "members": { "type": "array", "items": { "type": "string" }, "maxItems": 256 }, "policy": { "type": "object", "properties": { "allow_remote_inference": { "type": "boolean", "default": false }, "allow_pooled_inference": { "type": "boolean", "default": false } } } },
+        "required": ["name", "members"]
+      },
+      "Revocation": {
+        "type": "object",
+        "properties": { "seq": { "type": "integer" }, "peer_id": { "type": "string" }, "revoked_by": { "type": "string" }, "at_utc": { "type": "string" }, "signature": { "type": "string", "description": "Ed25519 by `revoked_by`, hex." } }
+      },
+      "PrivacyStatus": {
+        "type": "object",
+        "properties": { "mode": { "type": "string", "enum": ["local_only", "trusted_group", "swarm_allowed"] }, "disclosure": { "type": "string" } }
+      },
+      "AuditEvent": {
+        "type": "object",
+        "properties": { "ts_utc": { "type": "string" }, "kind": { "type": "string" }, "peer_id": { "type": "string" }, "fields": { "type": "object" } }
       }
     }
   }

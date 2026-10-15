@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { refreshStatus } from "../daemon";
 import { chatHistory, daemon, lastError, privacy, runs } from "../state/stores";
-import { installFakeDaemon, LOADED, NETWORK, PEER, PRIVACY, STRANGER } from "./mocks";
+import { installFakeDaemon, LOADED, NETWORK_ON, PEER, PRIVACY, STRANGER } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
@@ -44,7 +44,7 @@ const VIEWS: [string, string, () => Promise<unknown>][] = [
 describe("axe accessibility scan", () => {
   it.each(VIEWS)("#/%s has no serious or critical violations", async (route, title, ready) => {
     const fake = installFakeDaemon({
-      network: { ...NETWORK, enabled: true },
+      network: NETWORK_ON,
       peers: [PEER],
       discovered: [STRANGER],
       groups: [{ name: "home", members: [PEER.id], policy: { allow_remote_inference: true, allow_pooled_inference: false } }],

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Peer, type Target } from "../api/client";
+import { api, shortLabel, type Peer, type Target } from "../api/client";
 import { privacy, runTarget } from "../state/stores";
 
 /** Returns the display name for a target: "this Mac" or the paired device's name. */
@@ -7,7 +7,7 @@ export function targetName(target: Target | undefined, peers: Peer[]): string {
   if (!target || target === "local") return "this Mac";
   const id = target.slice("peer:".length);
   const p = peers.find((x) => x.id === id);
-  return p?.name || p?.short_label || `${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8, 12)}`;
+  return p?.name || p?.short_label || shortLabel(id);
 }
 
 /**

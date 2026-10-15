@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { refreshStatus } from "../daemon";
 import { chatHistory, daemon, privacy, runTarget } from "../state/stores";
-import { installFakeDaemon, LOADED, NETWORK, PEER, PRIVACY } from "./mocks";
+import { installFakeDaemon, LOADED, NETWORK_ON, PEER, PRIVACY } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
@@ -68,7 +68,7 @@ describe("Privacy view", () => {
 describe("Run on selector", () => {
   it("is hidden in local-only mode and no target is sent", async () => {
     const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: { ...NETWORK, enabled: true }, peers: [PEER] });
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER] });
     fake.loaded = LOADED;
     await refreshStatus();
     window.location.hash = "#/chat";
@@ -86,7 +86,7 @@ describe("Run on selector", () => {
 
   it("appears in trusted-devices mode, sends the peer target and the reply says where it ran", async () => {
     const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: { ...NETWORK, enabled: true }, peers: [PEER, { ...PEER, id: "ee".repeat(32), short_label: "eeee-eeee-eeee", name: "Asleep", connected: false, health: "disconnected" }], privacy: { ...PRIVACY, mode: "trusted_group" } });
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER, { ...PEER, id: "ee".repeat(32), short_label: "eeee-eeee-eeee", name: "Asleep", connected: false }], privacy: { ...PRIVACY, mode: "trusted_group" } });
     fake.loaded = LOADED;
     await refreshStatus();
     window.location.hash = "#/chat";

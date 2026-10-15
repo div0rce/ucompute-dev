@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, getBaseUrl, type AuditEvent } from "../api/client";
+import { api, ApiError, getBaseUrl, shortLabel, type AuditEvent } from "../api/client";
 import { ERROR_CODES, explain, type MappedError } from "../api/errors";
 import { humanDuration } from "../format";
 import { daemon } from "../state/stores";
+
+/** Audit `fields` is any JSON; an empty object or null shows as nothing. */
+const detail = (f: unknown) => (f == null || (typeof f === "object" && Object.keys(f).length === 0) ? "" : JSON.stringify(f));
 
 export function Diagnostics() {
   const d = daemon.use();
@@ -14,7 +17,8 @@ export function Diagnostics() {
     if (!d.reachable) return;
     api.audit().then(
       (ev) => {
-        setAudit(ev);
+        // The daemon returns oldest first; the table reads most recent first.
+        setAudit([...ev].reverse());
         setAuditError(null);
       },
       (e) => setAuditError(explain(e)),
@@ -142,8 +146,8 @@ export function Diagnostics() {
                   <td>
                     <code>{e.kind}</code>
                   </td>
-                  <td>{e.peer_id ? `${e.peer_id.slice(0, 4)}-${e.peer_id.slice(4, 8)}-${e.peer_id.slice(8, 12)}` : "—"}</td>
-                  <td className="small">{e.fields && Object.keys(e.fields).length ? JSON.stringify(e.fields) : ""}</td>
+                  <td>{e.peer_id ? shortLabel(e.peer_id) : "—"}</td>
+                  <td className="small">{detail(e.fields)}</td>
                 </tr>
               ))}
             </tbody>

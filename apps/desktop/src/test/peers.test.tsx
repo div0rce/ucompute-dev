@@ -4,8 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { daemon, privacy } from "../state/stores";
+import { pairingAddr, shortLabel } from "../api/client";
 import { grouped, Peers } from "../views/Peers";
-import { installFakeDaemon, JOIN_CODE, NETWORK, PEER, SELF_ID, STRANGER } from "./mocks";
+import { installFakeDaemon, JOIN_CODE, NETWORK, NETWORK_ON, PEER, QR_PAYLOAD, SELF_ID, STRANGER } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
@@ -52,7 +53,7 @@ describe("Peers view", () => {
     expect(within(group).getByText("482 913")).toBeTruthy();
     expect(within(group).getByText(/Expires in \d+ s/)).toBeTruthy();
     await user.click(within(group).getByText("Show as text for a QR app"));
-    expect(within(group).getByText(/^common-pair:v1:/)).toBeTruthy();
+    expect(within(group).getByText(QR_PAYLOAD)).toBeTruthy();
     expect(within(group).getByRole("status").textContent).toContain("Waiting for the other device");
 
     // The other device confirms; polling notices and the list updates.
@@ -64,9 +65,25 @@ describe("Peers view", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
   });
 
+  it("a window the other device fails closes with the daemon's typed error", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON });
+    render(<Peers pollMs={20} />);
+    await user.click(await screen.findByRole("button", { name: "Pair this device" }));
+    await screen.findByRole("group", { name: "Pairing code" });
+    fake.failPairing();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Pairing did not complete.");
+    expect(screen.queryByRole("group", { name: "Pairing code" })).toBeNull();
+    expect(fake.peers).toHaveLength(0);
+    // A new window can be opened straight away; the stale result is not mistaken for this one.
+    await user.click(screen.getByRole("button", { name: "Pair this device" }));
+    await screen.findByRole("group", { name: "Pairing code" });
+  });
+
   it("join with a wrong code shows the pairing_failed explanation; a locked peer shows pairing_locked", async () => {
     const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: { ...NETWORK, enabled: true } });
+    const fake = installFakeDaemon({ network: NETWORK_ON });
     render(<Peers pollMs={20} />);
 
     await user.type(await screen.findByLabelText("Address"), "192.168.1.77:51234");
@@ -91,25 +108,45 @@ describe("Peers view", () => {
     expect(fake.peers.map((p) => p.id)).toEqual([PEER.id]);
   });
 
+  it("join accepts the pasted QR text without an address", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON });
+    render(<Peers pollMs={20} />);
+    const join = await screen.findByRole("button", { name: "Join" });
+    expect(join).toHaveProperty("disabled", true);
+    await user.click(screen.getByLabelText("Code"));
+    await user.paste(QR_PAYLOAD);
+    expect(join).toHaveProperty("disabled", false);
+    await user.click(join);
+    await screen.findByText("Paired with Studio Mac.");
+    const body = JSON.parse(String((calls(fake, "POST", "/api/pair/join")[0][1] as RequestInit).body));
+    expect(body).toEqual({ code: QR_PAYLOAD, name: "This Mac" });
+  });
+
   it("lists strangers separately with Pair as the only action, which prefills the join form", async () => {
     const user = userEvent.setup();
-    installFakeDaemon({ network: { ...NETWORK, enabled: true }, discovered: [STRANGER, { ...STRANGER, id: "ab".repeat(32), short_label: "abab-abab-abab", addr: "192.168.1.78:1", pairing: false }] });
+    installFakeDaemon({ network: NETWORK_ON, discovered: [STRANGER, { ...STRANGER, id: "ab".repeat(32), addr: "192.168.1.78:1", pairing: false, pair_port: null }] });
     render(<Peers pollMs={20} />);
-    const row = (await screen.findByText(STRANGER.short_label)).closest("tr")!;
+    const row = (await screen.findByText(shortLabel(STRANGER.id))).closest("tr")!;
     expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Pair"]);
     const idle = screen.getByText("abab-abab-abab").closest("tr")!;
     expect(within(idle).queryAllByRole("button")).toHaveLength(0);
     expect(within(idle).getByText("Not in pairing mode")).toBeTruthy();
 
-    await user.click(within(row).getByRole("button", { name: `Pair with ${STRANGER.short_label}` }));
-    expect(screen.getByLabelText("Address")).toHaveProperty("value", STRANGER.addr);
+    // The join form gets the pairing window's address (host + pair_port), not the workload port.
+    await user.click(within(row).getByRole("button", { name: `Pair with ${shortLabel(STRANGER.id)}` }));
+    expect(pairingAddr(STRANGER)).toBe("192.168.1.77:51234");
+    expect(screen.getByLabelText("Address")).toHaveProperty("value", "192.168.1.77:51234");
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Code")));
   });
 
   it("revoke asks for confirmation and then removes the device; remove does too", async () => {
     const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: { ...NETWORK, enabled: true }, peers: [PEER, { ...PEER, id: "cd".repeat(32), short_label: "cdcd-cdcd-cdcd", name: "Old laptop", health: "disconnected", connected: false }] });
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER, { ...PEER, id: "cd".repeat(32), short_label: "cdcd-cdcd-cdcd", name: "Old laptop", connected: false }] });
     render(<Peers pollMs={20} />);
+    // Without heartbeat health the daemon's `connected` decides the column.
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Offline")).toBeTruthy();
 
     await user.click(await screen.findByRole("button", { name: "Revoke Studio Mac" }));
     expect(fake.peers).toHaveLength(2);
@@ -127,19 +164,22 @@ describe("Peers view", () => {
     expect(fake.peers).toHaveLength(1);
   });
 
-  it("edits group membership and policy through PUT /api/groups", async () => {
+  it("edits group membership and policy through PUT /api/groups, one group per request", async () => {
     const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: { ...NETWORK, enabled: true }, peers: [PEER] });
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER], groups: [{ name: "work", members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } }] });
     render(<Peers pollMs={20} />);
     await user.type(await screen.findByLabelText("New group"), "home");
     await user.click(screen.getByRole("button", { name: "Create group" }));
     await screen.findByRole("group", { name: /home/ });
-    expect(fake.groups).toEqual([{ name: "home", members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } }]);
+    expect(fake.groups.map((g) => g.name)).toEqual(["work", "home"]);
+    expect(JSON.parse(String((calls(fake, "PUT", "/api/groups")[0][1] as RequestInit).body))).toEqual({ name: "home", members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } });
 
     await user.selectOptions(screen.getByLabelText("Add a device to home"), PEER.id);
-    await waitFor(() => expect(fake.groups[0].members).toEqual([PEER.id]));
-    await user.click(screen.getByRole("checkbox", { name: "Members may run prompts for each other" }));
-    await waitFor(() => expect(fake.groups[0].policy.allow_remote_inference).toBe(true));
+    await waitFor(() => expect(fake.groups[1].members).toEqual([PEER.id]));
+    const home = screen.getByRole("group", { name: /home/ });
+    await user.click(within(home).getByRole("checkbox", { name: "Members may run prompts for each other" }));
+    await waitFor(() => expect(fake.groups[1].policy.allow_remote_inference).toBe(true));
+    expect(fake.groups[0]).toEqual({ name: "work", members: [], policy: { allow_remote_inference: false, allow_pooled_inference: false } });
     await waitFor(() => expect(screen.getByText("home", { selector: "td" })).toBeTruthy());
   });
 

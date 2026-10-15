@@ -107,47 +107,63 @@ export interface ChatResult {
 
 /** Peer networking (ADR-0003). Ids are 64 lowercase hex; `short_label` is `xxxx-xxxx-xxxx`, display only. */
 export interface NetworkState {
+  /** True only while the endpoint is actually bound. */
   enabled: boolean;
   serve_peers: boolean;
-  listen_addr: string;
+  /** `ip:port` the daemon listens on; null while networking is off. */
+  listen_addr: string | null;
   mdns: boolean;
   peer_id: string;
   short_label: string;
+  connections: number;
+}
+
+/** A pinned device as the daemon stores it (`common_identity::PeerRecord`). */
+export interface PeerRecord {
+  id: string;
+  name: string;
+  paired_at_utc: string;
+  last_seen_utc: string | null;
+  /** Last known `ip:port`; advisory. */
+  last_addr: string | null;
 }
 
 export type PeerHealth = "connected" | "unhealthy" | "reconnecting" | "disconnected";
 
-export interface Peer {
-  id: string;
+/** A pinned device as `GET /api/peers` lists it: the record plus live state. */
+export interface Peer extends PeerRecord {
   short_label: string;
-  name: string;
   groups: string[];
-  last_seen_utc: string | null;
   connected: boolean;
-  health: PeerHealth;
+  /** Heartbeat health; not emitted by every daemon version, so readers fall back to `connected`. */
+  health?: PeerHealth;
 }
 
 /** Seen through mDNS but not pinned. Never actionable except pairing. */
 export interface Discovered {
   id: string;
-  short_label: string;
+  /** Workload endpoint `ip:port`. */
   addr: string;
   pairing: boolean;
+  /** Port of the open pairing window on that host, when `pairing`. */
+  pair_port: number | null;
+  proto: string;
   trusted: boolean;
+  seen_utc: string;
 }
 
 export interface PairingSession {
   code: string;
   port: number;
   qr_payload: string;
-  /** Unix seconds or an ISO timestamp; see `expiresAtMs`. */
+  /** Unix seconds (the daemon's form) or an ISO timestamp; see `expiresAtMs`. */
   expires_at: number | string;
-  peer_id: string;
 }
 
+/** `GET /api/pair/status`. `result` stays set after the window closes until the next start. */
 export interface PairingStatus {
   active: boolean;
-  result: Peer | null;
+  result: null | { peer: PeerRecord } | { error: { code: string; message: string; hint?: string | null } };
 }
 
 export interface Group {
@@ -168,7 +184,8 @@ export interface AuditEvent {
   ts_utc: string;
   kind: string;
   peer_id?: string;
-  fields: Record<string, unknown>;
+  /** Structured, redaction-safe detail (ids, sizes, reasons); any JSON value, usually an object. */
+  fields: unknown;
 }
 
 /** Where a request runs: this computer or a paired device. */
@@ -177,6 +194,16 @@ export type Target = "local" | `peer:${string}`;
 /** `expires_at` as epoch milliseconds whichever form the daemon used. */
 export function expiresAtMs(v: number | string): number {
   return typeof v === "number" ? v * 1000 : Date.parse(v);
+}
+
+/** `xxxx-xxxx-xxxx` from the first 12 hex of a peer id, the daemon's display label. Not proof of identity. */
+export function shortLabel(id: string): string {
+  return `${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8, 12)}`;
+}
+
+/** Address of the pairing window a discovered device advertises: its host with `pair_port`. */
+export function pairingAddr(d: Pick<Discovered, "addr" | "pair_port">): string {
+  return d.pair_port ? `${d.addr.replace(/:\d+$/, "")}:${d.pair_port}` : d.addr;
 }
 
 /** Error shape every daemon endpoint returns: {"error":{message,type,code,param,hint?}}. */
@@ -364,13 +391,16 @@ export const api = {
   },
   pairStart: (name: string) => json<PairingSession>("/api/pair/start", { method: "POST", body: JSON.stringify({ name }) }),
   pairStatus: () => json<PairingStatus>("/api/pair/status"),
-  pairJoin: (body: { addr: string; code: string; name: string }) =>
-    json<Peer>("/api/pair/join", { method: "POST", body: JSON.stringify(body) }),
+  /** `code` is the six digits (then `addr` is required) or a whole `common-pair:v1:...` payload. */
+  pairJoin: (body: { addr?: string; code: string; name: string }) =>
+    json<PeerRecord>("/api/pair/join", { method: "POST", body: JSON.stringify(body) }),
   groups: async () => (await json<{ groups: Group[] }>("/api/groups")).groups,
-  setGroups: async (groups: Group[]) => (await json<{ groups: Group[] }>("/api/groups", { method: "PUT", body: JSON.stringify({ groups }) })).groups,
+  /** Inserts or replaces one group; the daemon answers with the full list. */
+  putGroup: async (group: Group) => (await json<{ groups: Group[] }>("/api/groups", { method: "PUT", body: JSON.stringify(group) })).groups,
   privacy: () => json<Privacy>("/api/privacy"),
   setPrivacy: (body: { mode: PrivacyMode; acknowledged: boolean }) =>
     json<Privacy>("/api/privacy", { method: "PUT", body: JSON.stringify(body) }),
+  /** The last 100 events, oldest first. */
   audit: async () => (await json<{ events: AuditEvent[] }>("/api/audit")).events,
   /** Redacted diagnostics bundle (F-06-10). Throws `not_implemented` on daemons without it. */
   diagnostics: () => json<Record<string, unknown>>("/api/diagnostics"),

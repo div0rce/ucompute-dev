@@ -1,11 +1,12 @@
 //! Common Mesh, CLI side (F-02-*, F-06-05, F-06-02, F-10-10): settings, peers, groups, privacy,
-//! audit, diagnostics and the peer daemon that `common serve --network` runs.
+//! audit, diagnostics. The daemon side (Node, discovery, inbound serving) lives in
+//! `common_api::mesh` and runs inside `common serve`.
 //!
-//! Settings live in `COMMON_HOME/config.json` as `{privacy, network_enabled, serve_peers}` (the
-//! shape the API shares; unknown fields are preserved). Pinned peers, groups and revocations live
-//! in `identity/peers.json` (`common_identity::PeerStore`). Every command here is a separate
-//! process that reads both at start; a running `common serve` keeps its own copy, so changes made
-//! while it runs apply when it restarts (said in the output, not hidden).
+//! Settings are the API's `common_api::mesh::Settings` in `COMMON_HOME/config.json`
+//! (`{privacy, network_enabled, serve_peers}`, 0600). Pinned peers, groups and revocations live in
+//! `identity/peers.json` (`common_identity::PeerStore`). Every command here is a separate process
+//! that reads both at start; a running `common serve` keeps its own copy, so changes made while it
+//! runs apply when it restarts (said in the output, not hidden).
 
 use crate::shutdown_signal;
 use clap::{Args, Subcommand, ValueEnum};
@@ -14,67 +15,29 @@ use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_identity::{DeviceIdentity, Group, GroupPolicy, PeerId, PeerRecord, PeerStore};
 use common_network::discovery::{Advertiser, Browser};
 use common_network::transport::Node;
-use common_network::{pairing, remote, NetworkConfig};
+use common_network::{pairing, NetworkConfig};
 use common_observability::Audit;
 use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode};
-use common_runtime::manager::ModelManager;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Shown before privacy leaves local-only (THREAT_MODEL §4).
-pub const DISCLOSURE: &str = "\
-Trusted devices: a request you send to a paired device runs on that device, which sees the
-prompt and the output in plaintext inside its own process. Encryption protects the network,
-not the device. Local-only is the only private mode. Pairing a device grants it read access to
-whatever your groups allow to be routed to it.";
+pub use common_api::mesh::{Settings, DISCLOSURE};
 
-/// Persisted user settings (`COMMON_HOME/config.json`). A missing file or field is the secure default.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct Settings {
-    #[serde(default)]
-    pub privacy: PrivacyMode,
-    #[serde(default)]
-    pub network_enabled: bool,
-    #[serde(default)]
-    pub serve_peers: bool,
-    /// Fields other writers of this file (the API) own; carried through untouched.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+/// `config.json`, or every default (local-only, nothing listens, nothing served) when absent.
+pub fn load_settings(paths: &Paths) -> Result<Settings> {
+    Ok(Settings::load(paths)?.unwrap_or_default())
 }
 
-impl Settings {
-    pub fn path(paths: &Paths) -> PathBuf {
-        paths.root.join("config.json")
-    }
-    pub fn load(paths: &Paths) -> Result<Settings> {
-        let path = Self::path(paths);
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| CommonError::io(format!("{} is not valid settings JSON: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-            Err(e) => Err(e.into()),
-        }
-    }
-    /// tmp + rename: a crash never leaves a half-written settings file.
-    pub fn save(&self, paths: &Paths) -> Result<()> {
-        std::fs::create_dir_all(&paths.root)?;
-        let path = Self::path(paths);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-    /// The serde string of the privacy mode (`local_only`, `trusted_group`, …).
-    pub fn privacy_str(&self) -> String {
-        serde_json::to_value(self.privacy)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "local_only".into())
-    }
+/// The serde string of the privacy mode (`local_only`, `trusted_group`, …).
+pub fn privacy_str(s: &Settings) -> String {
+    serde_json::to_value(s.privacy)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "local_only".into())
 }
 
 /// Peer endpoint flags shared by `serve --network`, `peers pair` and `peers join`.
@@ -218,7 +181,7 @@ impl Mesh {
         let paths = Paths::from_env();
         paths.ensure_dirs()?;
         Ok(Mesh {
-            settings: Settings::load(&paths)?,
+            settings: load_settings(&paths)?,
             identity: Arc::new(DeviceIdentity::load_or_create(&paths)?),
             store: Arc::new(PeerStore::open(&paths)?),
             audit: Arc::new(Audit::open(&paths)?),
@@ -333,57 +296,6 @@ impl Mesh {
             format!("no known address for device {}", rec.id.short_label()),
         )
         .with_hint("make sure it runs `common serve --network` on this LAN, or pair it again"))
-    }
-}
-
-/// The daemon's mesh side: workload endpoint, mDNS advertiser + browser, inbound serving loop.
-pub struct PeerDaemon {
-    pub node: Arc<Node>,
-    _advertiser: Advertiser,
-    _browser: Browser,
-    inbound: tokio::task::JoinHandle<()>,
-}
-
-impl PeerDaemon {
-    /// Every accepted (authenticated) connection is served by `remote::serve_peer`, which asks
-    /// `policy.may_serve` per request, so `serve_peers = false` refuses work with `policy_denied`.
-    pub async fn start(
-        mesh: &Mesh,
-        cfg: NetworkConfig,
-        serve_peers: bool,
-        manager: Arc<ModelManager>,
-    ) -> Result<PeerDaemon> {
-        let node = mesh.node(cfg.clone(), serve_peers).await?;
-        let addr = node.local_addr()?;
-        println!("peer id {}", mesh.identity.id);
-        println!(
-            "peer endpoint udp://{addr} (serving peers: {})",
-            if serve_peers { "yes" } else { "no" }
-        );
-        let advertiser = Advertiser::start(&cfg, mesh.identity.clone(), addr.port(), None)?;
-        let browser = Browser::start(&cfg, mesh.store.clone())?;
-        let (n, audit) = (node.clone(), mesh.audit.clone());
-        let inbound = tokio::spawn(async move {
-            while let Some(conn) = n.accept().await {
-                let (manager, policy, audit) = (manager.clone(), n.policy.clone(), audit.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = remote::serve_peer(conn, manager, policy, audit).await {
-                        tracing::info!(code = %e.code, "peer connection ended: {}", e.message);
-                    }
-                });
-            }
-        });
-        Ok(PeerDaemon {
-            node,
-            _advertiser: advertiser,
-            _browser: browser,
-            inbound,
-        })
-    }
-
-    pub async fn stop(self) {
-        self.node.shutdown().await;
-        self.inbound.abort();
     }
 }
 
@@ -755,14 +667,14 @@ pub fn groups(cmd: &GroupsCmd, json: bool) -> Result<()> {
 
 pub fn privacy(a: &PrivacyArgs, json: bool) -> Result<()> {
     let paths = Paths::from_env();
-    let mut s = Settings::load(&paths)?;
+    let mut s = load_settings(&paths)?;
     let Some(mode) = a.mode else {
         return out(
             json,
             &s,
             format!(
                 "privacy {} (network {}, serving peers {})",
-                s.privacy_str(),
+                privacy_str(&s),
                 if s.network_enabled { "on" } else { "off" },
                 if s.serve_peers { "on" } else { "off" }
             ),
@@ -795,7 +707,7 @@ pub fn privacy(a: &PrivacyArgs, json: bool) -> Result<()> {
         }
     }
     s.save(&paths)?;
-    out(json, &s, format!("privacy {}", s.privacy_str()))
+    out(json, &s, format!("privacy {}", privacy_str(&s)))
 }
 
 pub fn audit(a: &AuditArgs, json: bool) -> Result<()> {
@@ -822,7 +734,7 @@ pub fn audit(a: &AuditArgs, json: bool) -> Result<()> {
 
 pub fn diagnostics(a: &DiagnosticsArgs) -> Result<()> {
     let paths = Paths::from_env();
-    let settings = Settings::load(&paths)?;
+    let settings = load_settings(&paths)?;
     let bundle = common_observability::bundle(&paths, serde_json::json!({ "settings": settings }))?;
     let text = serde_json::to_string_pretty(&bundle)?;
     match &a.out {
@@ -852,29 +764,28 @@ mod tests {
         Paths::at(dir)
     }
 
+    /// No `config.json` is the secure default (local-only, nothing listens, nothing served); the
+    /// API's file shape is read as-is and a corrupt file is an error, never silently the default.
     #[test]
-    fn settings_default_deny_roundtrip_and_preserve_unknown_fields() {
+    fn settings_default_deny_and_privacy_str() {
         let paths = temp();
-        let s = Settings::load(&paths).unwrap();
+        let s = load_settings(&paths).unwrap();
         assert_eq!(s.privacy, PrivacyMode::LocalOnly);
         assert!(!s.network_enabled && !s.serve_peers);
-        assert_eq!(s.privacy_str(), "local_only");
-        // The API may write more fields into the same file; they survive our save.
+        assert_eq!(privacy_str(&s), "local_only");
         std::fs::write(
             Settings::path(&paths),
-            br#"{"privacy":"trusted_group","network_enabled":true,"serve_peers":false,"theme":"dark"}"#,
+            br#"{"privacy":"trusted_group","network_enabled":true,"serve_peers":false}"#,
         )
         .unwrap();
-        let mut s = Settings::load(&paths).unwrap();
-        assert_eq!((s.privacy, s.network_enabled), (PrivacyMode::TrustedGroup, true));
-        s.serve_peers = true;
-        s.save(&paths).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(Settings::path(&paths)).unwrap()).unwrap();
-        assert_eq!(v["theme"], "dark");
-        assert_eq!(v["serve_peers"], true);
-        assert_eq!(v["privacy"], "trusted_group");
+        let s = load_settings(&paths).unwrap();
+        assert_eq!(
+            (s.privacy, s.network_enabled, s.serve_peers),
+            (PrivacyMode::TrustedGroup, true, false)
+        );
+        assert_eq!(privacy_str(&s), "trusted_group");
         std::fs::write(Settings::path(&paths), b"{not json").unwrap();
-        assert_eq!(Settings::load(&paths).unwrap_err().code, ErrorCode::Io);
+        assert_eq!(load_settings(&paths).unwrap_err().code, ErrorCode::Io);
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 

@@ -1,6 +1,6 @@
 // Fake daemon for tests: an in-memory catalog plus a fetch() that serves the API contract.
 import { vi } from "vitest";
-import type { AuditEvent, Discovered, Group, Hardware, Loaded, Model, NetworkState, PairingSession, Peer, Privacy, Status } from "../api/client";
+import { shortLabel, type AuditEvent, type Discovered, type Group, type Hardware, type Loaded, type Model, type NetworkState, type PairingSession, type PairingStatus, type Peer, type PeerRecord, type Privacy, type Status } from "../api/client";
 
 export const HARDWARE: Hardware = {
   host: { os: "macOS", os_version: "26.2", arch: "arm64", chip: "Apple M2", memory_bytes: 8589934592 },
@@ -106,17 +106,22 @@ common_ttft_seconds_count 10
 `;
 
 
-// Peer networking fixtures. Ids are 64 hex like the daemon's; the short label is the first 12 as xxxx-xxxx-xxxx.
+// Peer networking fixtures. Shapes mirror crates/common-api/src/mesh.rs: ids are 64 hex, the daemon adds
+// `short_label`/`connected`/`groups` to a stored PeerRecord, and discovered devices carry no label.
 export const SELF_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 export const PEER_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
 export const STRANGER_ID = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
-const label = (id: string) => `${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8, 12)}`;
 
-export const NETWORK: NetworkState = { enabled: false, serve_peers: false, listen_addr: "0.0.0.0:8193", mdns: true, peer_id: SELF_ID, short_label: label(SELF_ID) };
+export const NETWORK: NetworkState = { enabled: false, serve_peers: false, listen_addr: null, mdns: false, peer_id: SELF_ID, short_label: shortLabel(SELF_ID), connections: 0 };
+/** What the daemon reports while the endpoint is bound. */
+export const NETWORK_ON: NetworkState = { ...NETWORK, enabled: true, listen_addr: "0.0.0.0:8193", mdns: true };
 
-export const PEER: Peer = { id: PEER_ID, short_label: label(PEER_ID), name: "Studio Mac", groups: ["home"], last_seen_utc: "2026-10-14T12:00:00Z", connected: true, health: "connected" };
+export const PEER_RECORD: PeerRecord = { id: PEER_ID, name: "Studio Mac", paired_at_utc: "2026-10-14T11:59:30Z", last_seen_utc: "2026-10-14T12:00:00Z", last_addr: "192.168.1.77:8193" };
+export const PEER: Peer = { ...PEER_RECORD, short_label: shortLabel(PEER_ID), groups: ["home"], connected: true };
 
-export const STRANGER: Discovered = { id: STRANGER_ID, short_label: label(STRANGER_ID), addr: "192.168.1.77:51234", pairing: true, trusted: false };
+export const STRANGER: Discovered = { id: STRANGER_ID, addr: "192.168.1.77:8193", pairing: true, pair_port: 51234, proto: "common/1", trusted: false, seen_utc: "2026-10-14T12:00:00Z" };
+/** The QR text the fake's pairing window shows and `/api/pair/join` accepts in place of a code. */
+export const QR_PAYLOAD = `common-pair:v1:${SELF_ID}:192.168.1.10:51234:00112233445566778899aabbccddeeff`;
 
 export const PRIVACY: Privacy = {
   mode: "local_only",
@@ -124,9 +129,10 @@ export const PRIVACY: Privacy = {
     "In trusted-devices mode a prompt you send to a paired device, and the reply, travel encrypted to that device, where it can read them. Nothing goes to any other device or service.",
 };
 
+/** Oldest first, as `GET /api/audit` returns them. */
 export const AUDIT: AuditEvent[] = [
-  { ts_utc: "2026-10-14T12:00:00Z", kind: "pairing_succeeded", peer_id: PEER_ID, fields: { port: 51234 } },
   { ts_utc: "2026-10-14T11:59:00Z", kind: "pairing_started", fields: { port: 51234, window_secs: 120 } },
+  { ts_utc: "2026-10-14T12:00:00Z", kind: "pairing_succeeded", peer_id: PEER_ID, fields: { port: 51234 } },
 ];
 
 /** The code the fake accepts on /api/pair/join. */
@@ -191,13 +197,15 @@ export interface FakeDaemon {
   privacy: Privacy;
   audit: AuditEvent[];
   /** Pairing session opened by /api/pair/start; `result` is what /api/pair/status reports once set. */
-  pairing: { session: PairingSession | null; result: Peer | null };
+  pairing: { session: PairingSession | null; result: PairingStatus["result"] };
   /** When true every join answers pairing_locked. */
   pairLocked: boolean;
-  /** Redacted bundle served by /api/diagnostics; null means the endpoint does not exist (501). */
+  /** Redacted bundle served by /api/diagnostics; null means the endpoint does not exist (404 like the daemon). */
   diagnostics: Record<string, unknown> | null;
   /** Simulates the other device finishing the pairing: pins `peer` and makes /api/pair/status report it. */
   completePairing: (peer?: Peer) => void;
+  /** Simulates the other device failing the window (wrong code); the window closes with a typed error. */
+  failPairing: (code?: string, message?: string) => void;
   fetchMock: ReturnType<typeof vi.fn>;
 }
 
@@ -220,7 +228,11 @@ export function installFakeDaemon(
     diagnostics: null,
     completePairing: (peer = PEER) => {
       fake.peers.push({ ...peer, groups: [] });
-      fake.pairing.result = peer;
+      const { short_label: _l, groups: _g, connected: _c, health: _h, ...record } = peer;
+      fake.pairing.result = { peer: record };
+    },
+    failPairing: (code = "pairing_failed", message = "confirmation MAC mismatch") => {
+      fake.pairing.result = { error: { code, message, hint: null } };
     },
     ...overrides,
     fetchMock: vi.fn(),
@@ -269,11 +281,12 @@ export function installFakeDaemon(
     // Peer networking (ADR-0003 / F-10-05 / F-10-10).
     if (path === "/api/network" && method === "GET") return json(fake.network);
     if (path === "/api/network" && method === "PUT") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled: boolean; serve_peers: boolean };
-      fake.network = { ...fake.network, enabled: !!body.enabled, serve_peers: !!body.enabled && !!body.serve_peers };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled?: boolean; serve_peers?: boolean };
+      const enabled = body.enabled ?? fake.network.enabled;
+      fake.network = { ...(enabled ? NETWORK_ON : NETWORK), peer_id: fake.network.peer_id, short_label: fake.network.short_label, serve_peers: body.serve_peers ?? fake.network.serve_peers };
       return json(fake.network);
     }
-    if (path === "/api/peers" && method === "GET") return json({ peers: fake.peers.map(withGroups), discovered: fake.network.enabled ? fake.discovered : [] });
+    if (path === "/api/peers" && method === "GET") return json({ peers: fake.peers.map(withGroups), discovered: fake.network.enabled ? fake.discovered : [], revocations: [] });
     if ((m = path.match(/^\/api\/peers\/([^/]+)\/revoke$/)) && method === "POST") {
       const id = decodeURIComponent(m[1]);
       if (!fake.peers.some((p) => p.id === id)) return apiError("peer_unauthorized", "not a paired device", 404);
@@ -290,31 +303,32 @@ export function installFakeDaemon(
     }
     if (path === "/api/pair/start" && method === "POST") {
       if (!fake.network.enabled) return disabled();
-      fake.pairing = {
-        session: { code: "482913", port: 51234, qr_payload: `common-pair:v1:${SELF_ID}:192.168.1.10:51234:00112233445566778899aabbccddeeff`, expires_at: Math.floor(Date.now() / 1000) + 120, peer_id: SELF_ID },
-        result: null,
-      };
+      if (fake.pairing.session && !fake.pairing.result) return apiError("overloaded", "a pairing session is already open; wait for it to finish or expire", 409);
+      fake.pairing = { session: { code: "482913", port: 51234, qr_payload: QR_PAYLOAD, expires_at: Math.floor(Date.now() / 1000) + 120 }, result: null };
       return json(fake.pairing.session);
     }
     if (path === "/api/pair/status") {
-      const active = !!fake.pairing.session && !fake.pairing.result;
-      const result = fake.pairing.result;
-      if (result) fake.pairing = { session: null, result: null };
-      return json({ active, result });
+      // Like the daemon, the outcome stays readable until the next /api/pair/start.
+      const { session, result } = fake.pairing;
+      if (!session) return json({ active: false, result: null });
+      if (result) return json({ active: false, result });
+      return json({ active: true, result: null, port: session.port, expires_at: session.expires_at });
     }
     if (path === "/api/pair/join" && method === "POST") {
       if (!fake.network.enabled) return disabled();
       if (fake.pairLocked) return apiError("pairing_locked", "too many failed confirmations in the last 60 s", 429);
-      const body = JSON.parse(String(init?.body ?? "{}")) as { addr: string; code: string; name: string };
-      if (body.code !== JOIN_CODE) return apiError("pairing_failed", "confirmation MAC mismatch", 403);
-      const peer: Peer = { ...PEER, groups: [] };
-      fake.peers.push(peer);
-      fake.discovered = fake.discovered.filter((x) => x.id !== peer.id);
-      return json(peer);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { addr?: string; code: string; name: string };
+      if (!body.code.startsWith("common-pair:") && !body.addr) return apiError("invalid_request", "addr (ip:port of the other device's pairing endpoint) is required with a code", 400);
+      if (body.code !== JOIN_CODE && body.code !== QR_PAYLOAD) return apiError("pairing_failed", "confirmation MAC mismatch", 403);
+      fake.peers.push({ ...PEER, groups: [] });
+      fake.discovered = fake.discovered.filter((x) => x.id !== PEER.id);
+      return json(PEER_RECORD);
     }
     if (path === "/api/groups" && method === "GET") return json({ groups: fake.groups });
     if (path === "/api/groups" && method === "PUT") {
-      fake.groups = (JSON.parse(String(init?.body ?? "{}")) as { groups: Group[] }).groups;
+      // Upsert of one group by name, as the daemon does.
+      const g = JSON.parse(String(init?.body ?? "{}")) as Group;
+      fake.groups = fake.groups.some((x) => x.name === g.name) ? fake.groups.map((x) => (x.name === g.name ? g : x)) : [...fake.groups, g];
       return json({ groups: fake.groups });
     }
     if (path === "/api/privacy" && method === "GET") return json(fake.privacy);
@@ -326,7 +340,7 @@ export function installFakeDaemon(
       return json(fake.privacy);
     }
     if (path === "/api/audit") return json({ events: fake.audit });
-    if (path === "/api/diagnostics") return fake.diagnostics ? json(fake.diagnostics) : apiError("not_implemented", "no diagnostics bundle", 501);
+    if (path === "/api/diagnostics" && fake.diagnostics) return json(fake.diagnostics);
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!fake.loaded) return apiError("model_not_downloaded", "no model loaded", 404);
       const body = JSON.parse(String(init?.body ?? "{}")) as { target?: string };
@@ -351,7 +365,8 @@ export function installFakeDaemon(
       });
       return sse(chunks, { delayMs: fake.chat.delayMs, signal: init?.signal ?? undefined });
     }
-    return apiError("not_implemented", `no route for ${method} ${path}`, 501);
+    // The daemon's fallback for an unknown route (common-api lib.rs `not_found`).
+    return apiError("invalid_request", "no such route", 404);
   });
   vi.stubGlobal("fetch", fake.fetchMock);
   return fake;

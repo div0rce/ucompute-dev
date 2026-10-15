@@ -285,7 +285,7 @@ async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManif
         let seed = a.seed.unwrap_or_else(random_seed);
         let req = request(a, seed);
         let cancel = CancellationToken::new();
-        let privacy = mesh.settings.privacy_str();
+        let privacy = crate::mesh::privacy_str(&mesh.settings);
         let out = drain(
             cancel.clone(),
             echo,

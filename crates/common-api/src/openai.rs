@@ -1,14 +1,21 @@
 //! OpenAI-compatible endpoints (F-09-01, F-09-02, F-01-12): `/v1/models`, `/v1/chat/completions`,
 //! `/v1/completions`, `/v1/embeddings`. Request fields the engine cannot honour are rejected
 //! (`n > 1`) or ignored (`logprobs`, `user`, ...); unknown fields are ignored like OpenAI does.
+//!
+//! Common extension `target` (body field or `X-Common-Target` header): `"local"` (default) or
+//! `"peer:<peer id or short label>"` runs the whole request on one paired device (Mode B, remote
+//! execution, never pooled inference). `PolicyEngine::evaluate` decides before admission, load or
+//! any network activity (I-05); every response carries `"target"` so nothing runs elsewhere silently.
 
 use crate::admission::Rejected;
 use crate::{ApiError, AppState, Json};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use common_core::{CommonError, ErrorCode, Result};
+use common_identity::PeerId;
+use common_policy::{ExecutionTarget, PrivacyMode, WorkloadKind};
 use common_runtime::manager::LoadOptions;
 use common_runtime::{ChatMessage, GenerateEvent, GenerateRequest, GenerateStream, PromptInput, Timings, Usage};
 use futures_util::stream::{self, BoxStream, Stream};
@@ -19,6 +26,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -245,6 +253,8 @@ pub struct ChatRequest {
     /// Accepted for compatibility; the runtime has no field for it yet, so it is not forwarded.
     #[allow(dead_code)]
     pub tool_choice: Option<Value>,
+    /// Common extension: `"local"` or `"peer:<id>"` (see the module docs).
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +263,7 @@ pub struct CompletionRequest {
     pub prompt: Option<Value>,
     #[serde(flatten)]
     pub sampling: Sampling,
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -266,6 +277,38 @@ fn require_model(model: &Option<String>) -> Result<String> {
     match model {
         Some(m) if !m.is_empty() => Ok(m.clone()),
         _ => Err(CommonError::invalid("\"model\" is required (a catalog or store id)")),
+    }
+}
+
+/// Where a request runs: this device or one paired peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Local,
+    Peer(PeerId),
+}
+
+impl Target {
+    /// The value echoed as `"target"` in every response.
+    fn label(&self) -> String {
+        match self {
+            Target::Local => "local".into(),
+            Target::Peer(id) => format!("peer:{}", id.to_hex()),
+        }
+    }
+}
+
+/// Body field first, then the `X-Common-Target` header; absent means local. A peer must be named
+/// by its 64-hex id or the short label of a pinned peer (`PeerUnauthorized` for an unknown label).
+fn parse_target(st: &AppState, body: Option<&str>, headers: &HeaderMap) -> Result<Target> {
+    let s = body.or_else(|| headers.get("x-common-target").and_then(|v| v.to_str().ok()));
+    match s.map(str::trim) {
+        None | Some("") | Some("local") => Ok(Target::Local),
+        Some(s) => match s.strip_prefix("peer:") {
+            Some(id) => Ok(Target::Peer(st.resolve_peer(id)?)),
+            None => Err(CommonError::invalid(
+                "target must be \"local\" or \"peer:<peer id or short label>\"",
+            )),
+        },
     }
 }
 
@@ -326,6 +369,8 @@ struct Format {
     model: String,
     created: u64,
     include_usage: bool,
+    /// `"local"` or `"peer:<hex>"`, in every envelope.
+    target: String,
 }
 
 fn usage_json(u: &Usage) -> Value {
@@ -333,7 +378,7 @@ fn usage_json(u: &Usage) -> Value {
 }
 
 impl Format {
-    fn new(kind: Kind, model: &str, include_usage: bool) -> Self {
+    fn new(kind: Kind, model: &str, include_usage: bool, target: &Target) -> Self {
         let prefix = match kind {
             Kind::Chat => "chatcmpl",
             Kind::Text => "cmpl",
@@ -344,6 +389,7 @@ impl Format {
             model: model.to_string(),
             created: now_secs(),
             include_usage,
+            target: target.label(),
         }
     }
 
@@ -352,7 +398,7 @@ impl Format {
             Kind::Chat => "chat.completion.chunk",
             Kind::Text => "text_completion",
         };
-        json!({"id": self.id, "object": object, "created": self.created, "model": self.model, "choices": choices})
+        json!({"id": self.id, "object": object, "created": self.created, "model": self.model, "choices": choices, "target": self.target})
     }
 
     fn chunk(&self, delta: Value, finish: Option<&str>) -> Value {
@@ -467,12 +513,12 @@ fn merge_tool_calls(calls: &mut Vec<Value>, delta: &Value) {
     }
 }
 
-/// Body stream that owns the admission permit and cancels the engine's work when dropped
-/// (client disconnect) or finished.
+/// Body stream that owns the admission permit (local runs only; a remote run takes no engine
+/// slot here) and cancels the generation when dropped (client disconnect) or finished.
 struct Guard {
     inner: BoxStream<'static, std::result::Result<Event, Infallible>>,
     cancel: CancellationToken,
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Stream for Guard {
@@ -493,7 +539,7 @@ fn sse_response(
     fmt: Format,
     gen: GenerateStream,
     cancel: CancellationToken,
-    permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
 ) -> Response {
     let chunks = gen
         .flat_map(move |ev| {
@@ -527,9 +573,24 @@ async fn run(
     input: Input,
     sampling: &Sampling,
     tools: Option<Value>,
+    target: Target,
 ) -> std::result::Result<Response, ApiError> {
+    // I-05: the routing decision comes first, before admission, any load or any network activity.
+    // Local is always allowed; a peer needs trusted_group privacy, networking on and a pinned,
+    // non-revoked peer in a group allowing remote inference (typed denial with the plain reason).
+    let privacy = st.settings().privacy;
+    let exec = match target {
+        Target::Local => ExecutionTarget::Local,
+        Target::Peer(id) => ExecutionTarget::Peer(id),
+    };
+    st.policy()
+        .evaluate(privacy, exec, WorkloadKind::RemoteInference)
+        .into_result()?;
     // Untrusted schema is checked before admission: a grammar bomb never takes a slot or a load.
     json_schema_of(sampling.response_format.as_ref())?;
+    if let Target::Peer(id) = target {
+        return run_remote(st, fmt, model_id, input, sampling, tools, id, privacy).await;
+    }
     let permit = admit(&st).await?;
     let model = st.manager.ensure_loaded(model_id, st.load_options()).await?;
     let input = match input {
@@ -548,7 +609,7 @@ async fn run(
     let cancel = st.shutdown.child_token();
     let gen = model.generate(req, cancel.clone()).await?;
     if sampling.stream {
-        return Ok(sse_response(st, fmt, gen, cancel, permit));
+        return Ok(sse_response(st, fmt, gen, cancel, Some(permit)));
     }
     let collected = collect(gen).await?;
     st.metrics.record_done(&collected.usage, &collected.timings);
@@ -556,11 +617,93 @@ async fn run(
     Ok(axum::Json(fmt.final_json(&collected)).into_response())
 }
 
+/// Mode B: the whole request on `peer` over the authenticated transport, streamed back exactly
+/// like a local run. Called only after `evaluate` allowed it; `generate_remote` re-checks the
+/// privacy string before opening a stream. The prompt travels inside TLS only and is never logged.
+#[allow(clippy::too_many_arguments)]
+async fn run_remote(
+    st: Arc<AppState>,
+    fmt: Format,
+    model_id: &str,
+    input: Input,
+    sampling: &Sampling,
+    tools: Option<Value>,
+    peer: PeerId,
+    privacy: PrivacyMode,
+) -> std::result::Result<Response, ApiError> {
+    if !common_core::paths::safe_name(model_id) {
+        return Err(CommonError::invalid("model id may only contain letters, digits, '-', '_' and '.'").into());
+    }
+    let node = st.node().await?;
+    let sha = st.model_sha256(model_id)?;
+    let input = match input {
+        Input::Raw(p) => PromptInput::Raw(p),
+        // The chat-template decision needs the GGUF header; without the file here the peer's engine
+        // applies the template (ponytail: ask the peer's Capabilities for it if that ever misroutes).
+        Input::Chat(msgs) => match st.store.resolve(model_id) {
+            Ok((m, blob)) if !st.metadata(&m.sha256, &blob)?.has_chat_template => PromptInput::Raw(plain_prompt(&msgs)),
+            _ => PromptInput::Chat(msgs),
+        },
+    };
+    let req = sampling.to_generate(input, tools)?;
+    let conn = st.peer_connection(&node, peer).await?;
+    let cancel = st.shutdown.child_token();
+    // The serde string of the mode that was just evaluated ("trusted_group" is the only one that passes).
+    let privacy = serde_json::to_value(privacy)
+        .map_err(CommonError::from)?
+        .as_str()
+        .unwrap_or("local_only")
+        .to_string();
+    let started = Instant::now();
+    let gen = common_network::remote::generate_remote(conn, model_id, &sha, req, &privacy, cancel.clone()).await?;
+    st.metrics
+        .remote_requests
+        .with_label_values(&[&peer.short_label()])
+        .inc();
+    let gen = audited(st.clone(), gen, peer, model_id.to_string(), started);
+    if sampling.stream {
+        return Ok(sse_response(st, fmt, gen, cancel, None));
+    }
+    let collected = collect(gen).await?;
+    st.metrics.record_done(&collected.usage, &collected.timings);
+    Ok(axum::Json(fmt.final_json(&collected)).into_response())
+}
+
+/// Audits the outcome of a remote request on this side: peer, model id, outcome code, counts and
+/// duration. Never the text. (ponytail: a client that disconnects before Done leaves no entry here;
+/// the serving side audits every request regardless.)
+fn audited(st: Arc<AppState>, gen: GenerateStream, peer: PeerId, model_id: String, started: Instant) -> GenerateStream {
+    gen.inspect(move |ev| {
+        let outcome = match ev {
+            Ok(GenerateEvent::Done { usage, .. }) => Some(("done", usage.completion_tokens)),
+            Err(e) => Some((e.code.as_str(), 0)),
+            Ok(_) => None,
+        };
+        if let Some((outcome, completion_tokens)) = outcome {
+            st.audit(
+                "remote_request",
+                Some(&peer),
+                json!({
+                    "role": "client",
+                    "peer": peer.short_label(),
+                    "model_id": model_id,
+                    "outcome": outcome,
+                    "completion_tokens": completion_tokens,
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+        }
+    })
+    .boxed()
+}
+
 pub async fn chat(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> std::result::Result<Response, ApiError> {
     let model_id = require_model(&req.model)?;
+    let target = parse_target(&st, req.target.as_deref(), &headers)?;
     if req.messages.is_empty() {
         return Err(CommonError::invalid("messages must not be empty").into());
     }
@@ -569,29 +712,45 @@ pub async fn chat(
         .into_iter()
         .map(InMessage::into_message)
         .collect::<Result<Vec<_>>>()?;
-    let fmt = Format::new(Kind::Chat, &model_id, req.sampling.include_usage());
-    run(st, fmt, &model_id, Input::Chat(messages), &req.sampling, req.tools).await
+    let fmt = Format::new(Kind::Chat, &model_id, req.sampling.include_usage(), &target);
+    run(
+        st,
+        fmt,
+        &model_id,
+        Input::Chat(messages),
+        &req.sampling,
+        req.tools,
+        target,
+    )
+    .await
 }
 
 pub async fn completions(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<CompletionRequest>,
 ) -> std::result::Result<Response, ApiError> {
     let model_id = require_model(&req.model)?;
+    let target = parse_target(&st, req.target.as_deref(), &headers)?;
     let prompt = match req.prompt {
         Some(Value::String(s)) => s,
         Some(Value::Array(a)) if a.len() == 1 && a[0].is_string() => a[0].as_str().unwrap_or("").to_string(),
         _ => return Err(CommonError::invalid("prompt must be a string or a single-element array of strings").into()),
     };
-    let fmt = Format::new(Kind::Text, &model_id, req.sampling.include_usage());
-    run(st, fmt, &model_id, Input::Raw(prompt), &req.sampling, None).await
+    let fmt = Format::new(Kind::Text, &model_id, req.sampling.include_usage(), &target);
+    run(st, fmt, &model_id, Input::Raw(prompt), &req.sampling, None, target).await
 }
 
 pub async fn embeddings(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<EmbeddingsRequest>,
 ) -> std::result::Result<axum::Json<Value>, ApiError> {
     let model_id = require_model(&req.model)?;
+    // Embeddings run here only; asking for a peer is refused rather than quietly run locally.
+    if parse_target(&st, None, &headers)? != Target::Local {
+        return Err(CommonError::invalid("embeddings run on this device only; remove the target").into());
+    }
     let inputs = req.input.map(OneOrMany::into_vec).unwrap_or_default();
     if inputs.is_empty() || inputs.iter().any(String::is_empty) {
         return Err(CommonError::invalid("input must be a non-empty string or array of non-empty strings").into());
@@ -896,6 +1055,7 @@ mod tests {
             model: "m".into(),
             created: 5,
             include_usage: true,
+            target: "local".into(),
         };
         let evs = f.stream_events(Ok(GenerateEvent::Token {
             text: "Hi".into(),
@@ -903,6 +1063,7 @@ mod tests {
         }));
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0]["object"], "chat.completion.chunk");
+        assert_eq!(evs[0]["target"], "local");
         assert_eq!(evs[0]["choices"][0]["delta"]["content"], "Hi");
         assert!(evs[0]["choices"][0]["finish_reason"].is_null());
         let done = GenerateEvent::Done {
@@ -988,6 +1149,7 @@ mod tests {
             model: "m".into(),
             created: 0,
             include_usage: false,
+            target: "local".into(),
         }
         .final_json(&c);
         assert!(v["choices"][0]["message"]["content"].is_null());
@@ -1001,6 +1163,17 @@ mod tests {
         assert_eq!(base64_f32(&[1.0, -2.0]), "AACAPwAAAMA=");
         assert_eq!(base64_f32(&[0.0, 0.0, 0.0]), "AAAAAAAAAAAAAAAA");
         assert_eq!(base64_f32(&[]), "");
+    }
+
+    #[test]
+    fn target_labels_and_remote_envelope() {
+        assert_eq!(Target::Local.label(), "local");
+        let id = PeerId([0xab; 32]);
+        assert_eq!(Target::Peer(id).label(), format!("peer:{}", "ab".repeat(32)));
+        let f = Format::new(Kind::Text, "m", false, &Target::Peer(id));
+        let v = f.final_json(&Collected::default());
+        assert_eq!(v["target"], format!("peer:{}", "ab".repeat(32)));
+        assert_eq!(f.envelope(json!([]))["target"], v["target"]);
     }
 
     #[test]

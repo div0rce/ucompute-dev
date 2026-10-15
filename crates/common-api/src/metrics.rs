@@ -16,6 +16,9 @@ pub struct Metrics {
     pub decode_tps: Gauge,
     pub queue_depth: IntGauge,
     pub inflight: IntGauge,
+    /// `common_remote_requests_total{peer}`: requests this device sent to a paired device (Mode B),
+    /// by the peer's short label. Counts only, never text.
+    pub remote_requests: IntCounterVec,
 }
 
 impl Default for Metrics {
@@ -67,6 +70,14 @@ impl Metrics {
         let queue_depth =
             IntGauge::new("common_queue_depth", "Requests waiting for a generation slot.").expect("static metric");
         let inflight = IntGauge::new("common_inflight", "Generations currently running.").expect("static metric");
+        let remote_requests = IntCounterVec::new(
+            Opts::new(
+                "common_remote_requests_total",
+                "Requests sent to a paired device for remote execution, by peer short label.",
+            ),
+            &["peer"],
+        )
+        .expect("static metric");
         for m in [
             Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(rejected.clone()),
@@ -76,6 +87,7 @@ impl Metrics {
             Box::new(decode_tps.clone()),
             Box::new(queue_depth.clone()),
             Box::new(inflight.clone()),
+            Box::new(remote_requests.clone()),
         ] {
             registry.register(m).expect("unique metric names");
         }
@@ -89,6 +101,7 @@ impl Metrics {
             decode_tps,
             queue_depth,
             inflight,
+            remote_requests,
         }
     }
 
@@ -123,6 +136,7 @@ mod tests {
     fn records_and_renders() {
         let m = Metrics::new();
         m.requests.with_label_values(&["/health", "200"]).inc();
+        m.remote_requests.with_label_values(&["abcd-ef01-2345"]).inc();
         m.record_done(
             &Usage {
                 prompt_tokens: 10,
@@ -147,6 +161,7 @@ mod tests {
             "# TYPE common_requests_rejected_total counter",
             "common_requests_rejected_total{reason=\"queue_full\"} 0",
             "common_requests_rejected_total{reason=\"queue_timeout\"} 0",
+            "common_remote_requests_total{peer=\"abcd-ef01-2345\"} 1",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }

@@ -15,24 +15,30 @@ Two views talk to the peer-networking API from ADR-0003; both default to the saf
 
 - **Peers** (`#/peers`, F-10-05): the networking switch (off by default; `GET/PUT /api/network`), this device's
   id as 8 groups of 8 hex plus its `xxxx-xxxx-xxxx` label, "Pair this device" (shows the six-digit code large,
-  the QR payload as text, a countdown, and polls `GET /api/pair/status` until the other side confirms), "Join a
-  device" (address + code; a wrong code shows the `pairing_failed` text, a lockout shows `pairing_locked`), the
-  paired list with health, groups, revoke and remove (both confirmed inline), household groups and their two
-  policy switches (`GET/PUT /api/groups`), and devices seen on the network but not trusted, whose only action is
-  "Pair". No QR image is drawn; the payload is shown as text.
+  the QR payload as text, a countdown, and polls `GET /api/pair/status` until `result` holds `{peer}` or
+  `{error}`), "Join a device" (address + code, or the pasted `common-pair:v1:...` text alone; a wrong code shows
+  the `pairing_failed` text, a lockout shows `pairing_locked`), the paired list with connection state (the
+  daemon's `connected`, or `health` when a daemon reports heartbeats), groups, revoke and remove (both confirmed
+  inline), household groups and their two policy switches (`GET /api/groups`; `PUT /api/groups` upserts one
+  group and returns the list), and devices seen on the network but not trusted, whose only action is "Pair"
+  (it prefills the join form with the host and `pair_port` of the advertised pairing window). No QR image is
+  drawn; the payload is shown as text.
 - **Privacy** (`#/privacy`, F-10-10): local only / trusted devices / public (disabled, "coming later"). Leaving
   local-only shows the disclosure returned by `GET /api/privacy` and requires the acknowledge checkbox before
   `PUT /api/privacy {mode, acknowledged}`. The current mode is the pill under the app name on every screen.
 - **Run on**: Chat and Home show a device selector only when the mode is not local-only; a chat request then
   carries `"target": "peer:<id>"` and the reply footer says "Ran on <device>". In local-only mode the field is
   never sent, so the wire shape of a local request is unchanged.
-- **Diagnostics** shows the audit tail (`GET /api/audit`: ids, sizes, reasons, never prompts) and "Copy
-  diagnostics" copies the daemon's redacted bundle from `GET /api/diagnostics` when that endpoint exists,
-  falling back to status + hardware on older daemons.
+- **Diagnostics** shows the audit tail (`GET /api/audit`, last 100 events, displayed most recent first: ids,
+  sizes, reasons, never prompts) and "Copy diagnostics" copies the daemon's redacted bundle from
+  `GET /api/diagnostics` when that endpoint exists, falling back to status + hardware when the daemon answers
+  404 (the current one has no such route).
 
-The fake daemon in `src/test/mocks.ts` serves every one of these endpoints so the flows are tested end to end in
-jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`). Everything here runs on one machine; no test
-claims two physical devices paired.
+The fake daemon in `src/test/mocks.ts` serves every one of these endpoints with the response shapes of
+`crates/common-api/src/mesh.rs` (a peer is a stored `PeerRecord` plus `short_label`, `connected` and `groups`;
+a discovered device has `id`, `addr`, `pairing`, `pair_port`, `proto`, `trusted`, `seen_utc` and no label), so
+the flows are tested end to end in jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`). Everything
+here runs on one machine against a fake; no test claims two physical devices paired.
 
 ## Development loop
 
