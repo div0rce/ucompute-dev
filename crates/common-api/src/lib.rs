@@ -137,8 +137,18 @@ pub struct AppState {
     /// The one pairing session at a time (ADR-0003 D2: single-use code). Lock order: `pairing`
     /// before `net`, so a network stop can close the pairing window first.
     pairing: tokio::sync::Mutex<Option<mesh::Pairing>>,
-    /// Revocations issued here, forwarded by every connection's control loop (ADR-0003 D7).
-    revocations: tokio::sync::broadcast::Sender<common_network::proto::ControlMessage>,
+    /// Revocations issued or applied here, offered by every connection's control loop (ADR-0003 D7).
+    revocations: tokio::sync::broadcast::Sender<common_identity::Revocation>,
+    /// Who should get each revocation and who already has it (`mesh::RevocationFanout`).
+    fanout: Mutex<mesh::RevocationFanout>,
+    /// `quinn::Connection::stable_id`s that already have a serving task and a control loop: a
+    /// connection `Node::connect` returns may be one `Node::accept` handed out too.
+    attached: Mutex<std::collections::HashSet<usize>>,
+    /// The `peer_quota` in force (from `config.json` at start; a change applies at the next start).
+    pub peer_quota: mesh::PeerQuota,
+    /// How peers share this device (F-06-04): those quotas, `load_options()` and the admission
+    /// semaphore, one set for every peer connection.
+    peer_serve: common_network::remote::ServeOptions,
     /// GGUF headers by sha256 (chat-template lookup per request, fit estimates per listing).
     meta_cache: Mutex<HashMap<String, Arc<GgufMetadata>>>,
     /// Bounds concurrent downloads (`MAX_PULLS`).
@@ -164,6 +174,8 @@ impl AppState {
         let peers = Arc::new(PeerStore::open(&paths)?);
         let audit = Arc::new(Audit::open(&paths)?);
         let settings = mesh::SettingsCell::load(&paths, &config)?;
+        let peer_quota = settings.peer_quota();
+        let peer_serve = peer_quota.serve_options(load_options(&config), admission.slots(), admission.max_concurrent);
         Ok(Self {
             store: manager.store.clone(),
             config,
@@ -182,6 +194,10 @@ impl AppState {
             net: tokio::sync::Mutex::new(mesh::Net::default()),
             pairing: tokio::sync::Mutex::new(None),
             revocations: tokio::sync::broadcast::channel(64).0,
+            fanout: Mutex::new(mesh::RevocationFanout::default()),
+            attached: Mutex::new(std::collections::HashSet::new()),
+            peer_quota,
+            peer_serve,
             meta_cache: Mutex::new(HashMap::new()),
             pulls: Arc::new(Semaphore::new(MAX_PULLS)),
         })
@@ -190,10 +206,7 @@ impl AppState {
     /// Load options every API load uses: the engine gets exactly `max_concurrent` slots, so
     /// admission and engine capacity agree (an admitted request never waits inside the engine).
     pub fn load_options(&self) -> common_runtime::manager::LoadOptions {
-        common_runtime::manager::LoadOptions {
-            parallel_slots: Some(self.config.max_concurrent.max(1) as u32),
-            ..Default::default()
-        }
+        load_options(&self.config)
     }
 
     /// A download permit, or 429 when `MAX_PULLS` downloads are already running.
@@ -217,6 +230,13 @@ impl AppState {
             .unwrap_or_else(|p| p.into_inner())
             .insert(sha256.to_string(), m.clone());
         Ok(m)
+    }
+}
+
+fn load_options(config: &ApiConfig) -> common_runtime::manager::LoadOptions {
+    common_runtime::manager::LoadOptions {
+        parallel_slots: Some(config.max_concurrent.max(1) as u32),
+        ..Default::default()
     }
 }
 

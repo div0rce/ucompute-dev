@@ -113,8 +113,10 @@ pub(crate) async fn watch(node: Weak<Node>, pc: Arc<PeerConnection>, every: Dura
 /// there), waits for it to end and reconnects with backoff 1, 2, 4 … 30 s, health `Reconnecting`
 /// meanwhile. Ends when the node stops or the peer refuses this device for good (revoked,
 /// unpinned, incompatible); health is then `Disconnected`.
-// ponytail: both sides supervising each other can briefly hold two connections (one per
-// direction); each is authenticated and served, so it costs a few streams. Tie-break by id if it matters.
+///
+/// Both sides supervising each other is fine: crossed dials resolve to the one connection
+/// initiated by the lower id (`Node::connect`), and `on_connect` may then see a connection that
+/// `Node::accept` also returned.
 pub fn supervise<F>(node: &Arc<Node>, peer: PeerId, addr: SocketAddr, on_connect: F) -> tokio::task::JoinHandle<()>
 where
     F: Fn(Arc<PeerConnection>) + Send + 'static,

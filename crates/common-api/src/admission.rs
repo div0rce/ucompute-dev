@@ -61,6 +61,13 @@ impl Admission {
         }
     }
 
+    /// The engine-slot semaphore itself, shared with peer serving (`remote::ServeOptions::engine_slots`):
+    /// a peer takes a permit only when one is free (`try_acquire`), and a released permit goes to
+    /// a queued local waiter first, so a peer never gets ahead of local work.
+    pub fn slots(&self) -> Arc<Semaphore> {
+        self.sem.clone()
+    }
+
     pub fn queued(&self) -> usize {
         self.queued.load(Ordering::SeqCst)
     }

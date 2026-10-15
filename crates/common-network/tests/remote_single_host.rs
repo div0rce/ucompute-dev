@@ -490,6 +490,12 @@ fn p95(mut v: Vec<Duration>) -> Duration {
     v[((v.len() * 95).div_ceil(100)).saturating_sub(1)]
 }
 
+/// Tokens generated in the capture test. The prompt carries a random canary, so the completion
+/// varies run to run; 96 tokens reliably yields at least 3 distinct words of 4+ letters to search for
+/// (32 sometimes did not). Needles stay at 4+ alphanumeric chars: a 3-char needle would match random
+/// ciphertext by chance in ~24 KB of datagrams.
+const CAPTURE_TOKENS: u32 = 96;
+
 #[tokio::test]
 async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     let Some(home) = fixtures() else { return };
@@ -518,7 +524,7 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     let local = m.ensure_loaded(MODEL_ID, LoadOptions::default()).await.unwrap();
     let reference = timed(
         local
-            .generate(greedy(&prompt, 32), CancellationToken::new())
+            .generate(greedy(&prompt, CAPTURE_TOKENS), CancellationToken::new())
             .await
             .unwrap(),
         Instant::now(),
@@ -554,7 +560,7 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
             out.clone(),
             MODEL_ID,
             MODEL_SHA,
-            greedy(&prompt, 32),
+            greedy(&prompt, CAPTURE_TOKENS),
             "trusted_group",
             CancellationToken::new(),
         )
@@ -564,7 +570,7 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     .await
     .unwrap();
     assert_eq!(text.trim(), expected);
-    assert_eq!(usage.completion_tokens, 32);
+    assert_eq!(usage.completion_tokens, CAPTURE_TOKENS);
     tokio::time::sleep(Duration::from_millis(200)).await; // final ACKs
     relay_task.abort();
     let captured = log.lock().unwrap().clone();
@@ -580,7 +586,7 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     // completion in a plaintext chunk frame, so an empty result above means something.
     let req_frame = encode_frame(
         &Body::RemoteRequest(RemoteRequest {
-            request_json: serde_json::to_string(&greedy(&prompt, 32)).unwrap(),
+            request_json: serde_json::to_string(&greedy(&prompt, CAPTURE_TOKENS)).unwrap(),
             ..Default::default()
         })
         .into(),
@@ -616,12 +622,13 @@ async fn packet_capture_contains_no_plaintext_prompt_single_host() {
     let (to_server, to_client): (Vec<_>, Vec<_>) = captured.iter().partition(|(c2s, _)| *c2s);
     let bytes = |v: &[&(bool, Vec<u8>)]| v.iter().map(|(_, d)| d.len() as u64).sum::<u64>();
     eprintln!(
-        "bench:transport-overhead SINGLE-HOST relay capture, whole session incl. handshake, 32 tokens: client→server {} B in {} datagrams, server→client {} B in {} datagrams ({:.0} B/token server→client); 0 plaintext hits over {} needles ({} per-token: {:?})",
+        "bench:transport-overhead SINGLE-HOST relay capture, whole session incl. handshake, {} tokens: client→server {} B in {} datagrams, server→client {} B in {} datagrams ({:.0} B/token server→client); 0 plaintext hits over {} needles ({} per-token: {:?})",
+        CAPTURE_TOKENS,
         bytes(&to_server),
         to_server.len(),
         bytes(&to_client),
         to_client.len(),
-        bytes(&to_client) as f64 / 32.0,
+        bytes(&to_client) as f64 / CAPTURE_TOKENS as f64,
         needles.len(),
         token_needles.len(),
         token_needles,

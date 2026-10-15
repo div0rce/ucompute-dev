@@ -62,7 +62,11 @@ fn two_instances_discover_within_5s_single_host() {
     assert_eq!(db.pair_port, Some(40102));
     assert!(!db.trusted, "unpinned id is never trusted");
     assert_eq!(da.proto, "1.0");
-    assert!(!da.addr.ip().is_unspecified());
+    // Both advertisers bind 127.0.0.1 (`Peer::config`): that is the only address advertised, never
+    // a LAN address nothing listens on (this Mac also has en0).
+    for d in [da, db] {
+        assert_eq!(d.addr.ip(), std::net::Ipv4Addr::LOCALHOST, "{d:?}");
+    }
     // Records too old for the caller's window drop out without touching the signature logic.
     assert!(
         browser
@@ -95,9 +99,11 @@ fn two_instances_discover_within_5s_single_host() {
         std::thread::sleep(Duration::from_millis(50));
     };
     eprintln!(
-        "SINGLE-HOST refresh: a re-resolved at {} (first seen {})",
-        refreshed.seen_utc, da.seen_utc
+        "SINGLE-HOST refresh: a re-resolved at {} {} (first seen {} {})",
+        refreshed.addr, refreshed.seen_utc, da.addr, da.seen_utc
     );
+    // Re-resolved from every address record the browser holds by now: still only the bound one.
+    assert_eq!(refreshed.addr.ip(), std::net::Ipv4Addr::LOCALHOST, "{refreshed:?}");
 }
 
 /// Helper, not a test of its own: one Common instance (its own process, identity and store) that
@@ -156,5 +162,42 @@ fn two_processes_discover_within_5s_single_host() {
         let (ms, trusted) = hit.unwrap_or_else(|| panic!("{who} never saw the other process: {outputs:?}"));
         assert!(ms <= 5_000, "{who} took {ms} ms");
         assert!(!trusted, "an unpaired peer is listed untrusted");
+    }
+}
+
+/// A daemon's browser never lists its own advert (it comes back over multicast loopback), while
+/// another device advertised from the same process is listed. SINGLE-HOST: one Mac.
+#[test]
+fn browser_never_lists_own_id_single_host() {
+    if std::env::var("COMMON_MDNS").as_deref() == Ok("0") {
+        eprintln!("SKIP browser_never_lists_own_id_single_host: COMMON_MDNS=0");
+        return;
+    }
+    let cfg = mdns_config();
+    let (me, other) = (Peer::new(), Peer::new());
+    let browser = Browser::start_excluding(&cfg, me.peers.clone(), me.id()).unwrap();
+    let _mine = Advertiser::start(&cfg, me.identity.clone(), 40011, None).unwrap();
+    let _theirs = Advertiser::start(&cfg, other.identity.clone(), 40012, None).unwrap();
+    let started = Instant::now();
+    let mut seen_other = None;
+    // Watch until the other device appears, then one more second: our own id never shows up.
+    while seen_other.is_none_or(|t: Instant| t.elapsed() < Duration::from_secs(1)) {
+        let peers = browser.peers(10);
+        assert!(!peers.iter().any(|d| d.id == me.id()), "own id listed: {peers:?}");
+        if seen_other.is_none() {
+            if let Some(d) = peers.iter().find(|d| d.id == other.id()) {
+                eprintln!(
+                    "SINGLE-HOST: other device listed at {} after {:?}; own advert excluded",
+                    d.addr,
+                    started.elapsed()
+                );
+                seen_other = Some(Instant::now());
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "SINGLE-HOST: the other device was never listed"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

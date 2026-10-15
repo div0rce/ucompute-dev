@@ -191,7 +191,7 @@
       "put": {
         "tags": ["mesh"],
         "summary": "Switch peer networking and serving on or off",
-        "description": "Persisted in `COMMON_HOME/config.json` (0600). `enabled` binds (or closes) the authenticated QUIC endpoint, mDNS advertising/browsing and the inbound accept loop; `serve_peers` lets paired devices in a group whose policy allows it run models here. A change restarts the endpoint, so open peer connections are re-established. When the endpoint cannot start, networking is recorded as off and the error is returned.",
+        "description": "Persisted in `COMMON_HOME/config.json` (0600). `enabled` binds (or closes) the authenticated QUIC endpoint, mDNS advertising/browsing and the inbound accept loop; `serve_peers` lets paired devices in a group whose policy allows it run models here. A change restarts the endpoint, so open peer connections are re-established. When the endpoint cannot start, networking is recorded as off and the error is returned. The same file's optional `peer_quota` object (`requests_per_minute`, `tokens_per_minute`, `max_concurrent`; defaults 120, 200000, 4; 0 = unlimited for the two rates) limits what each paired device may run here and is read when the daemon starts: a peer request beyond it, or one that finds no free engine slot (the daemon's `--max-concurrent` slots), gets `overloaded` at the sending device; a peer never waits in the local queue, and peer generations across all devices are capped at `max_concurrent` and at one fewer than the engine slots, so a peer never holds the slot local work needs (`peer_slots` in the status; 0 with `--max-concurrent 1`, which serves no peers).",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" } } } } } },
         "responses": { "200": { "description": "Status after the change", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NetworkStatus" } } } }, "400": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } }
       }
@@ -200,7 +200,7 @@
       "get": {
         "tags": ["mesh"],
         "summary": "Paired, discovered and revoked devices",
-        "description": "`peers` are pinned devices with `connected` and their groups. `discovered` are devices mDNS currently sees; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
+        "description": "`peers` are pinned devices with `connected`, `health` and their groups. `discovered` are devices mDNS currently sees, never this device; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
         "responses": { "200": { "description": "Peers", "content": { "application/json": { "schema": { "type": "object", "properties": { "peers": { "type": "array", "items": { "$ref": "#/components/schemas/PeerRecord" } }, "discovered": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveredPeer" } }, "revocations": { "type": "array", "items": { "$ref": "#/components/schemas/Revocation" } } } } } } } }
       }
     },
@@ -217,7 +217,7 @@
       "post": {
         "tags": ["mesh"],
         "summary": "Revoke a device",
-        "description": "Unpins it, records a revocation signed by this device, closes every connection to it with the REVOKED close code and sends the revocation to every connected group member, which applies it too. The revoked key fails inside the TLS handshake from now on; audit `peer_revoked`.",
+        "description": "Unpins it, records a revocation signed by this device, closes every connection to it with the REVOKED close code and sends the revocation to the connected devices that shared a group with it here, which apply it too and pass it on the same way; every new connection offers it again until that device has sent it back, and a device that already holds it ignores it. The revoked key fails inside the TLS handshake from now on; audit `peer_revoked`.",
         "parameters": [{ "$ref": "#/components/parameters/PeerId" }],
         "responses": { "200": { "description": "The signed revocation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Revocation" } } } }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
       }
@@ -242,7 +242,7 @@
       "post": {
         "tags": ["mesh"],
         "summary": "Join another device's pairing window",
-        "description": "Connects from this device's peer endpoint (networking must be on) to `addr` (the other device's pairing endpoint `ip:port`, required with a 6-digit code) and runs the SPAKE2 exchange bound to the TLS session. `code` may instead be the whole QR payload, whose address and expected peer id are then used. On success both devices pin each other; a wrong code is `pairing_failed` (401), a locked window `pairing_locked` (429).",
+        "description": "Connects from this device's peer endpoint (networking must be on) to `addr` (the other device's pairing endpoint `ip:port`, required with a 6-digit code) and runs the SPAKE2 exchange bound to the TLS session. `code` may instead be the whole QR payload, whose address and expected peer id are then used: any other device that answers fails the TLS handshake (`pairing_failed`, audit reason `qr_peer_mismatch`) and nothing is pinned on either side. On success both devices pin each other; a wrong code is `pairing_failed` (401), a locked window `pairing_locked` (429).",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "addr": { "type": "string" }, "code": { "type": "string" }, "name": { "type": "string" } }, "required": ["code"] } } } },
         "responses": { "200": { "description": "The newly pinned device", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PeerRecord" } } } }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "429": { "$ref": "#/components/responses/Error" } }
       }
@@ -279,7 +279,7 @@
       "get": {
         "tags": ["mesh"],
         "summary": "Recent audit events",
-        "description": "The last `n` events (1..=1000, default 100) of `COMMON_HOME/logs/audit.jsonl`, oldest first: pairing, connections, revocations, settings changes and remote requests. Ids, counts, codes and durations only; never prompt text or key material.",
+        "description": "The last `n` events (1..=1000, default 100) of `COMMON_HOME/logs/audit.jsonl`, oldest first: pairing, connections, revocations, settings changes and remote requests. Ids, counts, codes and durations only; never prompt text or key material. A request sent to a peer leaves `remote_request` entries on both devices: on the sender `phase: sent` before anything leaves (the request is refused when it cannot be written) then `phase: finished` (outcome, `request_id`), on the server one entry with the outcome and the same `request_id`.",
         "parameters": [{ "name": "n", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }],
         "responses": { "200": { "description": "Events", "content": { "application/json": { "schema": { "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/AuditEvent" } } } } } } }, "500": { "$ref": "#/components/responses/Error" } }
       }
@@ -404,11 +404,16 @@
       },
       "NetworkStatus": {
         "type": "object",
-        "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" }, "listen_addr": { "type": ["string", "null"], "description": "`ip:port` of the QUIC endpoint while enabled." }, "mdns": { "type": "boolean" }, "peer_id": { "type": "string", "description": "This device's 64-hex id (its Ed25519 public key)." }, "short_label": { "type": "string" }, "connections": { "type": "integer" } }
+        "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" }, "listen_addr": { "type": ["string", "null"], "description": "`ip:port` of the QUIC endpoint while enabled." }, "mdns": { "type": "boolean" }, "peer_id": { "type": "string", "description": "This device's 64-hex id (its Ed25519 public key)." }, "short_label": { "type": "string" }, "connections": { "type": "integer" }, "peer_quota": { "$ref": "#/components/schemas/PeerQuota" }, "peer_slots": { "type": "integer", "description": "Peer generations this device runs at once across all devices: `peer_quota.max_concurrent`, at most the engine slots (`--max-concurrent`) minus one." } }
+      },
+      "PeerQuota": {
+        "type": "object",
+        "description": "`config.json` `peer_quota` in force (read at daemon start): per paired device, requests per minute and generated tokens per minute (0 = unlimited; a request's whole max_tokens is charged when it starts) and generations at once (also the cap across all devices, see `peer_slots`).",
+        "properties": { "requests_per_minute": { "type": "integer", "default": 120 }, "tokens_per_minute": { "type": "integer", "default": 200000 }, "max_concurrent": { "type": "integer", "default": 4 } }
       },
       "PeerRecord": {
         "type": "object",
-        "properties": { "id": { "type": "string" }, "short_label": { "type": "string" }, "name": { "type": "string" }, "paired_at_utc": { "type": "string" }, "last_seen_utc": { "type": ["string", "null"] }, "last_addr": { "type": ["string", "null"] }, "connected": { "type": "boolean" }, "groups": { "type": "array", "items": { "type": "string" } } }
+        "properties": { "id": { "type": "string" }, "short_label": { "type": "string" }, "name": { "type": "string" }, "paired_at_utc": { "type": "string" }, "last_seen_utc": { "type": ["string", "null"] }, "last_addr": { "type": ["string", "null"] }, "connected": { "type": "boolean" }, "health": { "type": "string", "enum": ["connected", "unhealthy", "reconnecting", "disconnected"], "description": "Liveness from keep-alives (F-02-05), updated within one keep-alive interval: `unhealthy` = still open but 3 intervals without a datagram; `reconnecting` = lost, a reconnect is expected; `disconnected` = closed on purpose, networking off, or never connected since networking started." }, "groups": { "type": "array", "items": { "type": "string" } } }
       },
       "DiscoveredPeer": {
         "type": "object",

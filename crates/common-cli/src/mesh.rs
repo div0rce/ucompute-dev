@@ -6,21 +6,22 @@
 //! (`{privacy, network_enabled, serve_peers}`, 0600). Pinned peers, groups and revocations live in
 //! `identity/peers.json` (`common_identity::PeerStore`).
 //!
-//! A running `common serve` holds both in memory and acts on them (TLS verifier, live sessions,
-//! propagation to peers, policy), so while it runs it owns them: it records its API address in
-//! `COMMON_HOME/serve.json`, and every mutation here (`peers rm|revoke`,
-//! `groups create|add|remove|policy`, `privacy`) goes through its API when that address answers
-//! with this device's id ([`Daemon`]). The daemon applies the change at once and its own later
-//! writes keep it; the file is re-read afterwards to confirm it was persisted. With no daemon the
-//! file is written directly; `peers pair|join` refuse while a daemon runs (their pin and their
-//! endpoint would bypass it).
+//! A running `common serve` re-reads both files when they change and writes them read-modify-write,
+//! so a direct edit is never lost and needs no restart. Some effects only the daemon can produce
+//! (closing a revoked device's sessions, sending the revocation to connected peers, starting the
+//! peer endpoint), so it records its API address in `COMMON_HOME/serve.json` and every mutation
+//! here (`peers rm|revoke`, `groups create|add|remove|policy`, `privacy`) goes through its API when
+//! that address answers with this device's id ([`Daemon`]); the file is re-read afterwards to
+//! confirm it was persisted. With no daemon the file is written directly. `peers pair|join` refuse
+//! while a daemon runs: they would open a second endpoint for this identity, and the other device
+//! would record that short-lived endpoint's address instead of the daemon's.
 
 use crate::shutdown_signal;
 use clap::{Args, Subcommand, ValueEnum};
 use common_artifacts::Store;
 use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_identity::{DeviceIdentity, Group, GroupPolicy, PeerId, PeerRecord, PeerStore, Revocation};
-use common_network::discovery::{Advertiser, Browser};
+use common_network::discovery::{Advertiser, Browser, DiscoveredPeer};
 use common_network::transport::Node;
 use common_network::{pairing, NetworkConfig};
 use common_observability::Audit;
@@ -363,8 +364,8 @@ pub fn remove_serve_file(paths: &Paths) {
     }
 }
 
-/// The `common serve` that owns this home's trust store and settings while it runs (F-06-05,
-/// F-02-09): CLI mutations go through its API so they take effect now and survive its next write.
+/// The `common serve` running on this home (F-06-05, F-02-09): CLI mutations go through its API so
+/// their live effects (sessions closed, revocations sent, endpoint started) happen now.
 pub struct Daemon {
     pub url: String,
     http: reqwest::Client,
@@ -375,7 +376,8 @@ impl Daemon {
     /// The daemon `serve.json` names, if it answers `GET /api/network` with this device's id
     /// (`identity/device.pub`). No file, a stale one (crash: nothing answers) or another home's
     /// daemon on that port is `None`. A daemon that wants an API key this process lacks is
-    /// `Unauthorized`: writing the file instead would be erased by its next write.
+    /// `Unauthorized`: writing the file instead would skip its live effects (a revoked device's
+    /// open sessions would stay open).
     // ponytail: the bearer key (COMMON_API_KEY) goes to whatever answers on that loopback port;
     // the re-read in `verify` catches a squatter that lies, not one that keeps the key.
     pub async fn find(paths: &Paths) -> Result<Option<Daemon>> {
@@ -403,10 +405,7 @@ impl Daemon {
             Ok(v) if v["peer_id"].as_str() == Some(me.trim()) => Ok(Some(d)),
             Err(e) if e.code == ErrorCode::Unauthorized => Err(CommonError::new(
                 ErrorCode::Unauthorized,
-                format!(
-                    "`common serve` at {} owns this device's settings and wants an API key",
-                    d.url
-                ),
+                format!("`common serve` at {} runs on this home and wants an API key", d.url),
             )
             .with_hint("set COMMON_API_KEY to the key `common serve --api-key` was given, or stop it")),
             _ => Ok(None),
@@ -462,14 +461,15 @@ fn daemon_error(v: &Value, status: u16) -> CommonError {
     }
 }
 
-/// `peers pair`/`join` pin through their own endpoint; with a daemon running that pin would never
-/// reach it and the daemon's next write would erase it.
+/// `peers pair`/`join` open their own endpoint; next to a daemon that is a second endpoint for this
+/// identity (same default port), and the other device would pin its short-lived address. The pin
+/// itself would reach the daemon (it re-reads `peers.json`).
 // ponytail: refuse rather than drive /api/pair/*; upgrade: route it like revoke if CLI pairing
 // next to a running daemon is wanted.
 async fn refuse_if_daemon(paths: &Paths) -> Result<()> {
     match Daemon::find(paths).await? {
         Some(d) => Err(CommonError::invalid(format!(
-            "`common serve` at {} owns this device's trust store while it runs",
+            "`common serve` at {} runs this device's peer endpoint; pairing goes through it",
             d.url
         ))
         .with_hint("pair from the desktop app, or stop `common serve` and retry")),
@@ -536,7 +536,7 @@ fn out<T: Serialize>(json: bool, value: &T, text: String) -> Result<()> {
 pub async fn peers(cmd: &PeersCmd, json: bool) -> Result<()> {
     let m = Mesh::open()?;
     match cmd {
-        PeersCmd::List => peers_list(&m, json),
+        PeersCmd::List => peers_list(&m, json).await,
         PeersCmd::Discover { wait_secs, net } => {
             let browser = Browser::start(&net.config(), m.store.clone())?;
             if !browser.active() {
@@ -613,7 +613,7 @@ pub async fn peers(cmd: &PeersCmd, json: bool) -> Result<()> {
                         Some(&rec.id.to_hex()),
                         json!({ "seq": r.seq, "peer": rec.id.short_label(), "source": "local" }),
                     ) {
-                        tracing::debug!(error = %e, "audit record not written");
+                        tracing::warn!(error = %e, "audit record not written");
                     }
                     r
                 }
@@ -652,11 +652,18 @@ struct PeerRow {
     paired_at_utc: String,
     last_seen_utc: Option<String>,
     last_addr: Option<String>,
+    /// From the running daemon's `GET /api/peers`; null when no daemon answers (unknown).
+    connected: Option<bool>,
+    /// The daemon's liveness for the device (`connected`, `unhealthy`, `reconnecting`,
+    /// `disconnected`) when it reports one.
+    health: Option<String>,
 }
 
-// ponytail: store only; "connected" lives in the daemon's process. Upgrade: ask the API's /api/peers.
-fn peers_list(m: &Mesh, json: bool) -> Result<()> {
-    let rows: Vec<PeerRow> = m
+/// Pinned devices from the store; with a daemon answering, also its live state (`connected`,
+/// `health`) and the devices its mDNS browser sees that are not paired (listed, never trusted).
+/// JSON: `{this_device, daemon, peers, discovered}`, `daemon` null when none answers.
+async fn peers_list(m: &Mesh, json: bool) -> Result<()> {
+    let mut rows: Vec<PeerRow> = m
         .store
         .list()?
         .into_iter()
@@ -669,33 +676,84 @@ fn peers_list(m: &Mesh, json: bool) -> Result<()> {
                 paired_at_utc: p.paired_at_utc,
                 last_seen_utc: p.last_seen_utc,
                 last_addr: p.last_addr,
+                connected: None,
+                health: None,
             })
         })
         .collect::<Result<_>>()?;
+    let me = m.identity.id;
+    // A read-only listing still works when the daemon wants a key this process lacks.
+    let (daemon, discovered, note) = match Daemon::find(&m.paths).await {
+        Ok(Some(d)) => {
+            let live = d.call(Method::GET, "/api/peers", None).await?;
+            let seen = apply_live(&mut rows, &live, &me)?;
+            (Some(d.url), seen, None)
+        }
+        Ok(None) => (
+            None,
+            vec![],
+            Some("`common serve` is not running here: connection state unknown and no discovered devices (`common peers discover` listens now)".to_string()),
+        ),
+        Err(e) => (None, vec![], Some(format!("{}: connection state unknown", e.message))),
+    };
     if json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let v = json!({ "this_device": me, "daemon": daemon, "peers": rows, "discovered": discovered });
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    println!("this device {} ({})", m.identity.id, m.identity.id.short_label());
+    println!("this device {me} ({})", me.short_label());
     println!(
-        "{:<14} {:<20} {:<16} {:<22} {:<20} ID",
-        "LABEL", "NAME", "GROUPS", "ADDRESS", "LAST SEEN"
+        "{:<14} {:<20} {:<16} {:<22} {:<20} {:<12} ID",
+        "LABEL", "NAME", "GROUPS", "ADDRESS", "LAST SEEN", "CONNECTED"
     );
     for r in &rows {
+        let live = match (&r.health, r.connected) {
+            (Some(h), _) => h.clone(),
+            (None, Some(c)) => if c { "yes" } else { "no" }.to_string(),
+            (None, None) => "-".to_string(),
+        };
         println!(
-            "{:<14} {:<20} {:<16} {:<22} {:<20} {}",
+            "{:<14} {:<20} {:<16} {:<22} {:<20} {:<12} {}",
             r.label,
             r.name.chars().take(20).collect::<String>(),
             r.groups.join(","),
             r.last_addr.as_deref().unwrap_or("-"),
             r.last_seen_utc.as_deref().unwrap_or("-"),
+            live,
             r.id
         );
     }
     if rows.is_empty() {
         println!("no paired devices; run `common peers pair` here and `common peers join` on the other device");
     }
+    if !discovered.is_empty() {
+        println!("seen on this network, not paired (untrusted; nothing is sent to them):");
+        for p in &discovered {
+            let pairing = p.pair_port.map_or("-".to_string(), |port| format!("pairing on {port}"));
+            println!("{:<14} {:<22} {:<16} {}", p.id.short_label(), p.addr, pairing, p.id);
+        }
+    }
+    if let Some(n) = note {
+        println!("{n}");
+    }
     Ok(())
+}
+
+/// Fill `connected`/`health` of `rows` from a daemon's `GET /api/peers` and return what its mDNS
+/// browser sees that is neither pinned here nor this device.
+fn apply_live(rows: &mut [PeerRow], live: &Value, me: &PeerId) -> Result<Vec<DiscoveredPeer>> {
+    let pinned = live["peers"].as_array().map(Vec::as_slice).unwrap_or_default();
+    for r in rows.iter_mut() {
+        let p = pinned.iter().find(|p| p["id"].as_str() == Some(r.id.to_hex().as_str()));
+        r.connected = Some(p.and_then(|p| p["connected"].as_bool()).unwrap_or(false));
+        r.health = p.and_then(|p| p["health"].as_str()).map(str::to_string);
+    }
+    let seen: Option<Vec<DiscoveredPeer>> = serde_json::from_value(live["discovered"].clone())?;
+    Ok(seen
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !p.trusted && p.id != *me && !rows.iter().any(|r| r.id == p.id))
+        .collect())
 }
 
 async fn pair(m: &Mesh, name: Option<String>, net: &NetArgs, json: bool) -> Result<()> {
@@ -772,19 +830,14 @@ async fn join(
     };
     let node = m.node(net.config(), false).await?;
     let name = name.unwrap_or_else(device_name);
+    // A QR payload names the device: any other key fails the TLS handshake, before SPAKE2 and
+    // before anything is pinned or a revocation touched.
     let r = tokio::select! {
-        r = pairing::join(node.clone(), addr, &pw, &name) => r,
+        r = pairing::join_with(node.clone(), addr, &pw, &name, expected) => r,
         _ = shutdown_signal() => Err(CommonError::new(ErrorCode::Cancelled, "pairing cancelled")),
     };
     node.shutdown().await;
     let rec = r?;
-    if expected.is_some_and(|e| e != rec.id) {
-        m.store.remove(&rec.id)?;
-        return Err(CommonError::new(
-            ErrorCode::PairingFailed,
-            "the device that answered is not the one named in the QR code; nothing was pinned",
-        ));
-    }
     out(
         json,
         &rec,
@@ -1192,6 +1245,47 @@ mod tests {
         remove_serve_file(&paths);
         assert!(serve_file(&paths).exists(), "another daemon's file is left alone");
         let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    /// `peers list` next to a daemon: `connected`/`health` come from its answer; a discovered device
+    /// is listed only when it is neither pinned here nor this device.
+    #[test]
+    fn live_peers_merge_state_and_list_only_unpaired_strangers() {
+        let me = PeerId([1; 32]);
+        let (a, b, stranger) = (PeerId([0xa0; 32]), PeerId([0xb0; 32]), PeerId([0xc0; 32]));
+        let row = |id: PeerId| PeerRow {
+            id,
+            label: id.short_label(),
+            name: "x".into(),
+            groups: vec![],
+            paired_at_utc: "t".into(),
+            last_seen_utc: None,
+            last_addr: None,
+            connected: None,
+            health: None,
+        };
+        let mut rows = vec![row(a), row(b)];
+        let seen = |id: PeerId, trusted: bool| {
+            json!({ "id": id, "addr": "192.168.1.5:8193", "pairing": false, "pair_port": null,
+                    "proto": "1", "trusted": trusted, "seen_utc": "t" })
+        };
+        let live = json!({
+            "peers": [{ "id": a, "connected": true, "health": "unhealthy" }, { "id": b, "connected": false }],
+            // b is pinned here though the daemon's flag says otherwise: still not a stranger.
+            "discovered": [seen(a, true), seen(me, false), seen(stranger, false), seen(b, false)],
+        });
+        let found = apply_live(&mut rows, &live, &me).unwrap();
+        assert_eq!(
+            (rows[0].connected, rows[0].health.as_deref()),
+            (Some(true), Some("unhealthy"))
+        );
+        assert_eq!((rows[1].connected, rows[1].health.as_deref()), (Some(false), None));
+        assert_eq!(found.iter().map(|p| p.id).collect::<Vec<_>>(), vec![stranger]);
+        // No `discovered`, a pinned device the daemon does not list: not connected, nothing found.
+        let found = apply_live(&mut rows, &json!({ "peers": [] }), &me).unwrap();
+        assert!(found.is_empty() && rows.iter().all(|r| r.connected == Some(false) && r.health.is_none()));
+        // A malformed answer is an error, never a silently empty list.
+        assert!(apply_live(&mut rows, &json!({ "discovered": [{ "id": 3 }] }), &me).is_err());
     }
 
     #[test]

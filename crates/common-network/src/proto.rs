@@ -359,6 +359,90 @@ mod tests {
         );
     }
 
+    type Fields = std::collections::BTreeSet<(String, String, u32)>;
+
+    /// `(message, field, tag)` of every prost field above the tests in proto.rs; `Body` variants
+    /// belong to `ControlMessage`, named in snake_case as in the .proto.
+    fn rust_fields(src: &str) -> Fields {
+        let snake = |s: &str| {
+            s.chars().enumerate().fold(String::new(), |mut out, (i, c)| {
+                if c.is_uppercase() && i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+                out
+            })
+        };
+        let (mut msg, mut tag, mut out) = (String::new(), None, Fields::new());
+        for line in src.lines().map(str::trim).take_while(|l| *l != "#[cfg(test)]") {
+            if let Some(rest) = line.strip_prefix("pub struct ") {
+                msg = rest.trim_end_matches(" {").to_string();
+            } else if line == "pub enum Body {" {
+                msg = "ControlMessage".into();
+            } else if let Some((_, rest)) = line.split_once("tag = \"") {
+                tag = rest.split('"').next().and_then(|n| n.parse::<u32>().ok());
+            } else if let (Some(t), false) = (tag, line.starts_with("//")) {
+                let name = match line.strip_prefix("pub ") {
+                    Some(field) => field.split(':').next().unwrap_or_default().to_string(),
+                    None => snake(line.split('(').next().unwrap_or_default()),
+                };
+                out.insert((msg.clone(), name, t));
+                tag = None;
+            }
+        }
+        out
+    }
+
+    /// `(message, field, tag)` and `(message, reserved tag)` of control.proto (one field per line).
+    fn proto_fields(src: &str) -> (Fields, Vec<(String, u32)>) {
+        let (mut stack, mut fields, mut reserved) = (Vec::<String>::new(), Fields::new(), Vec::new());
+        for line in src.lines() {
+            let line = line.split("//").next().unwrap_or_default().trim();
+            if let Some(rest) = line.strip_prefix("message ") {
+                stack.push(rest.trim_end_matches('{').trim().to_string());
+            } else if line.starts_with("oneof ") {
+                stack.push(stack.last().cloned().unwrap_or_default());
+            } else if line == "}" {
+                stack.pop();
+            } else if let Some(rest) = line.strip_prefix("reserved ") {
+                for n in rest.trim_end_matches(';').split(',') {
+                    reserved.push((stack.last().cloned().unwrap_or_default(), n.trim().parse().unwrap()));
+                }
+            } else if let Some((decl, tag)) = line.strip_suffix(';').and_then(|l| l.split_once('=')) {
+                if let (Some(msg), Some(name)) = (stack.last(), decl.split_whitespace().last()) {
+                    fields.insert((msg.clone(), name.to_string(), tag.trim().parse().unwrap()));
+                }
+            }
+        }
+        (fields, reserved)
+    }
+
+    #[test]
+    fn control_proto_mirrors_proto_rs() {
+        let rust = rust_fields(include_str!("proto.rs"));
+        let (proto, reserved) = proto_fields(include_str!("../../../proto/common/v1/control.proto"));
+        // The parser saw every message (a parser that finds nothing would pass vacuously).
+        let messages: std::collections::BTreeSet<&str> = rust.iter().map(|(m, _, _)| m.as_str()).collect();
+        assert_eq!(messages.len(), 10, "{messages:?}");
+        assert!(rust.contains(&("ControlMessage".into(), "capabilities".into(), 9)));
+        assert!(rust.contains(&("SignedCapabilities".into(), "signature".into(), 2)));
+        let missing: Vec<_> = rust.difference(&proto).collect();
+        let extra: Vec<_> = proto.difference(&rust).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "control.proto out of sync with proto.rs\nmissing from control.proto: {missing:?}\nonly in control.proto: {extra:?}"
+        );
+        // Retired tags stay reserved and unused.
+        assert!(reserved.contains(&("ControlMessage".into(), 2)), "{reserved:?}");
+        assert!(reserved.contains(&("Capabilities".into(), 10)), "{reserved:?}");
+        for (m, t) in &reserved {
+            assert!(
+                !rust.iter().any(|(rm, _, rt)| rm == m && rt == t),
+                "{m} reuses reserved tag {t}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unknown_oneof_variant_tolerated() {
         // ControlMessage with only field 42 (length-delimited): key 338 → varint 0xd2 0x02.

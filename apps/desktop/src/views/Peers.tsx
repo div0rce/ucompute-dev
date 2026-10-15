@@ -55,7 +55,8 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
       const [n, p, g] = await Promise.all([api.network(), api.peers(), api.groups()]);
       setNet(n);
       setPeers(p.peers);
-      setDiscovered(p.discovered.filter((x) => !x.trusted));
+      // mDNS also hears this device's own advert (and a second daemon on the same host); never offer to pair with it.
+      setDiscovered(p.discovered.filter((x) => !x.trusted && x.id !== n.peer_id));
       setGroups(g);
       setError(null);
     } catch (e) {
@@ -257,7 +258,14 @@ export function Peers({ pollMs = 1000 }: { pollMs?: number }) {
                 <div className="pair-live" role="group" aria-label="Pairing code">
                   <div className="pair-code">{spaced(session.code)}</div>
                   <div className="small muted">
-                    {secondsLeft > 0 ? `Expires in ${secondsLeft} s.` : "Expiring."} Port {session.port}.
+                    {secondsLeft > 0 ? `Expires in ${secondsLeft} s.` : "Expiring."}{" "}
+                    {session.pair_addr ? (
+                      <>
+                        Address <code className="pair-addr">{session.pair_addr}</code>
+                      </>
+                    ) : (
+                      `Port ${session.port}.`
+                    )}
                   </div>
                   <details style={{ marginTop: 10 }}>
                     <summary>Show as text for a QR app</summary>

@@ -2,7 +2,9 @@
 //! stream tokens, write the execution manifest (X-15), stop on Ctrl-C / SIGTERM / SIGHUP (F-08-02).
 //! `run --peer` sends the whole request to one paired device instead (Mode B, remote execution):
 //! the manifest records `scope = remote_single_peer` and the peer id; it never claims more than
-//! one physical device, because this CLI cannot know whether the peer is another machine.
+//! one physical device, because this CLI cannot know whether the peer is another machine. The
+//! sending side is audited like the daemon's `target: peer:<id>` (`remote_request`, `sent` then
+//! `finished`; ids and counts only).
 
 use crate::mesh::Mesh;
 use crate::{context, shutdown_signal, Device, Stop};
@@ -289,7 +291,10 @@ async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManif
         let out = drain(
             cancel.clone(),
             echo,
-            common_network::remote::generate_remote(conn, &a.model, &sha, req, &privacy, cancel),
+            // F-06-10: `remote_request` phase `sent` (with the request id the peer audits too) as the
+            // frame leaves; if it cannot be written the request is cancelled at once and this fails
+            // with `io`. Phase `finished` when the stream ends, fails or is dropped.
+            common_api::mesh::generate_remote_audited(mesh.audit.clone(), conn, &a.model, &sha, req, &privacy, cancel),
         )
         .await?;
         Ok::<_, CommonError>((engine, seed, out))

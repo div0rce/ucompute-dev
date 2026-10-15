@@ -6,7 +6,7 @@ import App from "../App";
 import { daemon, privacy } from "../state/stores";
 import { pairingAddr, shortLabel } from "../api/client";
 import { grouped, Peers } from "../views/Peers";
-import { installFakeDaemon, JOIN_CODE, NETWORK, NETWORK_ON, PEER, QR_PAYLOAD, SELF_ID, STRANGER } from "./mocks";
+import { installFakeDaemon, JOIN_CODE, NETWORK, NETWORK_ON, PAIR_ADDR, PEER, QR_PAYLOAD, SELF_ID, STRANGER } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
@@ -139,6 +139,72 @@ describe("Peers view", () => {
     expect(pairingAddr(STRANGER)).toBe("192.168.1.77:51234");
     expect(screen.getByLabelText("Address")).toHaveProperty("value", "192.168.1.77:51234");
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Code")));
+  });
+
+  it("the address shown under the code goes into the other side's join form verbatim; the code pastes with its space", async () => {
+    // One jsdom page and one fake daemon play both sides; this checks the form, not two devices.
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON });
+    render(<Peers pollMs={20} />);
+    await user.click(await screen.findByRole("button", { name: "Pair this device" }));
+    const group = await screen.findByRole("group", { name: "Pairing code" });
+    const shown = within(group).getByText(PAIR_ADDR).textContent!;
+    expect(shown).toBe(PAIR_ADDR);
+
+    await user.click(screen.getByLabelText("Address"));
+    await user.paste(shown);
+    await user.click(screen.getByLabelText("Code"));
+    await user.paste(" 123 456 ");
+    await user.click(screen.getByRole("button", { name: "Join" }));
+    await screen.findByText("Paired with Studio Mac.");
+    const body = JSON.parse(String((calls(fake, "POST", "/api/pair/join")[0][1] as RequestInit).body));
+    expect(body).toEqual({ addr: PAIR_ADDR, code: JOIN_CODE, name: "This Mac" });
+  });
+
+  it("an older daemon without pair_addr still shows the port", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON });
+    const start = fake.fetchMock.getMockImplementation() as typeof fetch;
+    fake.fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await start(input, init);
+      if (!String(input).endsWith("/api/pair/start")) return res;
+      const { pair_addr: _, ...old } = await res.json();
+      return new Response(JSON.stringify(old), { headers: { "content-type": "application/json" } });
+    });
+    render(<Peers pollMs={20} />);
+    await user.click(await screen.findByRole("button", { name: "Pair this device" }));
+    const group = await screen.findByRole("group", { name: "Pairing code" });
+    expect(group.textContent).toContain("Port 51234.");
+  });
+
+  it("shows heartbeat health in plain words and falls back to connected without it", async () => {
+    const peer = (n: number, extra: Partial<typeof PEER>) => ({ ...PEER, id: String(n).repeat(64), short_label: `${n}${n}${n}${n}-x`, name: `Device ${n}`, ...extra });
+    installFakeDaemon({
+      network: NETWORK_ON,
+      peers: [
+        peer(1, { health: "connected" }),
+        peer(2, { health: "unhealthy" }),
+        peer(3, { health: "reconnecting", connected: true }),
+        peer(4, { health: "disconnected" }),
+        peer(5, { connected: false }),
+      ],
+    });
+    render(<Peers pollMs={20} />);
+    const health = async (name: string) => within((await screen.findByText(name, { selector: ".model-name" })).closest("tr")!).getAllByRole("cell")[1].textContent;
+    expect(await health("Device 1")).toBe("Connected");
+    expect(await health("Device 2")).toBe("Not responding");
+    expect(await health("Device 3")).toBe("Reconnecting");
+    expect(await health("Device 4")).toBe("Not connected");
+    expect(await health("Device 5")).toBe("Not connected");
+  });
+
+  it("never lists this device among nearby devices, even when the daemon reports its own advert", async () => {
+    installFakeDaemon({ network: NETWORK_ON, discovered: [{ ...STRANGER, id: SELF_ID, addr: "192.168.1.10:8193" }, STRANGER] });
+    render(<Peers pollMs={20} />);
+    const nearby = (await screen.findByRole("heading", { name: "Nearby, not paired" })).closest(".section") as HTMLElement;
+    await within(nearby).findByText(shortLabel(STRANGER.id));
+    expect(within(nearby).queryByText(shortLabel(SELF_ID))).toBeNull();
+    expect(within(nearby).getAllByRole("button", { name: /^Pair with/ })).toHaveLength(1);
   });
 
   it("revoke asks for confirmation and then removes the device; remove does too", async () => {

@@ -4,6 +4,7 @@
 - **Date:** 2026-10-14
 - **Inputs:** `docs/SPEC_HANDOFF_V2.md` sections 6, 7, 9; ledger rows F-02-01..12, F-06-01/02/03/05/10, F-08-10, F-03-01, F-03-03, X-20; ADR-0001 (stack table), ADR-0002 (supervised `llama-server`, D-007); `docs/research/COMPETITIVE_MATRIX.md`, `RESEARCH_GAPS.md`; crates.io metadata and downloaded crate sources read on 2026-10-14 (section 11).
 - **Markers:** ✅ verified this session from a primary source · ⚠️ secondary/partial · `unverified` not checked.
+- **Implementation:** M3 was built on 2026-10-15 and tested SINGLE-HOST only. Section 9 describes the code. Where section 9 and sections 2–8 disagree, section 9 is what runs.
 
 ## 1. Context
 
@@ -165,3 +166,186 @@ Fixtures: the TinyStories models (`docs/research/TEST_MODELS.md`) for all SINGLE
 ## 8. Verification record
 - **Verified (✅):** all versions, dates, licenses and MSRVs in section 2 (crates.io API + `cargo info`, 2026-10-14); rustls RPK API and iroh RPK/presets/`RelayMode::Disabled` (downloaded crate sources); quinn `peer_identity`/`export_keying_material`/`stats` (source + docs.rs via Context7); spake2 0.4.0 key derivation and absence of confirmation (source + docs.rs); `ggml-rpc-server` flags, default loopback bind and presence in the pinned archive (run on this Mac); dependency counts (`cargo tree`, no build); `/dev/bpf0` root-only; quinn/rustls/ring already in `Cargo.lock`.
 - **Unverified / secondary:** binary-size deltas; iroh relay ciphertext-only claim and hole-punch rate (vendor); iroh mDNS crate behaviour; b11609 RPC protocol version string; ggml RPC connection count, graph re-serialisation per compute, inter-layer activation dtype, `-c` cache semantics, abort-on-error behaviour; mdns-sd multi-instance on one host; prost unknown-field handling details beyond "skipped on decode".
+
+## 9. Implementation notes (2026-10-15)
+
+What M3 built, decision by decision, and the tests that hold each rule in place. Every test is a unit test or a **SINGLE-HOST** test on the owner's one Mac. None is two-machine evidence (B-002), so none of this makes a ledger row `VERIFIED`. Test names are function names; the file is given once per group. The 2026-10-15 two-daemon run is in `docs/evidence/m3-single-host-2026-10-15.md`.
+
+### 9.1 D1 Identity
+- One Ed25519 key per device, through `ring`. `identity/device.key` is PKCS#8 v2, mode 0600, in a 0700 directory, written tmp + rename. A loosened mode is tightened on load. A corrupt key file is an error, never a silent new identity.
+- The trust store is `identity/peers.json` (0600), not SQLite. It holds pins, groups, revocations, superseded revocations and the next revocation `seq`.
+- Writers take `peers.json.lock`, re-read the file, then write by rename. Readers reload when the file changes. So `common peers revoke` in another process reaches the daemon's TLS verifier at its next handshake.
+- The secret has no `Serialize`; `Debug` prints `Ed25519Secret(<redacted>)`. Key bytes are not zeroized on drop (open, 9.15).
+- Tests, `crates/common-identity/src/lib.rs`: `keygen_persist_load`, `file_permissions_0600`, `corrupt_key_file_is_an_error_not_a_new_identity`, `private_key_never_logged`, `debug_redacts_secret`, `sign_verify_roundtrip`, `spki_round_trip`, `peer_store_persists_across_reopen`, `stale_handle_does_not_undo_another_handles_revocation`, `concurrent_handles_lose_no_update`, `failed_write_leaves_store_unchanged`. `crates/common-network/tests/invariants.rs`: `private_keys_never_formatted`. `crates/common-cli/tests/mesh_single_host.rs`: `private_key_absent_from_real_logs_and_bundle_single_host`, with its positive control `key_scan_catches_every_claimed_encoding_synthetic_key`.
+
+### 9.2 D2 Pairing
+The order, as built:
+1. The initiator A opens a pairing endpoint: its bind address, an ephemeral UDP port, ALPN `common-pair/1`, a verifier that accepts any key. The window is 120 s. mDNS advertises `pair=1` and `pairport` while it is open.
+2. The joiner B dials from its own workload endpoint, so pairing adds only A's socket. With a QR payload, B's verifier accepts only the key in the QR. Any other device fails **inside the TLS handshake**, before SPAKE2: `pairing_failed`, audit reason `qr_peer_mismatch`, nothing pinned on either side, no revocation touched.
+3. B → A: one selector byte (0 = 6-digit code, 1 = QR secret) and SPAKE2 `msg_B`. A → B: `msg_A`. Frames are `u8 length ‖ bytes`.
+4. Both read `ekm` = TLS exporter, 32 bytes, label `common-pair/1 confirm`. Each sends `HMAC-SHA256(K, side ‖ ekm ‖ idA ‖ idB)` and checks the other's MAC in constant time.
+5. **Only after a verified MAC** do both send `u16 workload port ‖ device name` (at most 64 bytes, control characters removed). A party without the code never learns either.
+6. Both call `pin_after_pairing` (which also supersedes local revocations of that id, 9.9) and audit `pairing_succeeded`.
+
+Bounds:
+- The code is 6 digits, uniform (rejection sampling), single use. The QR payload is `common-pair:v1:<id hex>:<ip:port>:<32 hex secret>`. When the endpoint binds every interface, the QR carries this host's LAN address instead of `0.0.0.0` (if it has one).
+- A handles one attempt at a time; each has 10 s. Every failed exchange counts, not only wrong MACs. The 6th failure within 60 s closes the endpoint with `pairing_locked` (close code `PL`).
+- The pairing endpoint does not send QUIC Retry (9.3). The lockout and the one-at-a-time loop bound it.
+- Turning networking off closes an open window (`cancelled`). `common peers pair|join` refuse while a daemon runs; pairing then goes through the daemon API.
+- Tests, `crates/common-network/tests/pairing.rs`: `correct_code_pairs_and_pins_both_sides_single_host`, `wrong_code_fails_and_pins_nothing`, `brute_force_rate_limited`, `wrong_code_learns_no_name_or_port`, `mitm_relay_detected`, `qr_payload_from_wildcard_bind_pairs_single_host`, `qr_expected_peer_mismatch_pins_nothing_single_host`. `crates/common-network/src/pairing.rs`: `code_and_secret_have_the_documented_shape`, `qr_payload_parses_and_rejects_garbage`, `qr_address_is_routable`, `confirmation_mac_binds_side_exporter_and_ids`, `names_are_printable_and_bounded`. `crates/common-api/tests/mesh.rs`: `pairing_pins_both_sides_and_revoke_closes_the_connection_single_host`, `qr_join_pairs_and_a_qr_for_another_device_pins_nothing_single_host`, `turning_networking_off_closes_an_open_pairing_window`. `crates/common-api/src/mesh.rs`: `routable_replaces_only_the_unspecified_address`.
+
+### 9.3 D3 Transport
+Built as decided: quinn 0.11.12, rustls 0.23.45 with `ring`, RFC 7250 raw public keys both ways, mutual auth, TLS 1.3 only, Ed25519 only, no X.509. In detail:
+- **The verdict is inside the handshake.** Unpinned key → alert `unknown_ca` → `peer_unauthorized`. Revoked key → `certificate_revoked` → `peer_revoked`. No stream opens. A dialler accepts only the one key it expects; another pinned key fails too.
+- **No session resumption.** No tickets, no server session cache, client resumption off. A resumed TLS 1.3 handshake skips the client verifier, so a revoked device could otherwise return with a cached ticket.
+- 0-RTT off, datagrams off. Windows: 8 MiB per stream, 64 MiB per connection, 64 bidirectional streams.
+- **QUIC Retry before TLS.** The workload endpoint answers every Initial from an unvalidated source address with a Retry. A spoofed source cannot answer it, so it costs no TLS work and no audit line.
+- Inbound admission order: Retry → TLS verifier → store check → Hello/Capabilities within 10 s → register → store check again. The last check closes a connection whose device was revoked between the handshake and registration.
+- Inbound `peer_rejected` audit lines: at most 20 per minute in one global window. The rest are counted, and the count rides on the next written line.
+- rustls's `tls12` feature **is compiled in**: reqwest (hyper-rustls) enables it. Every Common config pins TLS 1.3, and a TLS 1.2-only config cannot start a QUIC session. Section 3's "no `tls12`" holds for configs, not for the binary.
+- The workload endpoint binds `0.0.0.0:8193` only when networking is on. It is off by default. The only socket type in `common-network/src` is the quinn `Endpoint`.
+- The capture test uses an in-process UDP relay that records every datagram, not `tcpdump` (it needs sudo). The scan covers UTF-8 and UTF-16LE. Its positive control finds the canary in the plaintext frames.
+- Tests, `crates/common-network/src/tls.rs`: `spki_round_trip_and_rejects_other_algorithms`, `handshake_pinned_keys_succeeds_single_host`, `unpinned_key_rejected`, `revoked_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `server_key_not_pinned_by_client_rejected`, `wrong_alpn_fails`, `tls12_downgrade_attempt_fails`. `crates/common-network/tests/peer_transport.rs`: `network_disabled_refuses_to_listen`, `handshake_pinned_keys_succeeds_single_host`, `unpinned_key_rejected`, `revoked_key_rejected`, `revoked_key_cannot_reconnect_with_cached_session`, `revoked_during_control_handshake_is_closed`, `rejection_audit_is_rate_limited`. `crates/common-network/src/transport.rs`: `rejection_audit_lines_are_capped_per_minute`. `crates/common-network/tests/invariants.rs`: `no_plaintext_mode_exists`. `crates/common-network/src/lib.rs`: `config_default_is_off_and_scan_finds_both_encodings`. `crates/common-network/tests/remote_single_host.rs`: `packet_capture_contains_no_plaintext_prompt_single_host`, `decode_tpot_overhead_measured_single_host`.
+- No test isolates the Retry. Every handshake test against a `Node` passes through it.
+
+### 9.4 Connection dedup (not in the proposal)
+Both daemons' sync loops dial each other, so crossed dials are normal. The rule:
+- The connection initiated by the **lower `PeerId`** survives. Of two from the same initiator, the older survives.
+- Only the initiator of the losing connection retires it, and only once it holds both. So no side cuts a handshake the other is still finishing.
+- A retired connection gets no new work. It closes with code 0 at the first 500 ms check that finds no request in flight. A request already running on it finishes.
+- `Node::connect` returns the live connection instead of dialling when one exists.
+- Known limit: a request opened on the duplicate at the exact moment of an idle check fails with `peer_lost`. A GOAWAY message would fix it.
+- Tests, `crates/common-network/src/transport.rs`: `duplicates_resolve_to_the_lower_ids_connection`. `crates/common-network/tests/peer_transport.rs`: `crossed_dials_keep_one_connection_single_host`, `busy_duplicate_is_retired_not_cut_single_host`. `crates/common-api/src/mesh.rs`: `survivor_is_the_connection_the_lower_id_dialled`.
+
+### 9.5 D4 Discovery
+The record, as built:
+- Service `_common._udp.local.`. Instance = first 12 hex of the id. Host `common-<12 hex>.local.`. SRV port = workload port.
+- TXT: `v=1`, `id=<64 hex>`, `pair=0|1`, `pairport=<n>` (only while pairing), `proto=1.0`, `ts=<unix s>`, `sig`. Nothing else: no hostname beyond SRV, no models, no hardware, no user names.
+- `sig` is hex (not base64) Ed25519 over the canonical string `v=1\nid=…\nport=<SRV port>\npair=…\npairport=…\nproto=…\nts=…`. The SRV port is signed, so a replay cannot point a live entry at another port.
+- The advertiser re-signs and re-announces every 120 s, so `ts` stays fresh. A specific bind address is the only address advertised; `0.0.0.0` advertises every interface address.
+
+The browser:
+- Drops a record with an unknown version, a missing field, a bad signature, or `ts` more than 300 s from its own clock in either direction.
+- Keeps at most 256 entries and evicts stale ones. An entry for a known id at another address is replaced only by a strictly newer `ts`.
+- Never lists this device's own id (its advert comes back over multicast loopback).
+- Picks loopback and link-local addresses only when nothing else is advertised; then IPv4 before IPv6; then the lowest address.
+- Marks `trusted` only when the id is pinned here. That is a label; the TLS verifier makes the trust decision.
+- Is off when networking is off, `mdns = false`, or `COMMON_MDNS=0`.
+
+The daemon dials a pinned device at its fresh mDNS address first, then at the pinned `last_addr`. `last_addr` changes only when this device dialled that address and that dial's connection is the one in use.
+- Tests, `crates/common-network/src/discovery.rs`: `txt_sign_verify_round_trip`, `tampered_unsigned_and_foreign_records_rejected`, `stale_records_rejected_both_directions`, `disabled_config_is_inert`, `table_is_bounded_and_replays_cannot_redirect`, `pick_addr_prefers_ipv4`, `pick_addr_never_offers_loopback_or_link_local_when_a_lan_address_exists`. `crates/common-network/tests/discovery.rs`: `two_instances_discover_within_5s_single_host`, `two_processes_discover_within_5s_single_host`, `browser_never_lists_own_id_single_host`. `crates/common-api/tests/mesh.rs`: `peers_list_never_shows_this_device_as_discovered_single_host`. `crates/common-api/src/mesh.rs`: `dial_order_prefers_the_fresh_mdns_address`.
+
+### 9.6 D5 Framing, versioning, capabilities
+- Frame = `u32 BE length ‖ protobuf ControlMessage`. The 1 MiB bound is checked before allocation; the writer refuses to send more.
+- `Hello{major, minor, common_version, peer_id, nonce}`, connector first. `peer_id` must equal the TLS identity. Major must match (it is also the ALPN), else `protocol_incompatible` naming both versions. Minor = min of the two.
+- **`SignedCapabilities` over the exact bytes.** Capabilities travel as `SignedCapabilities{record, signature}`. `record` is the encoded `Capabilities` exactly as sent. `signature` is Ed25519 over `"common/1 capabilities\0" ‖ record`. The receiver checks the signature under the TLS identity over the bytes it received, then decodes, then checks `record.peer_id` equals the TLS identity. Nothing is re-encoded, so a newer minor's unknown fields still verify. The context prefix stops the signature being replayed as an mDNS or revocation signature.
+- The `Capabilities` frame is bounded at 64 KiB (`frame_too_large`); a sender refuses to build a larger one. Fields: `schema_version`, `peer_id`, `common_version`, `hardware_json` (exactly `common hardware --json`), `free_memory_bytes`, `engines` (e.g. `llama.cpp b11609 macos-arm64`), `cached_model_sha256`, `groups`, `issued_at`.
+- In `control.proto`, tag 2 (the old unsigned Capabilities) and field 10 (the old in-record signature) are reserved. `SignedCapabilities` is tag 9, so an old peer sees an unknown variant.
+- The Rust types in `proto.rs` mirror `control.proto` by hand; no generated code, no `protoc`. A test fails when a name or tag differs.
+- `Status` is defined but not sent yet. Capabilities are not refreshed after the handshake. The bulk activation frame waits for M4.
+- Tests, `crates/common-network/src/proto.rs`: `every_message_round_trips`, `frame_bound_checked_before_allocation`, `unknown_field_tolerated`, `unknown_oneof_variant_tolerated`, `control_proto_mirrors_proto_rs`. `crates/common-network/src/transport.rs`: `negotiate_major_mismatch_is_typed_and_minor_is_min`, `capabilities_signature_covers_the_bytes_sent`, `engines_names_the_pinned_build`. `crates/common-network/tests/peer_transport.rs`: `capabilities_exchanged_after_handshake`, `oversized_capability_message_rejected`, `protocol_major_mismatch_is_typed`, `minor_negotiation_is_min`, `old_new_peer_interop_single_host`.
+
+### 9.7 D6 RPC carriage
+Not built (M4). No `rpc-server` code exists. M3 built Mode B instead: one whole request on one paired device (9.10).
+
+### 9.8 D7 Health and the liveness bound
+- Defaults: keep-alive **1 s**, idle timeout **4 s** (`keep_alive_ms`, `idle_timeout_ms`).
+- Worst case, step by step. The peer dies just after its last datagram, at t0. Our next keep-alive PING goes out at most 1 s later. Sending it restarts our idle timer once (RFC 9000 §10.1: the first ack-eliciting packet sent after a receipt restarts it). Nothing comes back, so the timer fires 4 s after that. Close ≤ t0 + 1 s + 4 s = **5 s**, inside the 6 s of F-02-05.
+- The proposal's 2 s / 6 s gives 2 + 6 = 8 s worst case. 6.50 s was measured (`docs/VERIFICATION.md`), so the defaults moved.
+- A watcher samples the connection's received-datagram count once per keep-alive interval. Three intervals with nothing → `unhealthy` (about 3 s). Idle-timeout close → `reconnecting`. A deliberate close (revoked, refused, shut down) → `disconnected`.
+- Reconnect backoff 1, 2, 4, 8, 16, then 30 s. Supervision stops for good on `peer_revoked`, `peer_unauthorized` or `protocol_incompatible`. The daemon's sync loop dials every pinned device that has no connection, with the same backoff.
+- Measured in the two-daemon run: SIGKILL of a daemon noticed in 4.855 s (SINGLE-HOST).
+- Tests, `crates/common-network/src/health.rs`: `three_misses_then_unhealthy_then_recovers`, `lost_means_reconnecting_until_heartbeat`, `loss_reconnects_deliberate_close_does_not`, `backoff_doubles_and_caps_at_30s`. `crates/common-network/src/transport.rs`: `transport_config_builds_from_config`. `crates/common-network/tests/peer_transport.rs`: `kill_peer_detected_within_bound_single_host`, `sigkill_peer_process_detected_within_bound_single_host`, `partition_detected_and_recovered_single_host`, `supervise_stops_when_the_peer_refuses`.
+
+### 9.9 D7 Revocation
+Issuing (`POST /api/peers/{id}/revoke`, `common peers revoke`):
+- Remove the pin and every group membership. Append `Revocation{seq, peer_id, revoked_by, at_utc, signature}`. The signature is Ed25519 over `"common-revocation/1" ‖ seq (u64 BE) ‖ peer_id ‖ at_utc`.
+- Close every connection to the device with close code `RE`. From then on the verifier refuses its key. `pin` refuses a revoked id; only a new pairing restores it.
+
+Acceptance rules for a received record (`PeerStore::apply_revocation`), in this order:
+1. Already held → no-op, no audit line.
+2. Superseded → refused. `pin_after_pairing` moves this store's revocations of a re-paired id to `superseded`, so a replay cannot undo the re-pair.
+3. Issuer revoked here → refused. **Issuer not pinned here → refused.**
+4. Signature must verify under the issuer's key.
+5. A device revoking itself → refused. Target already revoked here → refused, so one record per target per store.
+6. **Issuer and target must share a group here.**
+
+A record that names this device is ignored. A wire record is ignored unless both ids are 32 bytes, the signature is 64 bytes and `at_utc` is at most 64 bytes.
+
+Sending rules (one control loop per connection):
+- On every new connection, offer every revocation the store holds; then each new one, local or applied from a peer.
+- Offer a record only to its audience: the devices that shared a group with the target here when it was revoked or applied. Never to the target. Never back to a peer that sent it here.
+- No audience recorded (revoked before this daemon started): offer it to any peer in one of this device's groups.
+- A finished write is not delivery. The record is offered again on every new connection until that peer sends it back. A peer that holds it ignores it silently.
+- An applied record closes the target's connections, is audited `peer_revoked` (`source: peer`) and is passed on by the same rules.
+
+Known limits: the audience map lives in memory. `seq` is per issuer, so peers always send from 0. A record this store never saw can re-revoke a re-paired device that is back in a group with the issuer (fails closed; a pairing epoch would fix it).
+- Tests, `crates/common-identity/src/lib.rs`: `revocation_round_trip`, `bad_signature_rejected`, `revoked_key_cannot_be_repinned_without_new_pairing`, `revocation_requires_issuer_and_target_in_a_common_group`, `idempotent_apply_does_not_rewrite_the_file`, `repaired_device_survives_replay_of_an_old_revocation`. `crates/common-network/tests/peer_transport.rs`: `disconnect_within_5s`. `crates/common-api/src/mesh.rs`: `revocation_fanout_offers_a_record_to_its_audience_until_it_comes_back`, `revocation_message_round_trip_and_bounds`. `crates/common-api/tests/mesh.rs`: `pairing_pins_both_sides_and_revoke_closes_the_connection_single_host`, `revocation_reaches_a_third_device_and_a_re_pair_survives_replay_single_host`, `revocation_goes_only_to_members_sharing_a_group_single_host`, `revocation_refused_once_is_offered_again_on_reconnect_single_host`. `crates/common-cli/tests/mesh_single_host.rs`: `two_installs_pair_run_remote_and_revoke_single_host`.
+
+### 9.10 Mode B, peer admission and quotas (F-06-02, F-06-04, F-06-07)
+Sending side (API `target`, `common run --peer`), in order:
+1. `PolicyEngine::evaluate` runs before admission, any load or any network activity (I-05). Local is always allowed. A peer needs privacy `trusted_group`, networking on, the peer pinned and not revoked, and a shared group that allows remote inference.
+2. The model hash comes from the local manifest, else the catalog. No hash → `model_not_found`.
+3. Use the live connection, else dial (mDNS address, then `last_addr`).
+4. Write the `remote_request` audit line, phase `sent`. If it cannot be written, nothing is sent (`io`).
+5. `generate_remote` checks the privacy string again before it opens a stream.
+6. Phase `finished` is written once, with the outcome and `request_id`, however the request ends.
+
+Serving side, per request stream, in order:
+1. At most 8 request streams per connection. The 9th gets `overloaded` without being read.
+2. `request_id` must be 1–64 safe characters.
+3. `may_serve`: networking on, `serve_peers` on, peer not revoked, pinned, and in a group allowing remote inference; and the request's `privacy` field must be `trusted_group`. A refusal sends an error frame and audits `peer_rejected`; nothing is parsed or loaded.
+4. Per-peer token buckets: 120 requests a minute, 4 at once (defaults; `config.json` `peer_quota`).
+5. The model id must be a safe name. The requested hash must equal the local manifest's. No substitution.
+6. The request is held to the local API's bounds: no raw grammar, `max_tokens ≥ 1`, temperature in [0, 2], top_p in [0, 1], at most 16 stop strings of 256 bytes, a bounded JSON schema, and this device's own timeouts.
+7. Engine capacity, never a wait: one permit of the peer share and one free engine slot. The peer share is `min(max_concurrent, engine slots − 1)`, so one slot always stays with local work and a one-slot engine serves no peers. Either missing → `overloaded`.
+8. Load, then check the loaded model's hash again.
+9. Charge the whole `max_tokens` to the 200,000 tokens-a-minute bucket.
+10. Stream. Cancel on a `Cancel` frame or when the client's send side ends for any reason.
+
+Error frames carry the code. For engine and filesystem codes the message is generic, so a peer never sees local paths.
+- Tests, `crates/common-policy/src/lib.rs`: `policy_evaluation`, `unauthorized_peer_request_refused`, `workload_only_to_group_members`, `non_member_rejected`, `may_serve_requires_serve_peers_and_network`, `default_deny`, `local_only_never_leaves_device_fuzz`, `policy_overhead_p99_under_1ms`, `token_bucket`, `peer_flood_throttled`. `crates/common-network/src/remote.rs`: `privacy_gate_lets_only_trusted_group_leave_the_device`, `request_ids_are_fresh_and_validated`, `admission_guard_releases_its_slot_on_drop`, `peer_requests_get_the_local_api_bounds`, `peers_never_see_local_paths`, `peer_share_and_engine_slots_never_wait`, `integrity_message_names_both_hashes_without_echoing_junk`. `crates/common-network/tests/remote_single_host.rs`: `remote_golden_text_single_host`, `remote_streaming_delivers_before_done`, `unauthorized_peer_is_refused`, `local_only_privacy_never_leaves_device`, `remote_cancel_stops_server_generation_within_500ms`, `peer_lost_mid_stream_is_typed`, `peer_supplied_grammar_refused_before_load`, `peer_flood_throttled_local_p95_within_20pct_single_host`. `crates/common-api/src/mesh.rs`: `peer_quota_defaults_and_partial_config`, `peers_never_get_the_last_engine_slot`, `audited_stream_records_one_outcome_whatever_ends_it`. `crates/common-api/tests/mesh.rs`: `defaults_are_local_only_and_a_peer_target_is_refused_without_any_network`, `peer_target_is_denied_before_any_connection_when_network_is_enabled`, `remote_completion_returns_golden_text_with_target_echoed_single_host`, `privacy_mode_enforced_end_to_end_single_host`, `local_only_never_leaves_device_10k_single_host`, `peer_flood_throttled_through_daemon_single_host`, `peer_request_is_refused_while_local_work_holds_every_engine_slot_single_host`.
+
+### 9.11 Audit (F-06-10)
+- `logs/audit.jsonl`, mode 0600, one JSON line per event. `record` refuses fields named `prompt`, `content`, `messages`, `api_key`, `private_key` or `pkcs8`, and any string over 2 KiB.
+- **Rotation.** At 8 MiB the file moves to `audit.1.jsonl`, then `.2`, `.3`; the oldest is dropped. The trail is bounded at about 32 MiB: retained, not append-only forever. Each new file starts with an `audit_rotated` line (`file`, `rotated_bytes`, `dropped_bytes`), so a drop is always visible.
+- Kinds a peer cannot produce at will (`pairing_started`, `pairing_succeeded`, `pairing_locked`, `peer_revoked`, `peer_removed`, `privacy_changed`, `network_changed`, `group_updated`) are also copied to `audit.security.jsonl`, rotated on its own. A flood of refused requests cannot rotate them away. `tail` merges them back.
+- Events built: `pairing_{started,succeeded,failed,locked}`, `peer_{connected,rejected,disconnected,revoked,removed}`, `remote_request`, `privacy_changed`, `network_changed`, `group_updated`, `audit_rotated`. `session_*` and `rpc_tunnel_*` wait for M4. A request that policy stops on the sending side writes no line: nothing left the device.
+- Tests, `crates/common-observability/src/lib.rs`: `audit_record_and_tail`, `audit_rejects_content_bearing_fields`, `rotation_keeps_three_files_and_0600`, `tail_reads_across_rotation`, `security_trail_survives_a_request_flood`, `tail_adds_back_security_copies_rotated_away`, `tail_is_bounded_on_a_large_file`, `concurrent_appends_survive_rotation`, `diagnostics_bundle_redacted`.
+
+### 9.12 Error and close codes
+- Error codes as proposed: `peer_unauthorized` (403), `peer_revoked` (403), `pairing_failed` (401), `pairing_locked` (429), `peer_lost` (502), `protocol_incompatible` (426), `frame_too_large` (413).
+- QUIC application close codes: `RE` 0x5245 revoked, `UA` 0x5541 unauthorized, `PV` 0x5056 protocol, `FT` 0x4654 frame too large, `PF` 0x5046 pairing failed, `PL` 0x504C pairing locked, 0 normal.
+- Tests, `crates/common-network/src/transport.rs`: `connection_errors_map_to_stable_codes`. `crates/common-network/src/remote.rs`: `error_codes_round_trip_through_their_strings`.
+
+### 9.13 Desktop: dev-only daemon URL
+- `?daemon=http://127.0.0.1:<port>` (or `http://localhost:<port>`) points one browser tab at another local daemon, so two tabs can drive two daemons in SINGLE-HOST UI testing.
+- Only plain `http`, only those two hosts, only a port in 1–65535, no path or query. Anything else is ignored.
+- Only when `import.meta.env.DEV` is true. Production builds compile it out and ask the Tauri shell (`daemon_info`). Diagnostics labels a chosen URL "development only".
+- Tests: `apps/desktop/src/test/devdaemon.test.tsx` (suites `devDaemonUrl` and `app with ?daemon=`).
+
+### 9.14 Where the code differs from sections 2–8
+| Proposal | Built |
+|---|---|
+| keep-alive 2 s, idle 6 s | 1 s and 4 s; worst case 5 s (9.8) |
+| SQLite `peers` / `revoked` tables | `identity/peers.json` + `peers.json.lock` (9.1) |
+| mDNS `sig` base64 over the other TXT values | hex over a canonical string that includes the SRV port (9.5) |
+| `signature` field inside `Capabilities` | `SignedCapabilities` envelope over the exact bytes (9.6) |
+| generated prost code via `scripts/gen_proto.sh` | hand-mirrored `proto.rs`, checked by a test (9.6) |
+| rustls without `tls12` | `tls12` compiled in through reqwest; every config pins TLS 1.3 (9.3) |
+| `Status` every 10 s | defined, not sent (9.6) |
+| any group member may revoke any other | issuer pinned here and sharing a group with the target here (9.9) |
+| one connection assumed per peer | crossed dials resolved by the lower-id rule (9.4) |
+| `tcpdump` capture | in-process UDP relay capture (9.3) |
+| D6 RPC carriage | not built; Mode B instead (9.7, 9.10) |
+| test names in section 5 | the names in this section (e.g. `downgrade_attempt_fails` is `tls12_downgrade_attempt_fails`) |
+
+### 9.15 Still open
+- **Two-machine evidence (B-002).** Everything above ran on one Mac. Real LAN mDNS, Wi-Fi jitter against the 4 s idle timeout, and a kernel packet capture on a LAN interface are untested.
+- **`tls12` compiled in** through reqwest. No Common config enables it, but nothing in the build stops a future config from doing so.
+- **`spake2` 0.4.0** is unaudited and, by its own statement, probably not constant-time. One-time 120 s codes, the lockout and transcript-only use limit the exposure. Track 0.5.
+- No test isolates the QUIC Retry. The pairing endpoint has no Retry.
+- Private key bytes are not zeroized in memory.
+- The `peer_rejected` cap is one global window, so a flood hides other rejections for that minute (the count is kept).
+- The revocation audience map is in memory (9.9).
+- The QR carries one address; a multi-homed host may pick the wrong LAN.

@@ -5,6 +5,14 @@
 //! token strings or key material: `record` refuses fields whose keys could carry them and any
 //! string longer than 2 KiB. Every string of the diagnostics bundle passes through `redact`, the
 //! single place that knows the secret patterns, and a test scans the result.
+//!
+//! Retention: at 8 MiB `audit.jsonl` rotates to `audit.1.jsonl` (then `.2`, `.3`; the oldest is
+//! dropped), so the trail is bounded at about 32 MiB: retained, not append-only forever. Every
+//! rotation opens the fresh file with an `audit_rotated` line (`file`, `rotated_bytes`,
+//! `dropped_bytes`), so a drop is always visible. `SECURITY_KINDS` (pairing, revocation, settings)
+//! are also copied to `audit.security.jsonl`, rotated on its own, so a paired device flooding
+//! refused requests rotates away request history only; `tail` adds those copies back once
+//! `audit.jsonl` no longer holds them. `tail` reads backwards across the files.
 
 use common_core::{CommonError, Paths, Result};
 use serde::{Deserialize, Serialize};
@@ -29,10 +37,36 @@ pub const FORBIDDEN_FIELD_KEYS: &[&str] = &["prompt", "content", "messages", "ap
 /// Longest string value an audit field may hold; prompts and keys are longer, ids and reasons are not.
 pub const MAX_FIELD_STRING: usize = 2048;
 
+/// A trail rotates once an append leaves its live file at least this large.
+pub const AUDIT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+/// Rotated files kept per trail: `audit.1.jsonl` (newest) to `audit.3.jsonl` (oldest).
+pub const AUDIT_ROTATED_FILES: usize = 3;
+/// Kinds also copied to `audit.security.jsonl`. Only kinds a remote device cannot produce at
+/// will: owner actions and revocations (bounded by the pinned set). Kinds a peer can trigger
+/// repeatedly (`peer_rejected`, `remote_request`, `peer_connected`, `pairing_failed`, ...) are not,
+/// or a flood would rotate that file away too.
+pub const SECURITY_KINDS: &[&str] = &[
+    "pairing_started",
+    "pairing_succeeded",
+    "pairing_locked",
+    "peer_revoked",
+    "peer_removed",
+    "privacy_changed",
+    "network_changed",
+    "group_updated",
+];
+/// `tail` reads each file backwards in blocks of this size.
+const TAIL_BLOCK: u64 = 64 * 1024;
+
 pub struct Audit {
+    /// `audit.jsonl`: every event.
     pub path: PathBuf,
+    /// `audit.security.jsonl`: a copy of the `SECURITY_KINDS` events, rotated on its own.
+    pub security_path: PathBuf,
     // ponytail: one process-wide lock serialises appends; O_APPEND keeps lines whole across processes.
     lock: Mutex<()>,
+    /// `AUDIT_ROTATE_BYTES`; tests lower it.
+    pub(crate) rotate_at: u64,
 }
 
 impl Audit {
@@ -40,12 +74,14 @@ impl Audit {
         std::fs::create_dir_all(paths.logs())?;
         Ok(Audit {
             path: paths.logs().join("audit.jsonl"),
+            security_path: paths.logs().join("audit.security.jsonl"),
             lock: Mutex::new(()),
+            rotate_at: AUDIT_ROTATE_BYTES,
         })
     }
-    /// Append one JSON line (0600 file). Rejects events whose fields contain keys named like
-    /// `prompt`, `content`, `messages`, `api_key`, `private_key`, `pkcs8` (at any depth) or any
-    /// string value longer than 2 KiB, with `InvalidRequest`.
+    /// Append one JSON line (0600 file), plus its copy for `SECURITY_KINDS`. Rejects events whose
+    /// fields contain keys named like `prompt`, `content`, `messages`, `api_key`, `private_key`,
+    /// `pkcs8` (at any depth) or any string value longer than 2 KiB, with `InvalidRequest`.
     pub fn record(&self, kind: &str, peer_id: Option<&str>, fields: serde_json::Value) -> Result<()> {
         if kind.trim().is_empty() || kind.len() > 64 {
             return Err(CommonError::invalid("audit kind must be 1..=64 characters"));
@@ -63,34 +99,175 @@ impl Audit {
         let mut line = serde_json::to_string(&event)?;
         line.push('\n');
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut opts = std::fs::OpenOptions::new();
-        opts.append(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+        self.append(&self.path, &line)?;
+        if SECURITY_KINDS.contains(&kind) {
+            self.append(&self.security_path, &line)?;
         }
-        let mut f = opts.open(&self.path)?;
-        tighten_mode(&self.path)?;
-        f.write_all(line.as_bytes())?;
         Ok(())
     }
-    /// The last `n` events, oldest first. Lines that do not parse (a torn write) are skipped.
-    pub fn tail(&self, n: usize) -> Result<Vec<AuditEvent>> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+
+    fn append(&self, path: &Path, line: &str) -> Result<()> {
+        let mut f = open_append(path)?;
+        f.write_all(line.as_bytes())?;
+        if f.metadata()?.len() >= self.rotate_at {
+            drop(f);
+            // The line is written; a failed rotation only lets the file grow, so it is not an error.
+            if let Err(e) = self.rotate(path) {
+                tracing::warn!(error = %e.message, "audit rotation failed; the live file keeps growing");
+            }
+        }
+        Ok(())
+    }
+
+    /// `X.2` -> `X.3` (old `.3` dropped), `X.1` -> `X.2`, `X.jsonl` -> `X.1`, then a fresh 0600
+    /// `X.jsonl` that opens with an `audit_rotated` line naming the bytes rotated and dropped.
+    // ponytail: appends stay lock-free O_APPEND writes on a file opened per record; only rotation
+    // takes the trail's `X.jsonl.lock` flock and re-checks the size under it, so two processes (daemon +
+    // CLI) crossing the threshold together rotate once. A writer that opened `audit.jsonl` just before
+    // a rotation writes into the renamed inode, i.e. `audit.1.jsonl`: never lost, though lines at the
+    // seam may be slightly out of order. Ceiling: that line is dropped only if its writer stalls
+    // between open and write through three more rotations (24 MiB); writers other than `Audit` are
+    // not coordinated (advisory lock). Upgrade: hold the flock across every append.
+    fn rotate(&self, path: &Path) -> Result<()> {
+        let lock = open_append(&path.with_extension("jsonl.lock"))?;
+        lock.lock()?;
+        let rotated_bytes = match std::fs::metadata(path) {
+            Ok(m) if m.len() >= self.rotate_at => m.len(),
+            Ok(_) => return Ok(()), // another handle or process rotated first
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let mut events: Vec<AuditEvent> = text
-            .lines()
-            .rev()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .take(n)
-            .collect();
-        events.reverse();
-        Ok(events)
+        let dropped_bytes = std::fs::metadata(rotated(path, AUDIT_ROTATED_FILES)).map_or(0, |m| m.len());
+        for i in (1..AUDIT_ROTATED_FILES).rev() {
+            match std::fs::rename(rotated(path, i), rotated(path, i + 1)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        std::fs::rename(path, rotated(path, 1))?;
+        let marker = AuditEvent {
+            ts_utc: utc_now(),
+            kind: "audit_rotated".into(),
+            peer_id: None,
+            fields: serde_json::json!({
+                "file": path.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                "rotated_bytes": rotated_bytes,
+                "dropped_bytes": dropped_bytes,
+            }),
+        };
+        let mut line = serde_json::to_string(&marker)?;
+        line.push('\n');
+        open_append(path)?.write_all(line.as_bytes())?;
+        Ok(())
     }
+
+    /// The last `n` events, oldest first, continuing into `audit.1.jsonl`.. when the live file
+    /// holds fewer. When all of `audit.jsonl` holds fewer than `n`, the `audit.security.jsonl`
+    /// copies older than its oldest line (rotated away) come first. Files are read backwards in
+    /// blocks, so the cost follows `n`, not the file size. Lines that do not parse are skipped.
+    // ponytail: a rotation racing this read can repeat or skip lines at the file seam; tail is a
+    // snapshot for people and the bundle. Take the rotation flock here if an exact window matters.
+    // ponytail: "rotated away" is decided by `ts_utc` (one-second resolution) and, within the
+    // oldest second, by equality with a kept line; a wall clock stepped backwards can show a copy
+    // twice. A sequence number per line if that ever matters.
+    pub fn tail(&self, n: usize) -> Result<Vec<AuditEvent>> {
+        let mut out = tail_trail(&self.path, n)?; // newest first
+        if out.len() < n {
+            let oldest = out.last().map(|e| e.ts_utc.clone());
+            let copies_kept = out.iter().filter(|e| SECURITY_KINDS.contains(&e.kind.as_str())).count();
+            let rotated_away: Vec<AuditEvent> =
+                tail_trail(&self.security_path, (n - out.len()).saturating_add(copies_kept))?
+                    .into_iter()
+                    .filter(|e| {
+                        oldest
+                            .as_ref()
+                            .is_none_or(|o| e.ts_utc < *o || (e.ts_utc == *o && !out.contains(e)))
+                    })
+                    .collect();
+            let room = n - out.len();
+            out.extend(rotated_away.into_iter().take(room));
+        }
+        out.reverse();
+        Ok(out)
+    }
+}
+
+/// `X.N.jsonl` for `X.jsonl` (1 = newest).
+fn rotated(path: &Path, n: usize) -> PathBuf {
+    path.with_extension(format!("{n}.jsonl"))
+}
+
+/// The last `n` events of one trail (`path`, then `.1.jsonl`..), newest first.
+fn tail_trail(path: &Path, n: usize) -> Result<Vec<AuditEvent>> {
+    let mut out = Vec::new();
+    for i in 0..=AUDIT_ROTATED_FILES {
+        if out.len() >= n {
+            break;
+        }
+        let file = if i == 0 { path.to_path_buf() } else { rotated(path, i) };
+        tail_file(&file, n, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Push events from the end of `path` onto `out` (newest first) until it holds `n`; a missing file
+/// adds nothing. Returns the bytes read.
+fn tail_file(path: &Path, n: usize, out: &mut Vec<AuditEvent>) -> Result<u64> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    let mut pos = f.metadata()?.len();
+    let mut read = 0;
+    // The text before the first newline of the block read last: a line that starts further back.
+    let mut carry = Vec::new();
+    while pos > 0 && out.len() < n {
+        let step = pos.min(TAIL_BLOCK);
+        pos -= step;
+        let mut buf = vec![0; step as usize];
+        f.seek(SeekFrom::Start(pos))?;
+        f.read_exact(&mut buf)?;
+        read += step;
+        buf.extend_from_slice(&carry);
+        let complete_from = if pos == 0 {
+            0
+        } else {
+            match buf.iter().position(|&b| b == b'\n') {
+                Some(i) => i + 1,
+                None => {
+                    carry = buf; // one line longer than a block
+                    continue;
+                }
+            }
+        };
+        for line in buf[complete_from..].rsplit(|&b| b == b'\n') {
+            if out.len() >= n {
+                break;
+            }
+            if let Ok(e) = serde_json::from_slice(line) {
+                out.push(e);
+            }
+        }
+        buf.truncate(complete_from.saturating_sub(1));
+        carry = buf;
+    }
+    Ok(read)
+}
+
+/// Open for append, creating it 0600.
+fn open_append(path: &Path) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let f = opts.open(path)?;
+    tighten_mode(&f)?;
+    Ok(f)
 }
 
 fn check_fields(v: &serde_json::Value) -> Result<()> {
@@ -112,16 +289,17 @@ fn check_fields(v: &serde_json::Value) -> Result<()> {
     }
 }
 
-/// Force 0600 on an existing file (older builds, copies, umask).
-fn tighten_mode(path: &Path) -> Result<()> {
+/// Force 0600 on an existing file (older builds, copies, umask). By handle: the path may be
+/// mid-rotation.
+fn tighten_mode(f: &std::fs::File) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(path)?.permissions().mode() & 0o777 != 0o600 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        if f.metadata()?.permissions().mode() & 0o777 != 0o600 {
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
     }
-    let _ = path;
+    let _ = f;
     Ok(())
 }
 
@@ -458,6 +636,298 @@ mod tests {
         std::fs::set_permissions(&a.path, std::fs::Permissions::from_mode(0o644)).unwrap();
         a.record("y", None, json!({})).unwrap();
         assert_eq!(mode(&a.path), 0o600, "tightened on the next append");
+    }
+
+    /// The `i` of every event but the rotation markers.
+    fn ids(events: &[AuditEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter(|e| e.kind != "audit_rotated")
+            .map(|e| e.fields["i"].as_u64().unwrap())
+            .collect()
+    }
+
+    fn markers(events: &[AuditEvent]) -> Vec<&AuditEvent> {
+        events.iter().filter(|e| e.kind == "audit_rotated").collect()
+    }
+
+    #[test]
+    fn rotation_keeps_three_files_and_0600() {
+        let (_t, p) = paths();
+        let mut a = Audit::open(&p).unwrap();
+        a.rotate_at = 1024;
+        let mut i = 0;
+        while !rotated(&a.path, 1).exists() {
+            a.record("tick", None, json!({ "i": i })).unwrap();
+            i += 1;
+        }
+        // The fresh audit.jsonl holds only the marker: what rotated, nothing dropped yet.
+        let fresh = a.tail(1).unwrap();
+        assert_eq!(std::fs::read_to_string(&a.path).unwrap().lines().count(), 1);
+        assert_eq!(fresh[0].kind, "audit_rotated");
+        assert_eq!(fresh[0].fields["file"], "audit.jsonl");
+        assert_eq!(
+            fresh[0].fields["rotated_bytes"].as_u64(),
+            Some(std::fs::metadata(rotated(&a.path, 1)).unwrap().len())
+        );
+        assert_eq!(fresh[0].fields["dropped_bytes"], 0);
+        while i < 200 {
+            a.record("tick", None, json!({ "i": i })).unwrap();
+            i += 1;
+        }
+        for n in 1..=3 {
+            let len = std::fs::metadata(rotated(&a.path, n)).unwrap().len();
+            assert!((1024..1024 + 128).contains(&len), "audit.{n}.jsonl is {len} bytes");
+        }
+        let mut names: Vec<String> = std::fs::read_dir(p.logs())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "audit.1.jsonl",
+                "audit.2.jsonl",
+                "audit.3.jsonl",
+                "audit.jsonl",
+                "audit.jsonl.lock"
+            ]
+        );
+        #[cfg(unix)]
+        for name in &names {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(p.logs().join(name)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+        // What is kept is contiguous and ends at the newest line; the oldest were dropped, and the
+        // markers that open each kept file say so.
+        let all = a.tail(usize::MAX).unwrap();
+        let kept = ids(&all);
+        assert_eq!(*kept.last().unwrap(), 199);
+        assert!(kept[0] > 0, "oldest lines dropped: {kept:?}");
+        assert!(kept.windows(2).all(|w| w[1] == w[0] + 1), "{kept:?}");
+        let marks = markers(&all);
+        assert_eq!(marks.len(), 4, "one marker opens each kept file");
+        assert_eq!(
+            all[0].kind, "audit_rotated",
+            "the oldest kept file starts with its marker"
+        );
+        assert!(
+            marks
+                .iter()
+                .all(|m| m.fields["dropped_bytes"].as_u64().unwrap() >= 1024),
+            "{marks:?}"
+        );
+    }
+
+    #[test]
+    fn tail_reads_across_rotation() {
+        let (_t, p) = paths();
+        let mut a = Audit::open(&p).unwrap();
+        a.rotate_at = 512;
+        for i in 0..30 {
+            a.record("tick", None, json!({ "i": i })).unwrap();
+        }
+        assert!(rotated(&a.path, 2).exists());
+        let live = std::fs::read_to_string(&a.path).unwrap().lines().count();
+        assert!(live < 20, "live file holds {live} lines");
+        let tail = a.tail(20).unwrap();
+        assert_eq!(tail.len(), 20);
+        let ticks = ids(&tail);
+        assert_eq!(*ticks.last().unwrap(), 29);
+        assert!(ticks.windows(2).all(|w| w[1] == w[0] + 1), "{ticks:?}");
+        assert!(!markers(&tail).is_empty(), "the window spans a rotation");
+        assert!(a.tail(0).unwrap().is_empty());
+        // Right after a rotation the live file holds only its marker; tail continues into .1.
+        let mut i = 30;
+        loop {
+            a.record("tick", None, json!({ "i": i })).unwrap();
+            i += 1;
+            if std::fs::read_to_string(&a.path).unwrap().lines().count() == 1 {
+                break;
+            }
+        }
+        let tail = a.tail(3).unwrap();
+        assert_eq!(ids(&tail), [i - 2, i - 1]);
+        assert_eq!(tail[2].kind, "audit_rotated");
+        // A torn last line in the live file is skipped.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&a.path)
+            .unwrap()
+            .write_all(b"{\"ts_utc\":\"2026")
+            .unwrap();
+        assert_eq!(ids(&a.tail(3).unwrap()), [i - 2, i - 1]);
+    }
+
+    /// F-06-10 retention: a paired device that floods refused requests rotates away request history
+    /// only. Pairing, privacy and revocation lines keep their copy, and audit.jsonl says what it
+    /// dropped.
+    #[test]
+    fn security_trail_survives_a_request_flood() {
+        let (_t, p) = paths();
+        let mut a = Audit::open(&p).unwrap();
+        a.rotate_at = 4096;
+        let peer = "ab".repeat(32);
+        let security = ["pairing_succeeded", "privacy_changed", "peer_revoked"];
+        for kind in security {
+            a.record(kind, Some(&peer), json!({ "source": "local" })).unwrap();
+        }
+        for i in 0..5000 {
+            a.record(
+                "peer_rejected",
+                Some(&peer),
+                json!({ "reason": "policy_denied", "request_id": format!("r{i}") }),
+            )
+            .unwrap();
+        }
+        let in_file: Vec<String> = std::fs::read_to_string(&a.security_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<AuditEvent>(l).unwrap().kind)
+            .collect();
+        assert_eq!(in_file, security, "the copy holds only its kinds, all of them");
+        assert!(!rotated(&a.security_path, 1).exists(), "the flood never rotated it");
+        let in_requests = (0..=AUDIT_ROTATED_FILES)
+            .map(|i| if i == 0 { a.path.clone() } else { rotated(&a.path, i) })
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .any(|t| t.contains("pairing_succeeded"));
+        assert!(!in_requests, "the flood rotated them out of audit.jsonl");
+
+        let all = a.tail(usize::MAX).unwrap();
+        let kinds: Vec<&str> = all.iter().take(3).map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, security, "tail still shows them, oldest first");
+        assert_eq!(all.iter().filter(|e| e.kind == "peer_revoked").count(), 1);
+        let first_kept = all.iter().find(|e| e.kind == "peer_rejected").unwrap();
+        assert_ne!(first_kept.fields["request_id"], "r0", "the request trail did rotate");
+        assert_eq!(all.last().unwrap().fields["request_id"], "r4999");
+        let marks = markers(&all);
+        assert!(
+            marks
+                .iter()
+                .any(|m| m.fields["file"] == "audit.jsonl" && m.fields["dropped_bytes"].as_u64() > Some(0)),
+            "the drop is recorded: {marks:?}"
+        );
+    }
+
+    /// `tail` answers from `audit.jsonl` alone while it holds `n`; past its oldest line it adds the
+    /// security copies rotated away, older first, and never one it still holds.
+    #[test]
+    fn tail_adds_back_security_copies_rotated_away() {
+        let (_t, p) = paths();
+        let a = Audit::open(&p).unwrap();
+        let write = |path: &Path, lines: &[(u64, &str, u64)]| {
+            let text: String = lines
+                .iter()
+                .map(|(sec, kind, i)| {
+                    let e = AuditEvent {
+                        ts_utc: format_utc(1_700_000_000 + sec),
+                        kind: kind.to_string(),
+                        peer_id: None,
+                        fields: json!({ "i": i }),
+                    };
+                    serde_json::to_string(&e).unwrap() + "\n"
+                })
+                .collect();
+            std::fs::write(path, text).unwrap();
+        };
+        // audit.jsonl kept from second 5 on; pairing (3) and privacy (5, before the kept revocation)
+        // were rotated away.
+        write(&a.path, &[(5, "peer_revoked", 5), (6, "tick", 6)]);
+        write(
+            &a.security_path,
+            &[
+                (3, "pairing_succeeded", 3),
+                (5, "privacy_changed", 4),
+                (5, "peer_revoked", 5),
+            ],
+        );
+        assert_eq!(ids(&a.tail(10).unwrap()), [3, 4, 5, 6]);
+        assert_eq!(ids(&a.tail(3).unwrap()), [4, 5, 6]);
+        assert_eq!(ids(&a.tail(2).unwrap()), [5, 6], "audit.jsonl alone answers");
+        std::fs::remove_file(&a.path).unwrap();
+        assert_eq!(ids(&a.tail(10).unwrap()), [3, 4, 5], "copies alone");
+        // Nothing rotated away: each security event shows once, in written order.
+        let (_t, p) = paths();
+        let a = Audit::open(&p).unwrap();
+        a.record("tick", None, json!({ "i": 0 })).unwrap();
+        a.record("pairing_started", None, json!({ "i": 1 })).unwrap();
+        a.record("tick", None, json!({ "i": 2 })).unwrap();
+        assert_eq!(ids(&a.tail(usize::MAX).unwrap()), [0, 1, 2]);
+        assert_eq!(std::fs::read_to_string(&a.security_path).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn tail_is_bounded_on_a_large_file() {
+        let (_t, p) = paths();
+        let a = Audit::open(&p).unwrap();
+        // ~20 MiB written directly: `record` would rotate at 8 MiB.
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&a.path).unwrap());
+        let (mut n, mut len) = (0u64, 0usize);
+        while len < 20 << 20 {
+            let line =
+                format!("{{\"ts_utc\":\"2026-01-01T00:00:00Z\",\"kind\":\"filler\",\"fields\":{{\"i\":{n}}}}}\n");
+            w.write_all(line.as_bytes()).unwrap();
+            len += line.len();
+            n += 1;
+        }
+        w.flush().unwrap();
+        drop(w);
+
+        let t0 = std::time::Instant::now();
+        let tail = a.tail(5).unwrap();
+        let took = t0.elapsed();
+        eprintln!("tail(5) of a {len}-byte audit file: {took:?}");
+        assert_eq!(ids(&tail), (n - 5..n).collect::<Vec<_>>());
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+        let read = tail_file(&a.path, 5, &mut Vec::new()).unwrap();
+        assert!(read <= TAIL_BLOCK, "tail(5) read {read} of {len} bytes");
+        // Lines across block seams are stitched whole: 3000 events span several blocks.
+        assert_eq!(ids(&a.tail(3000).unwrap()), (n - 3000..n).collect::<Vec<_>>());
+    }
+
+    /// Two handles with separate in-process locks stand in for two processes (daemon + CLI): the
+    /// rotation flock is per open file, so they exclude each other exactly as processes would.
+    #[test]
+    fn concurrent_appends_survive_rotation() {
+        let (_t, p) = paths();
+        let mut a = Audit::open(&p).unwrap();
+        let mut b = Audit::open(&p).unwrap();
+        // ~74-byte lines, 2000 of them: three rotations, below the four files kept, so none is dropped.
+        a.rotate_at = 48 * 1024;
+        b.rotate_at = 48 * 1024;
+        const PER: u64 = 1000;
+        std::thread::scope(|s| {
+            for (h, w) in [(&a, "a"), (&b, "b")] {
+                s.spawn(move || {
+                    for i in 0..PER {
+                        h.record("tick", None, json!({ "w": w, "i": i })).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(rotated(&a.path, 2).exists(), "rotated at least twice");
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..=AUDIT_ROTATED_FILES {
+            let path = if i == 0 { a.path.clone() } else { rotated(&a.path, i) };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let e: AuditEvent = serde_json::from_str(line).expect("whole lines only");
+                if e.kind == "audit_rotated" {
+                    assert_eq!(e.fields["dropped_bytes"], 0, "nothing dropped: {line}");
+                    continue;
+                }
+                let key = (
+                    e.fields["w"].as_str().unwrap().to_string(),
+                    e.fields["i"].as_u64().unwrap(),
+                );
+                assert!(seen.insert(key), "line written twice: {line}");
+            }
+        }
+        assert_eq!(seen.len() as u64, 2 * PER, "every line accounted for");
     }
 
     #[test]

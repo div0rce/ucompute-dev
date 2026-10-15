@@ -15,14 +15,16 @@ Two views talk to the peer-networking API from ADR-0003; both default to the saf
 
 - **Peers** (`#/peers`, F-10-05): the networking switch (off by default; `GET/PUT /api/network`), this device's
   id as 8 groups of 8 hex plus its `xxxx-xxxx-xxxx` label, "Pair this device" (shows the six-digit code large,
-  the QR payload as text, a countdown, and polls `GET /api/pair/status` until `result` holds `{peer}` or
+  the `pair_addr` to type into the other device's Join form (just the port on daemons without it), the QR
+  payload as text, a countdown, and polls `GET /api/pair/status` until `result` holds `{peer}` or
   `{error}`), "Join a device" (address + code, or the pasted `common-pair:v1:...` text alone; a wrong code shows
   the `pairing_failed` text, a lockout shows `pairing_locked`), the paired list with connection state (the
   daemon's `connected`, or `health` when a daemon reports heartbeats), groups, revoke and remove (both confirmed
   inline), household groups and their two policy switches (`GET /api/groups`; `PUT /api/groups` upserts one
   group and returns the list), and devices seen on the network but not trusted, whose only action is "Pair"
-  (it prefills the join form with the host and `pair_port` of the advertised pairing window). No QR image is
-  drawn; the payload is shown as text.
+  (it prefills the join form with the host and `pair_port` of the advertised pairing window). This device's own
+  id (`GET /api/network` `peer_id`) is never listed there, even if mDNS reports its own advert. The code field
+  ignores spaces, so a pasted `482 913` works. No QR image is drawn; the payload is shown as text.
 - **Privacy** (`#/privacy`, F-10-10): local only / trusted devices / public (disabled, "coming later"). Leaving
   local-only shows the disclosure returned by `GET /api/privacy` and requires the acknowledge checkbox before
   `PUT /api/privacy {mode, acknowledged}`. The current mode is the pill under the app name on every screen.
@@ -63,10 +65,45 @@ To run the actual desktop window in development (needs the Rust toolchain and a 
 compile) use `pnpm tauri dev`. With a daemon already serving on 8192 the shell does not spawn a sidecar, so
 the sidecar binary is not needed for `tauri dev`.
 
+## Two daemons on one Mac (SINGLE-HOST UI testing)
+
+Everything here is **SINGLE-HOST**: two Common daemons on one machine. It exercises the UI, pairing and policy
+flows; it never stands in for two physical devices (`docs/BLOCKERS.md` B-002).
+
+Start two daemons from the repo root, each with its own `COMMON_HOME` (the identity key lives there; two daemons
+sharing one home would be the same device) and its own API and peer ports:
+
+```sh
+mkdir -p /tmp/common-a /tmp/common-b
+COMMON_HOME=/tmp/common-a cargo run -p common-cli -- serve --port 18301 --listen-port 18401 --listen-addr 127.0.0.1
+COMMON_HOME=/tmp/common-b cargo run -p common-cli -- serve --port 18302 --listen-port 18402 --listen-addr 127.0.0.1
+```
+
+`--listen-addr 127.0.0.1` keeps the peer endpoint on loopback, so the pairing address shown is `127.0.0.1:<port>`.
+Without it the endpoint binds every interface (the product default) and the address shown is the Mac's LAN IP.
+For remote inference the serving home needs a model; link or copy one from `.common/models` and symlink
+`.common/backends` rather than downloading again.
+
+Then `pnpm dev` and open two tabs on the dev server, one per daemon:
+
+- `http://localhost:1420/?daemon=http://127.0.0.1:18301`
+- `http://localhost:1420/?daemon=http://127.0.0.1:18302`
+
+Use `localhost:1420`, not `127.0.0.1:1420`: the daemon only accepts browser requests from the origins in its
+`cors_origins` list. `?daemon=` accepts only `http://127.0.0.1:<port>` or `http://localhost:<port>`; anything
+else is ignored and the tab uses the default daemon. Diagnostics shows which daemon a tab talks to. Production
+builds ignore the parameter entirely (`import.meta.env.DEV` is false and the code is compiled out).
+
+To pair: turn networking on in both tabs, press "Pair this device" in tab A, then in tab B type the address shown
+under A's code into Address and the six digits into Code (or press "Pair" next to A under "Nearby, not paired"
+when mDNS sees it). Both tabs share one origin, so they share `localStorage` (device name, chat history): each tab
+keeps what it loaded, and a reload picks up the last write from either, so set the device name in each tab after
+loading it.
+
 ## Checks
 
 ```sh
-pnpm test         # vitest: API client, error-table sync with error.rs, axe scan, keyboard-only flows, pairing, privacy
+pnpm test         # vitest: API client, error-table sync with error.rs, axe scan, keyboard-only flows, pairing, privacy, ?daemon=
 pnpm build        # tsc + vite build -> dist/
 cargo check -p common-desktop   # from the repo root; the Tauri shell
 ```

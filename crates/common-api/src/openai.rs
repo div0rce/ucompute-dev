@@ -128,70 +128,14 @@ fn json_schema_of(rf: Option<&Value>) -> Result<Option<Value>> {
                     "response_format.json_schema.schema must be a JSON schema object",
                 ));
             }
-            check_schema(schema)?;
+            // F-01-12 bounds, shared with what a peer may send (`common_runtime::schema`).
+            common_runtime::schema::check_schema(schema)?;
             Ok(Some(schema.clone()))
         }
         Some(other) => Err(CommonError::invalid(format!(
             "unsupported response_format type {other:?}"
         ))),
     }
-}
-
-/// Bounds on an untrusted JSON schema before it reaches the engine's schema->grammar converter
-/// (F-01-12: pathological grammars are refused here, in microseconds, not compiled there).
-const SCHEMA_MAX_BYTES: usize = 64 * 1024;
-const SCHEMA_MAX_DEPTH: usize = 32;
-/// Largest `{n,m}` quantifier, `minItems`/`maxLength`/... value and `pattern` length accepted.
-const SCHEMA_MAX_REPEAT: u64 = 1024;
-
-fn check_schema(schema: &Value) -> Result<()> {
-    if schema.to_string().len() > SCHEMA_MAX_BYTES {
-        return Err(CommonError::invalid(format!(
-            "response_format schema exceeds {SCHEMA_MAX_BYTES} bytes"
-        )));
-    }
-    check_schema_node(schema, 0)
-}
-
-// ponytail: keyword checks apply to any object key, so a *property* literally named `pattern`
-// with a long string value is refused too; use a real JSON-schema walker if that ever bites.
-fn check_schema_node(v: &Value, depth: usize) -> Result<()> {
-    if depth > SCHEMA_MAX_DEPTH {
-        return Err(CommonError::invalid(format!(
-            "response_format schema nests deeper than {SCHEMA_MAX_DEPTH} levels"
-        )));
-    }
-    match v {
-        Value::Object(map) => {
-            for (k, val) in map {
-                match (k.as_str(), val) {
-                    ("$ref", Value::String(r)) if !r.starts_with('#') => return Err(CommonError::invalid("response_format schema: only local $ref (#/...) is supported")),
-                    ("pattern", Value::String(p)) if p.len() as u64 > SCHEMA_MAX_REPEAT || pattern_repeat_too_large(p) => {
-                        return Err(CommonError::invalid(format!("response_format schema: pattern longer than {SCHEMA_MAX_REPEAT} or with a repetition above {SCHEMA_MAX_REPEAT}")))
-                    }
-                    ("minItems" | "maxItems" | "minLength" | "maxLength" | "minProperties" | "maxProperties" | "minContains" | "maxContains", Value::Number(n)) if n.as_u64().is_none_or(|n| n > SCHEMA_MAX_REPEAT) => {
-                        return Err(CommonError::invalid(format!("response_format schema: {k} must be an integer in 0..={SCHEMA_MAX_REPEAT}")))
-                    }
-                    _ => check_schema_node(val, depth + 1)?,
-                }
-            }
-        }
-        Value::Array(items) => {
-            for i in items {
-                check_schema_node(i, depth + 1)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// True when a regex `{n}` / `{n,}` / `{n,m}` quantifier names a count above `SCHEMA_MAX_REPEAT`.
-fn pattern_repeat_too_large(p: &str) -> bool {
-    p.split('{').skip(1).filter_map(|rest| rest.split('}').next()).any(|q| {
-        q.split(',')
-            .any(|n| n.trim().parse::<u64>().is_ok_and(|n| n > SCHEMA_MAX_REPEAT))
-    })
 }
 
 #[derive(Deserialize)]
@@ -969,9 +913,6 @@ mod tests {
         // Reasonable schemas pass: local refs, bounded repetition, nested but shallow.
         let ok = json!({"type": "object", "$defs": {"s": {"type": "string", "pattern": "^[a-z]{1,64}$", "maxLength": 64}}, "properties": {"a": {"$ref": "#/$defs/s"}, "b": {"type": "array", "items": {"type": "integer"}, "minItems": 0, "maxItems": 10}}, "required": ["a"]});
         assert_eq!(json_schema_of(Some(&wrap(ok.clone()))).unwrap(), Some(ok));
-        assert!(!pattern_repeat_too_large("^\\d{3}-\\d{4}$"));
-        assert!(pattern_repeat_too_large("(ab){1,5000}"));
-        assert!(!pattern_repeat_too_large("{unterminated"));
     }
 
     #[test]

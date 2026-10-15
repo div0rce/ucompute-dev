@@ -22,6 +22,7 @@ use prost::Message;
 use quinn::{ConnectionError, IdleTimeout, TransportConfig, TransportErrorCode, VarInt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -44,6 +45,12 @@ const REJECTIONS_PER_MINUTE: u32 = 20;
 /// Domain separation: a capabilities signature can never be replayed as another signed message
 /// (mDNS record, revocation) of the same device key.
 const CAPABILITIES_CONTEXT: &[u8] = b"common/1 capabilities\0";
+/// A retired duplicate (see `Node::register`) is checked for in-flight work at this interval and
+/// closed at the first check that finds none, never sooner: a request the peer opened on it just
+/// before it, too, switched to the surviving connection arrives within that time and is served.
+// ponytail: polling, and a request the peer opens at the very instant of an idle check is still cut
+// (`peer_lost`). A GOAWAY control message telling the peer to stop using the connection closes it.
+const RETIRE_POLL: Duration = Duration::from_millis(500);
 
 /// The first bidirectional stream (opened by the connector): Hello/Capabilities, then Status and
 /// Revocation messages from later modules. Other work opens its own streams on `conn`.
@@ -61,6 +68,52 @@ pub struct PeerConnection {
     pub capabilities: std::sync::Mutex<Option<Capabilities>>,
     pub negotiated_minor: u32,
     pub control: tokio::sync::Mutex<ControlStream>,
+    /// True when this node dialled it (`Node::connect`), false when it was accepted.
+    pub outbound: bool,
+    /// Work in flight on it, either direction ([`PeerConnection::in_flight`]).
+    in_flight: AtomicUsize,
+    /// Lost duplicate resolution: no longer handed out, closed by this node once idle.
+    retired: AtomicBool,
+}
+
+impl PeerConnection {
+    /// Marks one unit of work (a request stream, either direction) on this connection until the
+    /// guard drops: a duplicate is closed only when no guard is held (see `Node::register`).
+    /// `remote::generate_remote` and `remote::serve_peer_with` hold one per request stream; other
+    /// modules that open their own streams on `conn` should too.
+    pub fn in_flight(self: &Arc<Self>) -> InFlight {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        InFlight(self.clone())
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+}
+
+/// Guard from [`PeerConnection::in_flight`].
+pub struct InFlight(Arc<PeerConnection>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Closes a retired duplicate (`CLOSE_OK`) at the first [`RETIRE_POLL`] tick that finds no work in
+/// flight on it; ends early when it closed otherwise (revoke, shutdown, the peer).
+async fn close_when_idle(pc: Arc<PeerConnection>) {
+    loop {
+        tokio::select! {
+            _ = pc.conn.closed() => return,
+            _ = tokio::time::sleep(RETIRE_POLL) => {}
+        }
+        if pc.in_flight.load(Ordering::SeqCst) == 0 {
+            tracing::debug!(peer = %pc.peer_id.short_label(), outbound = pc.outbound, "duplicate connection closed");
+            pc.conn.close(VarInt::from_u32(CLOSE_OK), b"duplicate connection");
+            return;
+        }
+    }
 }
 
 impl std::fmt::Debug for PeerConnection {
@@ -69,6 +122,7 @@ impl std::fmt::Debug for PeerConnection {
             .field("peer_id", &self.peer_id)
             .field("remote_addr", &self.remote_addr)
             .field("negotiated_minor", &self.negotiated_minor)
+            .field("outbound", &self.outbound)
             .finish_non_exhaustive()
     }
 }
@@ -335,6 +389,30 @@ pub fn verify_capabilities(c: &SignedCapabilities, peer: &PeerId) -> Result<Capa
     Ok(caps)
 }
 
+/// Which of this node's live connections to one peer (their `outbound` flags, oldest first) it
+/// retires as duplicates. A node retires only connections it initiated: an outbound one when the
+/// peer has the lower id and an inbound one exists (the peer's connection wins), or when an older
+/// outbound one exists. The peer applies the same rule on its side, so exactly the connection
+/// initiated by the lower id survives a crossed dial, and no side closes a connection whose
+/// control handshake the other side may still be finishing.
+fn duplicates_to_close(me_lower: bool, outbound: &[bool]) -> Vec<usize> {
+    let inbound_exists = outbound.iter().any(|o| !o);
+    let first_outbound = outbound.iter().position(|o| *o);
+    (0..outbound.len())
+        .filter(|&i| outbound[i] && ((!me_lower && inbound_exists) || first_outbound != Some(i)))
+        .collect()
+}
+
+/// Among registered, not retired connections to `peer`, the oldest one initiated by the lower id,
+/// else the oldest (`min_by_key` returns the first of equal keys).
+fn survivor(conns: &[Arc<PeerConnection>], peer: &PeerId, me_lower: bool) -> Option<Arc<PeerConnection>> {
+    conns
+        .iter()
+        .filter(|c| c.peer_id == *peer && !c.is_retired())
+        .min_by_key(|c| c.outbound != me_lower)
+        .cloned()
+}
+
 /// The store's current verdict on `peer` as a typed error (`Ok` only when pinned, not revoked).
 fn allowed(store: &PeerStore, peer: &PeerId) -> Result<()> {
     match tls::store_verdict(store, peer) {
@@ -414,10 +492,11 @@ impl Node {
         Ok(self.endpoint.local_addr()?)
     }
 
-    fn audit(&self, kind: &str, peer: Option<&PeerId>, fields: serde_json::Value) {
+    /// Append an audit line; a failed write is a warning (the audit trail has a gap), never fatal.
+    pub(crate) fn audit(&self, kind: &str, peer: Option<&PeerId>, fields: serde_json::Value) {
         let hex = peer.map(|p| p.to_hex());
         if let Err(e) = self.audit.record(kind, hex.as_deref(), fields) {
-            tracing::debug!(kind, error = %e, "audit record not written");
+            tracing::warn!(kind, error = %e, "audit record not written");
         }
     }
 
@@ -535,8 +614,25 @@ impl Node {
         })
     }
 
+    /// The live connection to `peer` that survives duplicate resolution, if any (see `register`):
+    /// the one to route new work onto. `connect` returns it without dialling.
+    pub fn live(&self, peer: &PeerId) -> Option<Arc<PeerConnection>> {
+        let mut g = lock(&self.conns);
+        g.retain(|c| c.conn.close_reason().is_none());
+        survivor(&g, peer, self.identity.id < *peer)
+    }
+
     /// Makes the connection visible to `disconnect`, then checks the store once more: a revoke
     /// that ran between the TLS handshake and here found nothing to close (F-06-05).
+    ///
+    /// Duplicates (both sides dialled each other, or one side dialled twice): the connection
+    /// initiated by the lower `PeerId` survives; between two from the same initiator the older.
+    /// Only the initiator of the losing connection retires it, once it holds both, so the other
+    /// side never sees a handshake cut short. Retired: no longer handed out here (`live`,
+    /// `connect`, `connections`), still closed by `disconnect`/`shutdown`, and closed with
+    /// `CLOSE_OK` once no work is in flight on it ([`PeerConnection::in_flight`]), so a request
+    /// already running on it (either direction) finishes instead of failing with `peer_lost`.
+    /// Returns the connection to use and whether it is `new` (false: `new` was retired).
     fn register(
         &self,
         conn: quinn::Connection,
@@ -544,7 +640,8 @@ impl Node {
         control: ControlStream,
         caps: Capabilities,
         minor: u32,
-    ) -> Result<Arc<PeerConnection>> {
+        outbound: bool,
+    ) -> Result<(Arc<PeerConnection>, bool)> {
         let pc = Arc::new(PeerConnection {
             peer_id: peer,
             remote_addr: conn.remote_address(),
@@ -552,21 +649,61 @@ impl Node {
             capabilities: Mutex::new(Some(caps)),
             negotiated_minor: minor,
             control: tokio::sync::Mutex::new(control),
+            outbound,
+            in_flight: AtomicUsize::new(0),
+            retired: AtomicBool::new(false),
         });
-        lock(&self.conns).push(pc.clone());
+        let me_lower = self.identity.id < peer;
+        let keep = {
+            let mut g = lock(&self.conns);
+            g.retain(|c| c.conn.close_reason().is_none());
+            g.push(pc.clone());
+            let mine: Vec<Arc<PeerConnection>> = g
+                .iter()
+                .filter(|c| c.peer_id == peer && !c.is_retired())
+                .cloned()
+                .collect();
+            let flags: Vec<bool> = mine.iter().map(|c| c.outbound).collect();
+            for i in duplicates_to_close(me_lower, &flags) {
+                mine[i].retired.store(true, Ordering::SeqCst);
+                tokio::spawn(close_when_idle(mine[i].clone()));
+            }
+            // The survivor stays registered, so a retired duplicate's health watcher sees a live
+            // connection when it closes and leaves the peer Connected. A new connection that is not
+            // retired is the one returned even when it does not win (an inbound one from the
+            // higher id): its initiator may already be sending work on it.
+            if pc.is_retired() {
+                survivor(&g, &peer, me_lower)
+            } else {
+                Some(pc.clone())
+            }
+        };
+        let Some(keep) = keep else {
+            return Err(CommonError::new(ErrorCode::PeerLost, "no live connection to the peer"));
+        };
         if let Err(e) = allowed(&self.peers, &peer) {
-            lock(&self.conns).retain(|c| !Arc::ptr_eq(c, &pc));
-            pc.conn
-                .close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+            let gone: Vec<Arc<PeerConnection>> = {
+                let mut g = lock(&self.conns);
+                let (gone, rest) = g.drain(..).partition(|c| c.peer_id == peer);
+                *g = rest;
+                gone
+            };
+            for c in gone.iter().chain([&pc]) {
+                c.conn
+                    .close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+            }
             return Err(e);
         }
-        self.update_health(&peer, HealthTracker::on_heartbeat);
-        tokio::spawn(crate::health::watch(
-            self.me.clone(),
-            pc.clone(),
-            Duration::from_millis(self.config.keep_alive_ms.max(100)),
-        ));
-        Ok(pc)
+        let is_new = Arc::ptr_eq(&keep, &pc);
+        if is_new {
+            self.update_health(&peer, HealthTracker::on_heartbeat);
+            tokio::spawn(crate::health::watch(
+                self.me.clone(),
+                pc.clone(),
+                Duration::from_millis(self.config.keep_alive_ms.max(100)),
+            ));
+        }
+        Ok((keep, is_new))
     }
 
     pub(crate) fn update_health(&self, peer: &PeerId, f: impl FnOnce(&mut HealthTracker)) {
@@ -575,8 +712,16 @@ impl Node {
             .or_insert_with(|| HealthTracker::new(crate::health::MISS_THRESHOLD)));
     }
 
-    /// Liveness of `peer` (F-02-05): `None` until this node was first connected to it or asked to
-    /// keep it connected (`health::supervise`).
+    /// Liveness of `peer` (F-02-05), for status endpoints and the peers list:
+    /// - `Connected`: a live authenticated connection whose keep-alives are answered;
+    /// - `Unhealthy`: still open but [`crate::health::MISS_THRESHOLD`] keep-alive intervals passed
+    ///   without a datagram from the peer (the idle timeout closes it soon if this persists);
+    /// - `Reconnecting`: the last connection was lost (idle timeout, reset) and a reconnect is
+    ///   expected (`health::supervise`, or the daemon's own dial loop);
+    /// - `Disconnected`: closed deliberately (revoked, refused, shut down); no reconnect follows.
+    ///
+    /// `None` until this node was first connected to it or asked to keep it connected
+    /// (`health::supervise`). Updated within one keep-alive interval (1 s by default).
     pub fn health(&self, peer: &PeerId) -> Option<PeerHealth> {
         lock(&self.health).get(peer).map(|t| t.state)
     }
@@ -619,9 +764,11 @@ impl Node {
         let registered = self
             .finish_handshake(&conn, peer, false)
             .await
-            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor)?, minor)));
+            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor, false)?, minor)));
         match registered {
-            Ok((pc, minor)) => {
+            // An inbound connection is never retired here (only its initiator retires it), so it
+            // is always handed to `accept`; a duplicate is closed by the peer once idle.
+            Ok(((pc, _), minor)) => {
                 tracing::info!(peer = %peer.short_label(), addr, minor, "peer connected (inbound)");
                 self.audit(
                     "peer_connected",
@@ -636,8 +783,17 @@ impl Node {
 
     /// Connect to a pinned peer; Hello/Capabilities exchanged; typed errors: PeerUnauthorized,
     /// PeerRevoked, ProtocolIncompatible, PeerLost.
+    ///
+    /// One connection per peer: a live authenticated connection to `expected` (inbound or
+    /// outbound, any address) is returned instead of dialling, and a dial that crossed the peer's
+    /// own dial resolves to the connection initiated by the lower id (see `register`). So the
+    /// result may be a connection `accept` also returned; callers that attach work per
+    /// connection should key it by `conn.stable_id()`.
     pub async fn connect(&self, addr: SocketAddr, expected: PeerId) -> Result<Arc<PeerConnection>> {
         allowed(&self.peers, &expected)?;
+        if let Some(live) = self.live(&expected) {
+            return Ok(live);
+        }
         // Exactly the expected key, still pinned and not revoked, checked inside the handshake.
         let store = self.peers.clone();
         let check: Check = Arc::new(move |id| {
@@ -666,9 +822,11 @@ impl Node {
         let registered = self
             .finish_handshake(&conn, peer, true)
             .await
-            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor)?, minor)));
+            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor, true)?, minor)));
         let (pc, minor) = match registered {
-            Ok(v) => v,
+            Ok(((pc, true), minor)) => (pc, minor),
+            // Retired as a duplicate of the connection returned instead.
+            Ok(((pc, false), _)) => return Ok(pc),
             Err(e) => {
                 self.audit("peer_rejected", Some(&peer), fields(&e));
                 return Err(e);
@@ -688,11 +846,16 @@ impl Node {
         self.inbound.lock().await.recv().await
     }
 
-    /// Currently connected peers (closed connections are dropped from the registry here).
+    /// Currently connected peers (closed connections are dropped from the registry here, retired
+    /// duplicates are left out). Per peer, the connection to use ([`Node::live`]) comes first, so
+    /// `find(|c| c.peer_id == id)` picks it.
     pub fn connections(&self) -> Vec<Arc<PeerConnection>> {
         let mut g = lock(&self.conns);
         g.retain(|c| c.conn.close_reason().is_none());
-        g.clone()
+        let mut v: Vec<Arc<PeerConnection>> = g.iter().filter(|c| !c.is_retired()).cloned().collect();
+        // Stable: the same order `survivor` picks by (lower id's connection first, then oldest).
+        v.sort_by_key(|c| c.outbound != (self.identity.id < c.peer_id));
+        v
     }
 
     /// Close every connection to `id` with the REVOKED close code (F-06-05, ≤ 5 s).
@@ -861,6 +1024,29 @@ mod tests {
             record: signed.record.clone(),
         };
         assert_eq!(unauthorized(&bare, &me.id), ErrorCode::PeerUnauthorized);
+    }
+
+    #[test]
+    fn duplicates_resolve_to_the_lower_ids_connection() {
+        const O: bool = true; // outbound: this node dialled it
+        const I: bool = false; // inbound: the peer dialled it
+                               // Crossed dials: the higher id closes its own outbound one, whatever the arrival order;
+                               // the lower id closes nothing and waits for the peer's close of the inbound duplicate.
+        assert_eq!(duplicates_to_close(false, &[O, I]), vec![0]);
+        assert_eq!(duplicates_to_close(false, &[I, O]), vec![1]);
+        assert!(duplicates_to_close(true, &[O, I]).is_empty());
+        assert!(duplicates_to_close(true, &[I, O]).is_empty());
+        // Dialled twice by this node: the newer goes, on either side of the id order.
+        assert_eq!(duplicates_to_close(true, &[O, O]), vec![1]);
+        assert_eq!(duplicates_to_close(false, &[O, O]), vec![1]);
+        // Dialled twice by the peer: the peer decides.
+        assert!(duplicates_to_close(false, &[I, I]).is_empty());
+        assert!(duplicates_to_close(true, &[I, I]).is_empty());
+        // Single connections are never touched.
+        for me_lower in [true, false] {
+            assert!(duplicates_to_close(me_lower, &[O]).is_empty());
+            assert!(duplicates_to_close(me_lower, &[I]).is_empty());
+        }
     }
 
     #[test]

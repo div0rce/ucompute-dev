@@ -22,7 +22,7 @@
 use crate::proto::{
     control_message::Body, read_frame, write_frame, Cancel, ControlMessage, ErrorMsg, RemoteChunk, RemoteRequest,
 };
-use crate::transport::{map_conn_error, PeerConnection};
+use crate::transport::{map_conn_error, InFlight, PeerConnection};
 use crate::MAX_CONTROL_FRAME;
 use common_core::{CommonError, ErrorCode, Result, Timeouts};
 use common_identity::PeerId;
@@ -32,7 +32,6 @@ use common_runtime::manager::{LoadOptions, ModelManager};
 use common_runtime::{GenerateEvent, GenerateRequest, GenerateStream, Usage};
 use futures_util::StreamExt;
 use quinn::{ConnectionError, RecvStream, SendStream};
-use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -98,6 +97,10 @@ struct Client {
     started: Instant,
     first_token: Option<Duration>,
     done: bool,
+    /// Keeps a retired duplicate connection open until this request ends (see `Node::register`).
+    // ponytail: held until the stream is dropped, not until Done; a caller that keeps a finished
+    // stream delays that close (never a request). Release it on `done` if that ever matters.
+    _in_flight: InFlight,
 }
 
 impl Client {
@@ -213,7 +216,23 @@ pub async fn generate_remote(
     privacy: &str,
     cancel: CancellationToken,
 ) -> Result<GenerateStream> {
+    generate_remote_with_id(conn, model_id, model_sha256, req, privacy, cancel)
+        .await
+        .map(|(_, stream)| stream)
+}
+
+/// [`generate_remote`], also returning the `request_id` it put in the `RemoteRequest`: the id the
+/// serving device writes into its `remote_request` audit entry, so both sides' entries join.
+pub async fn generate_remote_with_id(
+    conn: Arc<PeerConnection>,
+    model_id: &str,
+    model_sha256: &str,
+    req: GenerateRequest,
+    privacy: &str,
+    cancel: CancellationToken,
+) -> Result<(String, GenerateStream)> {
     check_privacy(privacy)?;
+    let in_flight = conn.in_flight();
     let (mut send, recv) = conn.conn.open_bi().await.map_err(|e| map_conn_error(&e))?;
     let request_id = new_request_id();
     let msg = RemoteRequest {
@@ -229,16 +248,19 @@ pub async fn generate_remote(
         peer: conn.peer_id.short_label(),
         send,
         recv,
-        request_id,
+        request_id: request_id.clone(),
         cancel,
         timeouts: req.timeouts,
         started: Instant::now(),
         first_token: None,
         done: false,
+        _in_flight: in_flight,
     };
     // Dropping the stream drops `client`: its send side finishes and its recv side stops, which
     // the server reads as a cancel.
-    Ok(futures_util::stream::unfold(client, |mut c| async move { c.step().await.map(|item| (item, c)) }).boxed())
+    let stream =
+        futures_util::stream::unfold(client, |mut c| async move { c.step().await.map(|item| (item, c)) }).boxed();
+    Ok((request_id, stream))
 }
 
 // ---------------------------------------------------------------- server
@@ -304,74 +326,8 @@ fn engine_permits(opts: &ServeOptions) -> Result<(OwnedSemaphorePermit, Option<O
     Ok((share, slot))
 }
 
-/// Bounds on an untrusted JSON schema before it reaches the engine's schema-to-grammar compiler
-/// (F-01-12), the same as the local API's.
-// ponytail: duplicate of common-api `openai::check_schema`; move both into common-runtime so the
-// two cannot drift.
-const SCHEMA_MAX_BYTES: usize = 64 * 1024;
-const SCHEMA_MAX_DEPTH: usize = 32;
-const SCHEMA_MAX_REPEAT: u64 = 1024;
 const MAX_STOP: usize = 16;
 const MAX_STOP_BYTES: usize = 256;
-
-fn check_schema(schema: &Value) -> Result<()> {
-    if schema.to_string().len() > SCHEMA_MAX_BYTES {
-        return Err(CommonError::invalid(format!(
-            "json_schema exceeds {SCHEMA_MAX_BYTES} bytes"
-        )));
-    }
-    check_schema_node(schema, 0)
-}
-
-fn check_schema_node(v: &Value, depth: usize) -> Result<()> {
-    if depth > SCHEMA_MAX_DEPTH {
-        return Err(CommonError::invalid(format!(
-            "json_schema nests deeper than {SCHEMA_MAX_DEPTH} levels"
-        )));
-    }
-    let bad = |m: String| Err(CommonError::invalid(format!("json_schema: {m}")));
-    match v {
-        Value::Object(map) => {
-            for (k, val) in map {
-                match (k.as_str(), val) {
-                    ("$ref", Value::String(r)) if !r.starts_with('#') => {
-                        return bad("only local $ref (#/...) is supported".into())
-                    }
-                    ("pattern", Value::String(p))
-                        if p.len() as u64 > SCHEMA_MAX_REPEAT || pattern_repeat_too_large(p) =>
-                    {
-                        return bad(format!(
-                            "pattern longer than {SCHEMA_MAX_REPEAT} or with a repetition above {SCHEMA_MAX_REPEAT}"
-                        ))
-                    }
-                    (
-                        "minItems" | "maxItems" | "minLength" | "maxLength" | "minProperties" | "maxProperties"
-                        | "minContains" | "maxContains",
-                        Value::Number(n),
-                    ) if n.as_u64().is_none_or(|n| n > SCHEMA_MAX_REPEAT) => {
-                        return bad(format!("{k} must be an integer in 0..={SCHEMA_MAX_REPEAT}"))
-                    }
-                    _ => check_schema_node(val, depth + 1)?,
-                }
-            }
-        }
-        Value::Array(items) => {
-            for i in items {
-                check_schema_node(i, depth + 1)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// True when a regex `{n}` / `{n,}` / `{n,m}` quantifier names a count above `SCHEMA_MAX_REPEAT`.
-fn pattern_repeat_too_large(p: &str) -> bool {
-    p.split('{').skip(1).filter_map(|rest| rest.split('}').next()).any(|q| {
-        q.split(',')
-            .any(|n| n.trim().parse::<u64>().is_ok_and(|n| n > SCHEMA_MAX_REPEAT))
-    })
-}
 
 /// A peer's request with the local API's bounds applied (a buggy or compromised group member
 /// must not be able to stall this device's engine): no raw GBNF grammar, a bounded JSON schema,
@@ -396,7 +352,7 @@ fn sanitize(mut g: GenerateRequest) -> Result<GenerateRequest> {
         )));
     }
     if let Some(schema) = &g.json_schema {
-        check_schema(schema)?;
+        common_runtime::schema::check_schema(schema)?;
     }
     g.timeouts = Timeouts::default();
     Ok(g)
@@ -462,7 +418,7 @@ async fn refuse(send: &mut SendStream, e: &CommonError) {
 
 fn record(audit: &Audit, kind: &str, peer: &PeerId, fields: serde_json::Value) {
     if let Err(e) = audit.record(kind, Some(&peer.to_hex()), fields) {
-        tracing::debug!(kind, error = %e, "audit record not written");
+        tracing::warn!(kind, error = %e, "audit record not written");
     }
 }
 
@@ -668,6 +624,7 @@ pub async fn serve_peer_with(
             Err(ConnectionError::ApplicationClosed(_)) | Err(ConnectionError::LocallyClosed) => return Ok(()),
             Err(e) => return Err(map_conn_error(&e)),
         };
+        let in_flight = conn.in_flight();
         let Ok(permit) = limit.clone().try_acquire_owned() else {
             let e = CommonError::new(
                 ErrorCode::Overloaded,
@@ -684,7 +641,7 @@ pub async fn serve_peer_with(
             opts.clone(),
         );
         tokio::spawn(async move {
-            let _permit = permit;
+            let _held = (permit, in_flight);
             handle_stream(conn, manager, policy, audit, opts, send, recv).await;
         });
     }

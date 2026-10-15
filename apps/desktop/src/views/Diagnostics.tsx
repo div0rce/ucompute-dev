@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, getBaseUrl, shortLabel, type AuditEvent } from "../api/client";
 import { ERROR_CODES, explain, type MappedError } from "../api/errors";
+import { devDaemonUrl } from "../daemon";
 import { humanDuration } from "../format";
 import { daemon } from "../state/stores";
 
@@ -81,7 +82,10 @@ export function Diagnostics() {
             {d.reachable ? "Running" : d.reachable === false ? "Not running" : "Checking"}
           </dd>
           <dt>Address</dt>
-          <dd>{getBaseUrl()}</dd>
+          <dd>
+            <code>{getBaseUrl()}</code>
+            {devDaemonUrl(window.location.search) && <span className="small muted"> (chosen with ?daemon=, development only)</span>}
+          </dd>
           <dt>Started by</dt>
           <dd>{d.spawned ? "This app" : "Something else (already running when the app opened)"}</dd>
           {s && (

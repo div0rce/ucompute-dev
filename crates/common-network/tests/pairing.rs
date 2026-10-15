@@ -332,3 +332,63 @@ async fn mitm_relay_detected() {
     handle.abort();
     relay_task.abort();
 }
+
+/// A QR payload names device C, but device A answers at the scanned address (a wrong or rogue
+/// device, which knows its own QR secret). `join_with(.., Some(C))` refuses A inside the TLS
+/// handshake, before SPAKE2: nothing is pinned on either side and B's earlier revocation of A is
+/// untouched (pinning after pairing would have cleared it). SINGLE-HOST: loopback QUIC.
+#[tokio::test]
+async fn qr_expected_peer_mismatch_pins_nothing_single_host() {
+    let (a, b, c) = (Peer::new(), Peer::new(), Peer::new());
+    let (na, nb) = (a.start().await, b.start().await);
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    let revoked_before = b.peers.revocations_since(0).unwrap();
+    let (session, handle) = pairing::start(na.clone(), "rogue").await.unwrap();
+    let (_, _, secret) = expected_peer_from_qr(&session.qr_payload).unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{}", session.port).parse().unwrap();
+    let e = pairing::join_with(nb.clone(), addr, &secret, "b", Some(c.id()))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::PairingFailed, "{e}");
+    assert!(e.message.contains("not the one in the QR code"), "{e}");
+    for p in [&a, &b] {
+        assert!(
+            p.peers.list().unwrap().is_empty(),
+            "{} pinned someone",
+            p.id().short_label()
+        );
+    }
+    assert!(b.peers.is_revoked(&a.id()), "the revocation of A survives");
+    assert_eq!(b.peers.revocations_since(0).unwrap(), revoked_before);
+    assert!(a.peers.revocations_since(0).unwrap().is_empty());
+    // The initiator never got past TLS: no SPAKE2 attempt, no failure counted, window still open.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!handle.is_finished());
+    let (ka, kb) = (audit_kinds(&a), audit_kinds(&b));
+    assert!(!ka.contains(&"pairing_failed".to_string()), "{ka:?}");
+    assert!(kb.contains(&"pairing_failed".to_string()), "{kb:?}");
+    let line = b
+        .audit
+        .tail(10)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.kind == "pairing_failed")
+        .unwrap();
+    let line = serde_json::to_string(&line).unwrap();
+    assert!(line.contains("qr_peer_mismatch") && !line.contains(&secret), "{line}");
+    // The right expected id pairs over the same window (the check is not refusing everything).
+    let rec = pairing::join_with(nb.clone(), addr, &secret, "b", Some(a.id()))
+        .await
+        .unwrap();
+    assert_eq!(rec.id, a.id());
+    assert_eq!(
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .id,
+        b.id()
+    );
+    eprintln!("SINGLE-HOST: QR peer mismatch refused in the TLS handshake; nothing pinned, revocation intact");
+}

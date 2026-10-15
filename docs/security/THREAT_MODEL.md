@@ -1,16 +1,18 @@
 # Threat Model — Project Common
 
 - **Requirement:** F-06-06 (M0). Companion test: `default_config_binds_localhost` in `crates/common-api` (written separately).
-- **Status:** living document; revise at every milestone that adds a trust zone (M3, M7, M9, M10, M12).
-- **Inputs:** `docs/SPEC_HANDOFF_V2.md` §7, §9, §18.6; `docs/REQUIREMENTS.csv`; ADR-0001; ADR-0002; `docs/research/COMPETITIVE_MATRIX.md` (llama.cpp RPC notes); `AGENTS.md`; decisions D-004, D-007; blockers B-002, B-005, B-006, B-007, B-008, B-011.
+- **Status:** living document; revise at every milestone that adds a trust zone (M3, M7, M9, M10, M12). Last revised 2026-10-15 for M3 as built.
+- **Inputs:** `docs/SPEC_HANDOFF_V2.md` §7, §9, §18.6; `docs/REQUIREMENTS.csv`; ADR-0001; ADR-0002; ADR-0003 (§9, implementation notes); `docs/evidence/m3-single-host-2026-10-15.md`; `docs/research/COMPETITIVE_MATRIX.md` (llama.cpp RPC notes); `AGENTS.md`; decisions D-004, D-007; blockers B-002, B-005, B-006, B-007, B-008, B-011.
 - **Method:** STRIDE per actor. S spoofing, T tampering, R repudiation, I information disclosure, D denial of service, E elevation of privilege.
-- **Reading the mitigation tables.** `Requirement` is an exact ID from `docs/REQUIREMENTS.csv`; `—` means no row covers the mitigation (collected in §5.2). `Milestone` is the row's milestone. `Today` is the state in this branch: `present` (code + passing test), `stub` (types/doc exist, logic unimplemented), `none`.
+- **Reading the mitigation tables.** `Requirement` is an exact ID from `docs/REQUIREMENTS.csv`; `—` means no row covers the mitigation (collected in §5.2). `Milestone` is the row's milestone. `Today` is the state in this branch: `present` (code + passing test), `present (SINGLE-HOST)` (code + passing test on one machine only; never two-machine evidence, B-002), `stub` (types/doc exist, logic unimplemented), `none`.
 
-Only M0 and M1 are in progress. Everything in M3 or later is **not mitigated today**; the product today is Mode A only (local, no network), and the only network listener is the loopback API.
+M3 (Common Mesh) is built: pairing, an authenticated QUIC peer endpoint, LAN discovery, revocation, policy, quotas, audit, and Mode B (one whole request on one paired device). It is **off by default**. With default settings the only listener is the loopback API and nothing leaves the device. All M3 evidence is SINGLE-HOST (B-002). §2.13 maps each mesh threat to its mitigation and test; the per-actor tables point there.
+
+This revision updates M3 rows only. M1 rows keep their 2026-10-14 state and need their own re-check. Everything in M4 or later is **not mitigated today**.
 
 ## 1. Scope, trust zones and assets
 
-### 1.1 System as built (M1)
+### 1.1 System as built (M1 + M3)
 
 ```
 client (CLI, OpenAI SDK, desktop later)
@@ -26,12 +28,23 @@ llama-server (pinned b11609, 127.0.0.1:<ephemeral>,    $COMMON_HOME/
 
 The engine is a child process (ADR-0002). Its port is never exposed; its API key is generated per process and never persisted. Model and engine bytes are hash-verified against `catalog/models.json` and `catalog/backends.json` before use.
 
+M3 adds three listeners, and only after the user turns peer networking on:
+
+```
+paired device ◀── QUIC, TLS 1.3, raw Ed25519 keys, UDP 8193 on every interface ──▶ common-api (Node)
+                  pinned keys only; QUIC Retry before TLS
+another device ──▶ pairing endpoint, ephemeral UDP port, only during a 120 s window
+LAN            ◀─▶ mDNS _common._udp.local., signed TXT (off with networking, or mdns = false)
+```
+
+State, all mode 0600: `identity/device.key` and `device.pub` (directory 0700), `identity/peers.json` (pins, groups, revocations), `config.json` (privacy, networking, serving, peer quotas), `logs/audit*.jsonl`.
+
 ### 1.2 Trust zones
 
 | Zone | Who is in it | Execution modes (spec §7) | Trust assumption | Enabled today |
 |---|---|---|---|---|
 | Z0 Local device | This OS user, this daemon, the engine child process | A | Trusted. Other users/processes on the same host are **not** in Z0 (§2.1) | yes |
-| Z1 Trusted peers | Devices paired by the owner (SPAKE2 code, pinned Ed25519 keys), grouped (F-02-09) | B, C, D, E | Authenticated, encrypted, authorized per group. Peer is trusted to **see** the work it executes (§4) | no (M3) |
+| Z1 Trusted peers | Devices paired by the owner (SPAKE2 code, pinned Ed25519 keys), grouped (F-02-09) | B, C, D, E | Authenticated, encrypted, authorized per group. Peer is trusted to **see** the work it executes (§4) | opt-in, off by default (M3: Mode B only) |
 | Z2 Public swarm | Unpaired, pseudonymous contributors and requesters | F | Hostile by default. Every message is attacker-controlled | no (M9/M10, Gate F) |
 | Z3 Managed cloud / enterprise | Cloud burst targets, enterprise federation, SSO IdP | G | Contractual; explicit cost and policy consent per use | no (M12) |
 
@@ -44,9 +57,9 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Prompts, activations, outputs | API request/response; engine memory; activation frames (M4) | high — user content | high — silent alteration = wrong answers | medium |
 | Model weights + manifests | `models/blobs/sha256-*`, `models/manifests/*.json`, `catalog/*.json` | low–medium (license-dependent, X-08) | **critical** — wrong weights = silent model substitution | medium |
 | Engine binaries + pins | `backends/<name>/<release>/`, `catalog/backends.json` | low | **critical** — runs as the user | medium |
-| Device identity keys (M3) | `identity/`, OS keychain where available | **critical** | critical | medium |
+| Device identity keys (M3) | `identity/device.key`, a 0600 file (no keychain, ADR-0003 D1) | **critical** | critical | medium |
 | API keys | Common API key (config); engine key (process memory only) | high | — | — |
-| Audit logs (M3) | append-only local log | medium (metadata, no prompts) | high | low |
+| Audit logs (M3) | `logs/audit*.jsonl`: rotated at 8 MiB, about 32 MiB kept, plus `audit.security.jsonl` | medium (metadata, no prompts) | high | low |
 | Credits ledger (M10) | local SQLite, hash-chained | low | high | low |
 | User hardware, time, energy | CPU/GPU/RAM/disk/battery | — | — | **high** — the product's whole value exchange |
 
@@ -63,7 +76,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | API binds 127.0.0.1 unless configured; non-loopback bind without API key refused with `PolicyDenied` | F-06-06, F-09-01 | M0/M1 | stub (`ApiConfig::default()`); test being written |
 | Engine on 127.0.0.1:ephemeral with per-process random `--api-key`; port never exposed | — (ADR-0002 §4; gap 1) | M1 | stub |
 | Engine spawned with scrubbed environment (`DYLD_*`, `LD_*`, `GGML_*`, `LLAMA_ARG_*` removed) | — (ADR-0002 §1; gap 2) | M1 | stub |
-| Identity private key in OS keychain or 0600 file; never logged | F-06-01 | M3 | none |
+| Identity private key in a 0600 file in a 0700 directory; never logged | F-06-01 | M3 | present (SINGLE-HOST), §2.13 M3-26, M3-32 |
 | Prompts absent from metrics, errors and diagnostics bundles | F-09-03, F-08-03, F-06-10 | M1 / M1 / M3 | stub |
 | Model blob re-hashed against manifest before load | F-05-01, F-01-05 | M1 | stub (`Store::verify`) |
 | Hardware probe runs unprivileged (no setuid helpers) | F-01-01 | M1 | stub |
@@ -133,16 +146,16 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | `/metrics` carries counters and histograms only, no prompt content | F-09-03 | M1 | stub |
 | Errors redact secrets and never echo request bodies | F-08-03 (`errors_redact_secrets`) | M1 | present (code snapshot) / redaction stub |
 | Engine runs without `--verbose`; API does not log request bodies | — (gap 4) | M1 | stub |
-| Default-deny: with default config no request leaves the device | F-06-02 | M3 | none (Mode A only today, so trivially true) |
-| Policy class (`local-only` / `trusted-group` / `swarm-allowed`) attached to every request and enforced in scheduler and transport; fuzz of 10,000 requests shows zero violations | F-06-07, I-05, F-04-01 | M3 / M5 / M5 | none |
-| Privacy mode selector with disclosure text before non-local modes | F-10-10 | M3 | none |
-| Encrypted, mutually authenticated transport; packet capture contains no plaintext prompt; relays see only ciphertext | F-02-03, F-06-03, F-02-06 | M3 / M3 / M9 | none |
-| Audit entry for every off-device request; diagnostics bundle scanned for prompts/keys | F-06-10 | M3 | none |
+| Default-deny: with default config no request leaves the device | F-06-02 | M3 | present (SINGLE-HOST), §2.13 M3-19, M3-33 |
+| Policy class (`local-only` / `trusted-group` / `swarm-allowed`) attached to every request and enforced in scheduler and transport; fuzz of 10,000 requests shows zero violations | F-06-07, I-05, F-04-01 | M3 / M5 / M5 | present for Mode B (SINGLE-HOST), §2.13 M3-19; scheduler none |
+| Privacy mode selector with disclosure text before non-local modes | F-10-10 | M3 | present (API, CLI, desktop), §2.13 M3-20 |
+| Encrypted, mutually authenticated transport; packet capture contains no plaintext prompt; relays see only ciphertext | F-02-03, F-06-03, F-02-06 | M3 / M3 / M9 | present (SINGLE-HOST relay capture), §2.13 M3-01..05 / relays none |
+| Audit entry for every off-device request; diagnostics bundle scanned for prompts/keys | F-06-10 | M3 | present (SINGLE-HOST), §2.13 M3-26..28 |
 | Contribution history and exports contain no prompt text | F-07-05 | M7 | none |
 | Analytics off by default; DP aggregates only | X-14 | M13 | none |
 | Attestation-gated confidential backend (research) | F-06-11 | M14 | research (B-005) |
 
-**Not mitigated.** Anything a Z1/Z2 peer computes, it sees (§4). Execution records under `runs/` must not contain prompts; no row asserts this (gap 4).
+**Not mitigated.** Anything a Z1/Z2 peer computes, it sees (§4). In Mode B a paired device sees the whole prompt and output in plain text; the disclosure says so. Execution records under `runs/` must not contain prompts; no row asserts this (gap 4).
 
 ### 2.6 Malicious peers (unpaired or public-swarm)
 
@@ -152,9 +165,9 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 | Mitigation | Requirement | Milestone | Today |
 |---|---|---|---|
-| Discovered-but-unpaired peers listed untrusted and never receive workloads; mDNS can be disabled | F-02-01 | M3 | none |
-| Connections with unpinned keys refused; no plaintext fallback | F-02-03, F-06-03 | M3 | none |
-| Capability messages bounded and versioned; oversize rejected and logged | F-02-04, F-08-10 | M3 | none |
+| Discovered-but-unpaired peers listed untrusted and never receive workloads; mDNS can be disabled | F-02-01 | M3 | present (SINGLE-HOST), §2.13 M3-02, M3-09..11 |
+| Connections with unpinned keys refused; no plaintext fallback | F-02-03, F-06-03 | M3 | present (SINGLE-HOST), §2.13 M3-01..05, M3-08 |
+| Capability messages bounded and versioned; oversize rejected and logged | F-02-04, F-08-10 | M3 | present (SINGLE-HOST), §2.13 M3-06, M3-07 |
 | Activation frames length-prefixed, versioned, bounded; dimension mismatch rejected; stage accepts only authenticated peer | F-03-03, F-03-01 | M4 | none |
 | Chunk hash verified on receipt; peer serving bad chunks penalised; non-redistributable models never served | F-05-09, F-05-05, F-05-06, X-08 | M6 | none |
 | Signed, expiring discovery records; eclipse simulation documented | F-02-11 | M9 | none |
@@ -162,7 +175,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Reputation with confidence intervals | F-07-08, X-05 | M10 | none |
 | Public swarm disabled until Gate F | F-07-01 (`default_off`), spec §22 | M7 | none (no swarm code exists) |
 
-**Not mitigated.** All of it — Z2 does not exist in the codebase. The default that matters today is that no listener accepts non-loopback traffic.
+**Not mitigated.** Z2 does not exist in the codebase; the M3 rows cover unpaired devices on the LAN only. By default no listener accepts non-loopback traffic. With networking on, the peer endpoint accepts only pinned keys.
 
 ### 2.7 Compromised trusted peers
 
@@ -172,12 +185,12 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 | Mitigation | Requirement | Milestone | Today |
 |---|---|---|---|
-| Revocation removes pinned key, closes sessions within 5 s, refuses reconnect, persists, propagates to group | F-06-05 | M3 | none |
-| Per-group authorization; workloads never dispatched to non-members | F-02-09, F-06-02 | M3 | none |
-| Per-peer quotas limit damage from a greedy trusted peer | F-06-04 | M3 | none |
+| Revocation removes pinned key, closes sessions within 5 s, refuses reconnect, persists, propagates to group | F-06-05 | M3 | present (SINGLE-HOST), §2.13 M3-04, M3-16..18, M3-34 |
+| Per-group authorization; workloads never dispatched to non-members | F-02-09, F-06-02 | M3 | present (SINGLE-HOST), §2.13 M3-21 |
+| Per-peer quotas limit damage from a greedy trusted peer | F-06-04 | M3 | present (SINGLE-HOST), §2.13 M3-22, M3-23 |
 | Correctness test against local execution catches gross tampering in development, not at runtime | F-03-04 | M4 | none |
 | Activation-hash spot checks / redundancy for selected workloads (runtime detection) | X-07, F-06-12 | M10 / M14 | none / research |
-| Audit log records which peer handled which request | F-06-10 | M3 | none |
+| Audit log records which peer handled which request | F-06-10 | M3 | present (SINGLE-HOST), §2.13 M3-28 |
 
 **Not mitigated.** Detection of a compromised peer that behaves correctly but copies activations is impossible without confidential computing (F-06-11, research). Owners must treat pairing as granting read access to whatever they route (§4).
 
@@ -189,9 +202,9 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 | Mitigation | Requirement | Milestone | Today |
 |---|---|---|---|
-| SPAKE2 pairing: wrong code fails, MITM fails key confirmation, >5 failures/min locks pairing | F-02-02 | M3 | none |
-| Ed25519 device identity; fingerprint is the peer ID; key persists across restart | F-06-01 | M3 | none |
-| Mutually authenticated transport with pinned keys | F-02-03 | M3 | none |
+| SPAKE2 pairing: wrong code fails, MITM fails key confirmation, >5 failures/min locks pairing | F-02-02 | M3 | present (SINGLE-HOST), §2.13 M3-12..15 |
+| Ed25519 device identity; fingerprint is the peer ID; key persists across restart | F-06-01 | M3 | present, §2.13 M3-32 (`keygen_persist_load`) |
+| Mutually authenticated transport with pinned keys | F-02-03 | M3 | present (SINGLE-HOST), §2.13 M3-02..05 |
 | Non-loopback API bind requires an API key; `Unauthorized` on mismatch | — (gap 5; F-09-01 covers default bind only) | M1 | stub |
 | Signed, expiring discovery records | F-02-11 | M9 | none |
 | Ed25519-signed receipts; forged receipt rejected | X-06 | M10 | none |
@@ -208,7 +221,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Identity cost via pairing/attestation; beta-distribution reputation from spot checks; 30 % Sybils gain <5 % of credited work in simulation | F-07-08 | M10 | none |
 | Redundant checks assigned across independent reputations | X-07 | M10 | none |
 | Eclipse-attack simulation on discovery | F-02-11 | M9 | none |
-| Z1 is Sybil-immune by construction: membership is owner-paired, not self-asserted | F-02-02, F-02-09 | M3 | none |
+| Z1 is Sybil-immune by construction: membership is owner-paired, not self-asserted | F-02-02, F-02-09 | M3 | present: in the product only a completed pairing creates a pin, §2.13 M3-12..15 |
 
 **Not mitigated.** No Sybil defence exists for Z2; Z2 stays disabled. The anti-Sybil target is a simulation result, not a proof.
 
@@ -225,9 +238,10 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Timeouts on load, first token, inter-token; bounded retries for idempotent ops only | F-08-01 | M1 | present (policy) / stub (wiring) |
 | Cancellation frees KV/context within 200 ms on disconnect | F-08-02 | M1 | stub |
 | Feasibility filter refuses loads/contexts that do not fit | F-01-03, F-01-08 | M1 | stub |
-| Per-peer token buckets on requests, tokens, bytes, sessions; p95 degrades <20 % under flood | F-06-04 | M3 | none |
-| Capability and activation messages size-bounded | F-02-04, F-03-03 | M3 / M4 | none |
-| Bandwidth probe capped | F-02-07 | M3 | none |
+| Per-peer token buckets on requests, tokens, bytes, sessions; p95 degrades <20 % under flood | F-06-04 | M3 | present for requests and tokens (SINGLE-HOST: local p95 +11.6 % under a flood), §2.13 M3-22; bytes and sessions wait for M4 |
+| Capability and activation messages size-bounded | F-02-04, F-03-03 | M3 / M4 | present (capabilities), §2.13 M3-07 / none |
+| QUIC Retry before TLS; inbound rejection audit lines capped at 20 a minute; at most 8 request streams per connection | — | M3 | present (SINGLE-HOST), §2.13 M3-08, M3-22 |
+| Bandwidth probe capped | F-02-07 | M3 | none (no bandwidth probe is built) |
 | Weighted fair queueing across peers | F-07-04 | M7 | none |
 | Contribution off by default; CPU/GPU caps, schedules, battery/thermal pause, quiet hours | F-07-01, F-10-08, F-07-03, X-03, X-04, F-07-06 | M7 / M7 / M12 | none |
 | Worker memory limit enforced by sandbox | F-06-08 | M7 | none |
@@ -264,12 +278,68 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Worker loads only hash-pinned models already in its policy-allowed set; pinned execution manifests, no implicit upgrade | F-05-10, X-15, F-06-09 | M6 / M1 / M6 | none / stub / none |
 | Untrusted remote workloads run in a low-privilege sandboxed process; cannot read outside model/cache dirs; killed on memory limit | F-06-08 | M7 | none |
 | Every routing decision checks identity, policy and request class; denials logged | I-05 | M5 | none |
-| Admission, quotas and timeouts bound the cost of one job | F-08-08, F-06-04, F-08-01 | M1 / M3 / M1 | stub / none / present |
+| Admission, quotas and timeouts bound the cost of one job | F-08-08, F-06-04, F-08-01 | M1 / M3 / M1 | stub / present (SINGLE-HOST, §2.13 M3-22, M3-23) / present |
 | Browser contributors isolated by origin, limits documented | X-01 | M12 | none |
 | Plugins declare capabilities; conformance suite | F-09-07 | M11 | none |
 | Contribution scope (groups vs public) chosen at opt-in; audit-logged | F-07-01, F-06-10 | M7 / M3 | none |
 
 **Not mitigated.** Contributor liability for generated content is a policy question, not a technical control; disclosure text (F-10-10, F-10-08) is the only planned measure.
+
+### 2.13 Common Mesh (M3) as built: threat → mitigation → test
+
+**Actors.** A passive or active attacker on the LAN; an unpaired device; a revoked device; a man in the middle during pairing; a paired device that floods or misbehaves; a hostile link aimed at the desktop app.
+**Scope.** What runs in this branch. Every test is a unit test or **SINGLE-HOST** (one Mac). None is two-machine evidence (B-002). ADR-0003 §9 gives each test's file. The two-daemon run is `docs/evidence/m3-single-host-2026-10-15.md`.
+
+| # | Threat | Mitigation as built | Tests | Requirement |
+|---|---|---|---|---|
+| M3-01 | Passive LAN observer reads prompts or completions | QUIC with TLS 1.3 only. The quinn `Endpoint` is the only socket type in `common-network`. 0-RTT off. | `packet_capture_contains_no_plaintext_prompt_single_host`, `no_plaintext_mode_exists` | F-02-03, F-06-03 |
+| M3-02 | Unpaired device connects to the peer endpoint | The verifier rejects an unpinned key inside the TLS handshake (`unknown_ca`). No stream opens; no Capabilities are sent. | `unpinned_key_rejected` | F-02-03 |
+| M3-03 | The dialled address answers with another key (spoofed record, hijacked address) | The dialler accepts only the one key it expects. | `server_key_not_pinned_by_client_rejected` | F-02-03 |
+| M3-04 | Revoked device reconnects, also with a cached TLS session | The verifier refuses revoked keys (`certificate_revoked`). No tickets, no resumption. The store is checked again after registration. | `revoked_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `revoked_key_cannot_reconnect_with_cached_session`, `revoked_during_control_handshake_is_closed` | F-06-05 |
+| M3-05 | Downgrade to TLS 1.2 or an older protocol | Every config pins TLS 1.3. ALPN `common/1`. A major mismatch is `protocol_incompatible`. | `tls12_downgrade_attempt_fails`, `wrong_alpn_fails`, `protocol_major_mismatch_is_typed` | F-06-03, F-08-10 |
+| M3-06 | Peer claims another identity in Hello, or alters a Capabilities record | Hello `peer_id` must equal the TLS identity. The Capabilities signature is checked over the exact bytes received, with a context prefix, before decoding. | `capabilities_signature_covers_the_bytes_sent`, `capabilities_exchanged_after_handshake` | F-02-04 |
+| M3-07 | Oversized or malformed control frames | 1 MiB bound checked before allocation. Capabilities over 64 KiB → `frame_too_large`. Unknown fields and variants are skipped. | `frame_bound_checked_before_allocation`, `oversized_capability_message_rejected`, `unknown_field_tolerated`, `unknown_oneof_variant_tolerated` | F-02-04, F-08-10 |
+| M3-08 | Flood of QUIC Initials from spoofed source addresses | QUIC Retry before any TLS work. Inbound `peer_rejected` lines capped at 20 a minute; the rest are counted. | `rejection_audit_is_rate_limited`, `rejection_audit_lines_are_capped_per_minute` (no test isolates the Retry) | — |
+| M3-09 | Forged, tampered or replayed mDNS records | Ed25519-signed TXT that also covers the SRV port. Records more than 300 s off are dropped. At most 256 entries. A record for a known id at another address needs a newer `ts`. `trusted` is a label only. | `tampered_unsigned_and_foreign_records_rejected`, `stale_records_rejected_both_directions`, `table_is_bounded_and_replays_cannot_redirect` | F-02-01 |
+| M3-10 | Discovery makes a device dial loopback or itself | Loopback and link-local addresses only when nothing else is advertised. Own id never listed. | `pick_addr_never_offers_loopback_or_link_local_when_a_lan_address_exists`, `browser_never_lists_own_id_single_host`, `peers_list_never_shows_this_device_as_discovered_single_host` | F-02-01 |
+| M3-11 | mDNS leaks device details | TXT holds only `v`, `id`, `pair`, `pairport`, `proto`, `ts`, `sig`. No hostname beyond SRV, no models, hardware or user names. | `txt_sign_verify_round_trip` | F-02-01 |
+| M3-12 | Man in the middle during pairing (relay terminating TLS on both legs) | The confirmation MAC binds the TLS exporter and both ids, so each leg fails. | `mitm_relay_detected`, `confirmation_mac_binds_side_exporter_and_ids` | F-02-02 |
+| M3-13 | Online guessing of the 6-digit code | Single use, 120 s window, one attempt at a time. The 6th failure in 60 s locks pairing. | `brute_force_rate_limited`, `wrong_code_fails_and_pins_nothing` | F-02-02 |
+| M3-14 | A wrong-code joiner learns the device name or port | Name and port are sent only after a verified MAC. | `wrong_code_learns_no_name_or_port` | F-02-02 |
+| M3-15 | A QR is scanned but another device answers at that address | The joiner accepts only the QR's key, inside the handshake. Nothing is pinned; no revocation is cleared. | `qr_expected_peer_mismatch_pins_nothing_single_host`, `qr_join_pairs_and_a_qr_for_another_device_pins_nothing_single_host` | F-02-02 |
+| M3-16 | Forged or replayed revocation (cut off an honest device, or undo a re-pair) | Signed with a domain prefix. Issuer pinned here and not revoked. Issuer and target share a group here. Superseded on re-pair. One record per target. | `bad_signature_rejected`, `revocation_requires_issuer_and_target_in_a_common_group`, `repaired_device_survives_replay_of_an_old_revocation`, `revocation_reaches_a_third_device_and_a_re_pair_survives_replay_single_host` | F-06-05 |
+| M3-17 | A revocation misses a member, or reaches devices outside the group | Offered only to the group audience, again on every connection until the peer sends it back. The sync loop keeps a connection to every pinned device. | `revocation_goes_only_to_members_sharing_a_group_single_host`, `revocation_refused_once_is_offered_again_on_reconnect_single_host`, `revocation_fanout_offers_a_record_to_its_audience_until_it_comes_back` | F-06-05 |
+| M3-18 | A revoked device keeps an open session | Every connection to it closes at once with close code `RE`. | `disconnect_within_5s`, `pairing_pins_both_sides_and_revoke_closes_the_connection_single_host` | F-06-05 |
+| M3-19 | A request leaves the device against the privacy setting | Default `local_only`, networking off. `evaluate` runs before any network activity. Privacy is checked again before a stream opens and again on the serving side. | `default_deny`, `local_only_never_leaves_device_fuzz`, `local_only_never_leaves_device_10k_single_host`, `privacy_mode_enforced_end_to_end_single_host`, `peer_target_is_denied_before_any_connection_when_network_is_enabled`, `privacy_gate_lets_only_trusted_group_leave_the_device` | F-06-02, F-06-07 |
+| M3-20 | User leaves local-only without knowing a peer reads the prompt | Disclosure text. `acknowledged: true` required (API), y/N or `--yes` (CLI), a checkbox (desktop). `swarm_allowed` refused. | `disclosure_names_the_risk`, `privacy_mode_enforced_end_to_end_single_host`, `apps/desktop/src/test/privacy.test.tsx` | F-10-10 |
+| M3-21 | A paired device without permission sends work | `may_serve`: networking and `serve_peers` on, peer pinned and not revoked, shared group allowing remote inference. | `unauthorized_peer_is_refused`, `may_serve_requires_serve_peers_and_network`, `workload_only_to_group_members`, `non_member_rejected` | F-06-02, F-02-09 |
+| M3-22 | A paired device floods requests and starves local work | Per-peer buckets: 120 requests and 200,000 tokens a minute, 4 at once. At most 8 streams per connection. Peers never take the last engine slot and never queue. | `token_bucket`, `peer_flood_throttled`, `peer_flood_throttled_local_p95_within_20pct_single_host`, `peer_flood_throttled_through_daemon_single_host`, `peer_request_is_refused_while_local_work_holds_every_engine_slot_single_host`, `peers_never_get_the_last_engine_slot`, `peer_share_and_engine_slots_never_wait` | F-06-04 |
+| M3-23 | A peer sends a grammar bomb or odd sampling, or asks for a different model file | The local API's bounds apply. The model hash is checked before and after load. No substitution. | `peer_requests_get_the_local_api_bounds`, `peer_supplied_grammar_refused_before_load`, `integrity_message_names_both_hashes_without_echoing_junk` | F-06-04 |
+| M3-24 | A peer learns local paths from error messages | Generic messages for engine and filesystem codes. | `peers_never_see_local_paths` | — |
+| M3-25 | An abandoned remote request holds an engine slot | The server cancels on `Cancel` or when the client's send side ends. | `remote_cancel_stops_server_generation_within_500ms` | F-08-02 |
+| M3-26 | A prompt or the key reaches the audit log, logs or the bundle | Audit refuses content fields and strings over 2 KiB. The key is never formatted. A scan of real homes looks for every encoding of the key. | `audit_rejects_content_bearing_fields`, `private_keys_never_formatted`, `private_key_never_logged`, `private_key_absent_from_real_logs_and_bundle_single_host`, `diagnostics_bundle_redacted` | F-06-10, F-06-01 |
+| M3-27 | The audit trail grows without bound, or a flood erases it | Rotation at 8 MiB, 3 files kept, each new file opens with `audit_rotated`. Security kinds have their own trail. Rejection lines are capped. | `rotation_keeps_three_files_and_0600`, `security_trail_survives_a_request_flood`, `concurrent_appends_survive_rotation` | F-06-10 |
+| M3-28 | A request leaves the device with no record | The `sent` line is written before the frame leaves, else nothing is sent. `finished` is written once. The serving side logs the same `request_id`. | `audited_stream_records_one_outcome_whatever_ends_it`, `remote_completion_returns_golden_text_with_target_echoed_single_host` | F-06-10 |
+| M3-29 | Crossed dials cut a running request or serve it twice | The lower id's connection survives. Only the initiator retires a duplicate, and only when it is idle. | `duplicates_resolve_to_the_lower_ids_connection`, `crossed_dials_keep_one_connection_single_host`, `busy_duplicate_is_retired_not_cut_single_host` | — |
+| M3-30 | A dead or cut-off peer leaves a request hanging | Keep-alive 1 s, idle 4 s: worst case 5 s. Typed `peer_lost`. | `kill_peer_detected_within_bound_single_host`, `sigkill_peer_process_detected_within_bound_single_host`, `partition_detected_and_recovered_single_host`, `peer_lost_mid_stream_is_typed` | F-02-05 |
+| M3-31 | A link points the desktop app at a hostile daemon | `?daemon=` works only in dev builds, only for `http` loopback with a port. | `apps/desktop/src/test/devdaemon.test.tsx` | — |
+| M3-32 | Another OS user reads the identity key | `device.key` is 0600 in a 0700 directory, tightened on load. | `file_permissions_0600` | F-06-01 |
+| M3-33 | Something listens although the user never turned networking on | `Node::start` refuses when disabled. Networking, serving and mDNS are off by default. | `network_disabled_refuses_to_listen`, `disabled_config_is_inert`, `settings_default_off_and_round_trip_0600` | F-06-02 |
+| M3-34 | CLI and daemon race on shared state and lose a revocation or a privacy change | Writers lock and re-read; readers reload on change. CLI changes go through the running daemon. | `stale_handle_does_not_undo_another_handles_revocation`, `concurrent_handles_lose_no_update`, `privacy_changed_on_disk_applies_at_once_and_is_never_written_back`, `daemon_is_found_only_when_it_answers_with_this_device_id` | F-06-05 |
+
+**Still open (M3).**
+- **Two-machine evidence (R2, B-002).** Every row above ran on one Mac. Real LAN mDNS, Wi-Fi jitter against the 4 s idle timeout and a kernel capture on a LAN interface are untested. No row is `VERIFIED`.
+- **rustls `tls12` is compiled in (R9).** reqwest (hyper-rustls) enables it. No Common config uses it.
+- **`spake2` 0.4.0 is unaudited (R10)** and, by its own statement, probably not constant-time.
+- A compromised paired device reads every prompt it runs (§4). Common cannot detect that.
+- No kernel packet capture yet: `tcpdump` needs sudo. The in-process relay capture stands in.
+- No test isolates the QUIC Retry. The pairing endpoint has no Retry; its lockout and one-at-a-time loop bound it.
+- Private key bytes are not zeroized in memory.
+- The `peer_rejected` cap is one global window: a flood hides other rejections for that minute (the count is kept).
+- The revocation audience map lives in memory. A record this store never saw can re-revoke a re-paired device (fails closed).
+- With networking on, the peer endpoint binds every interface. Common does not manage the OS firewall; the endpoint accepts only pinned keys.
+- The CLI sends `COMMON_API_KEY` to whatever answers on the loopback port named in `serve.json` (same-user boundary, R6).
+- No bandwidth probe (F-02-07), and no byte or session quotas yet.
 
 ## 3. Secure defaults
 
@@ -287,6 +357,8 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 10. **SD-10** Archive extraction (engine releases) refuses path traversal, absolute paths and symlinks escaping the destination; names pass `safe_name`.
 11. **SD-11** The engine process starts with a scrubbed environment: `DYLD_*`, `LD_*`, `GGML_*`, `LLAMA_ARG_*` removed.
 12. **SD-12** Request bodies and queues are bounded; excess returns `Overloaded` (429/503), never unbounded memory growth.
+13. **SD-13** Peer networking, serving peers and mDNS are off by default. Nothing listens beyond loopback until the user turns networking on.
+14. **SD-14** Leaving `local_only` requires an explicit acknowledgment of the disclosure that a paired device reads the prompts it runs.
 
 ## 4. What TLS does not give you
 
@@ -294,7 +366,8 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 - **Local-only is the only private mode.** Modes B–G disclose the workload to every executing peer. Pairing a device (F-02-02) is granting it read access to whatever policy allows routing to it. The privacy selector (F-10-10) and policy engine (F-06-07) exist to make that disclosure explicit and enforce the boundary, not to remove it.
 - **Confidential computing (F-06-11) is research.** No attestation path exists; no CC hardware is available (B-005). Nothing in Common may claim confidential execution without verified attestation.
 - **Verifiable inference (F-06-12) is research.** Redundancy (X-07) and activation-hash spot checks are statistical detection, not proof. They are never described as cryptographic proof unless they are.
-- **Authentication is not authorization.** A valid peer identity (F-06-01) proves who; policy (F-06-02, F-06-07, I-05) decides whether. Both are M3+.
+- **Authentication is not authorization.** A valid peer identity (F-06-01) proves who; policy (F-06-02, F-06-07, I-05) decides whether. Both exist since M3: identity in the TLS verifier, policy in `PolicyEngine::evaluate` (sending) and `may_serve` (serving).
+- **Mode B shows the whole prompt.** In M3 a paired device runs the whole request, so it reads the full prompt and output, not only activations. The disclosure says this before the user leaves `local_only` (SD-14).
 
 ## 5. Residual risks and open questions
 
@@ -303,13 +376,15 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 | # | Risk | Why it remains | Owner action |
 |---|---|---|---|
 | R1 | **TOCTOU between hash verification and engine load.** `Store::verify` re-hashes the blob; the engine then opens the path by name. A same-user writer can swap the file in between. | Loopback-and-same-user is the OS trust boundary; `llama-server` takes a path, not an fd. Mitigation options: open once and hash the open fd, hard-link into a private per-run directory, or verify via `/proc/self/fd` style path. | Decide in M1 implementation; document in `common-artifacts`. |
-| R2 | **Single-machine testing only (B-002, D-004).** Every multi-node security property (pairing, revocation, capture tests) can only be exercised `SINGLE-HOST`. | No second physical machine. | `SINGLE-HOST` label mandatory; nothing in §2.6–2.9 is `VERIFIED` until a two-machine run. |
+| R2 | **Single-machine testing only (B-002, D-004).** Every multi-node security property (pairing, revocation, capture tests) can only be exercised `SINGLE-HOST`. | No second physical machine. | `SINGLE-HOST` label mandatory; nothing in §2.6–2.9 or §2.13 is `VERIFIED` until a two-machine run. M3 SINGLE-HOST evidence: `docs/evidence/m3-single-host-2026-10-15.md`. |
 | R3 | **No code signing (B-008), no CI (B-007).** Installers unsigned; dependency audit not automated. | Missing identities and remote. | Checksums only; owner to provide identities and authorize remote. |
 | R4 | **Upstream engine binary is trusted at pin time.** The SHA-256 pins what was downloaded, not what the source produces. | No reproducible build of llama.cpp releases. | Consider building from the pinned `source_commit` in CI once B-007 is resolved. |
 | R5 | **llama.cpp memory-safety surface.** GGUF loader and `rpc-server` are C++ with known robustness issues (COMPETITIVE_MATRIX: #15055, #13185, #20315; no fuzzer upstream). | Not Common's code. | Process isolation now (ADR-0002); sandbox at M7 (F-06-08); never expose beyond loopback (D-007). |
-| R6 | **Same-user local attacker.** Anything running as the user can read `$COMMON_HOME` and reach loopback ports. | Inherent to desktop OS model. | Document in user privacy notes; keychain for keys at M3 (F-06-01). |
+| R6 | **Same-user local attacker.** Anything running as the user can read `$COMMON_HOME` and reach loopback ports. | Inherent to desktop OS model. | Document in user privacy notes. M3 chose a 0600 file over the keychain (ADR-0003 D1); revisit with signed builds (M13). |
 | R7 | **Fixture license (B-011).** TinyStories weights have no verified license. | Upstream ambiguity. | Never bundle; download at test time. |
 | R8 | **Engine API key in process memory and command line.** `--api-key` passed as argv is visible to same-user `ps`. | llama-server accepts key via argv or env; env is scrubbed, argv is readable by the same user. | Same boundary as R6; prefer env var `LLAMA_API_KEY` if supported by the pinned build and re-add it after scrubbing. |
+| R9 | **rustls `tls12` is compiled into the binary.** reqwest (hyper-rustls) enables the feature, so TLS 1.2 code ships although no Common config uses it. | Cargo feature unification: reqwest's `rustls-tls` turns it on through hyper-rustls. | Every peer config pins TLS 1.3 (`tls12_downgrade_attempt_fails`). Remove it when reqwest can be built without it. |
+| R10 | **`spake2` 0.4.0 is unaudited** and, by its own statement, probably not constant-time. | Accepted in ADR-0003 D2 for a short-lived pairing code. | It protects only a one-time 120 s code; lockout after 5 failures; long-term trust rests on TLS 1.3 + pinned Ed25519 keys. Track `spake2` 0.5. |
 
 ### 5.2 Requirement gaps (mitigation with no covering row)
 
@@ -326,9 +401,9 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 
 ### 5.3 Open questions
 
-- Transport choice (`quinn`+`rustls` pinned keys vs `iroh` 1.0) — ADR-0003, M3. Affects F-02-03, F-02-06, F-06-03 test design.
+- Transport: settled for M3 as `quinn` + `rustls` with pinned raw keys (ADR-0003 D3). Whether M9 adds an `iroh` adapter or its own relay is still open (F-02-06).
 - Whether `rpc-server` is wrapped (tunnelled through Common's transport) or replaced with Common-native activation frames (F-03-03) — M4. COMPETITIVE_MATRIX recommends not reusing the wire protocol as-is.
-- Key storage: OS keychain availability on Linux headless hosts (F-06-01 allows 0600 file fallback).
+- Key storage: settled for M3 as a 0600 file (ADR-0003 D1). Keychain support waits for signed builds (B-008).
 - Whether redundancy (X-07) tolerances for cross-backend nondeterminism leave a usable detection margin for F-07-09.
 
 ## Appendix A — Test mapping for secure defaults
@@ -339,16 +414,18 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 | SD-01 | `external_interface_not_bound_by_default` | `crates/common-api` (integration: start `serve`, assert only 127.0.0.1 socket) | F-06-06 | planned |
 | SD-01 | `api_binds_localhost_by_default` | `crates/common-api` | F-09-01 | planned (may alias SD-01 above) |
 | SD-02 | `nonloopback_bind_without_key_is_policy_denied` | `crates/common-api` | gap 5 | planned |
-| SD-03 | `no_plaintext_mode_exists`, `downgrade_attempt_fails`, `unpinned_key_rejected`, `packet_capture_contains_no_plaintext_prompt` | `crates/common-network` (M3) | F-06-03, F-02-03 | planned M3 |
-| SD-04 | `default_deny`, `unauthorized_peer_request_refused` | `crates/common-policy` (M3) | F-06-02 | planned M3 |
-| SD-04 | `local_only_never_leaves_device_fuzz` | `tests/security` (M3) | F-06-07 | planned M3 |
+| SD-03 | `no_plaintext_mode_exists`, `tls12_downgrade_attempt_fails`, `wrong_alpn_fails`, `unpinned_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `packet_capture_contains_no_plaintext_prompt_single_host` | `crates/common-network` | F-06-03, F-02-03 | present (SINGLE-HOST) |
+| SD-04 | `default_deny`, `unauthorized_peer_request_refused` | `crates/common-policy` | F-06-02 | present |
+| SD-04 | `defaults_are_local_only_and_a_peer_target_is_refused_without_any_network`, `local_only_never_leaves_device_10k_single_host` | `crates/common-api/tests/mesh.rs` | F-06-02, F-06-07 | present (SINGLE-HOST) |
+| SD-04 | `local_only_never_leaves_device_fuzz` | `crates/common-policy` | F-06-07 | present |
 | SD-05 | `default_off`, `no_contribution_without_opt_in` | `crates/common-metering` (M7) | F-07-01 | planned M7 |
 | SD-06 | `gate_disabled_by_default` (settlement) plus a swarm-flag default test | `crates/common-metering`, `crates/common-network` | F-07-11; swarm flag has no row (spec §22) | planned M9/M10 |
 | SD-07 | `engine_binds_loopback_with_random_key` | `crates/common-runtime` (`llamacpp.rs`) | gap 1 | planned M1 |
 | SD-08 | `metrics_contain_no_prompts` | `crates/common-api` | F-09-03 | planned M1 |
 | SD-08 | `errors_redact_secrets` | `crates/common-core` | F-08-03 | planned M1 (`error_codes_are_stable` present) |
 | SD-08 | `engine_log_and_run_record_contain_no_prompt` | `crates/common-runtime` | gap 4 | planned M1 |
-| SD-08 | `diagnostics_bundle_redacted`, `secret_scan_of_bundle` | `crates/common-observability` (M3) | F-06-10 | planned M3 |
+| SD-08 | `diagnostics_bundle_redacted`, `audit_rejects_content_bearing_fields` | `crates/common-observability` | F-06-10 | present |
+| SD-08 | `private_key_absent_from_real_logs_and_bundle_single_host` | `crates/common-cli/tests/mesh_single_host.rs` | F-06-01, F-06-10 | present (SINGLE-HOST) |
 | SD-09 | `hash_verify`, `corrupted_byte_rejected`, `manifest_signature_or_hash_required` | `crates/common-artifacts` | F-01-05, F-05-01 | planned M1 |
 | SD-09 | `malformed_gguf_rejected_without_crash` | `crates/common-models` | F-01-02 | planned M1 |
 | SD-10 | `safe_names` | `crates/common-core/src/paths.rs` | F-01-05 | **present** |
@@ -357,6 +434,9 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 | SD-11 | `engine_env_is_scrubbed` | `crates/common-runtime` | gap 2 | planned M1 |
 | SD-12 | `queue_bound`, `overload_returns_429`, `overload_does_not_oom` | `crates/common-api` | F-08-08 | planned M1 |
 | SD-12 | `oversized_body_rejected` | `crates/common-api` | gap 6 | planned M1 |
-| SD-12 | `oversized_capability_message_rejected`, `oversized_or_mismatched_dim_frame_rejected` | `crates/common-network`, `crates/common-distributed` | F-02-04, F-03-03 | planned M3/M4 |
+| SD-12 | `oversized_capability_message_rejected`, `frame_bound_checked_before_allocation` | `crates/common-network` | F-02-04 | present |
+| SD-12 | `oversized_or_mismatched_dim_frame_rejected` | `crates/common-distributed` | F-03-03 | planned M4 |
+| SD-13 | `network_disabled_refuses_to_listen`, `disabled_config_is_inert`, `settings_default_off_and_round_trip_0600` | `crates/common-network`, `crates/common-api` | F-06-02 | present |
+| SD-14 | `disclosure_names_the_risk`, `privacy_mode_enforced_end_to_end_single_host` | `crates/common-api` | F-10-10 | present (SINGLE-HOST) |
 
-Present today: `safe_names`, `error_codes_are_stable`, `backoff_is_bounded`, `every_code_has_status_type_and_user_message`, `openai_json_shape`. Everything else in this appendix is planned. Tests marked M3+ cannot run until the corresponding crate exists; tests for gaps 1–6 need requirement rows or an amendment to an existing row before they can carry evidence in the ledger.
+Present today: `safe_names`, `error_codes_are_stable`, `backoff_is_bounded`, `every_code_has_status_type_and_user_message`, `openai_json_shape`, and the rows marked `present` above (M3, 2026-10-15). M1 rows still marked planned were not re-checked in this revision. Tests marked M4+ cannot run until the corresponding crate exists; tests for gaps 1–6 need requirement rows or an amendment to an existing row before they can carry evidence in the ledger.

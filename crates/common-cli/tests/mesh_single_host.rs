@@ -4,11 +4,12 @@
 //! llama-server on the stories15M fixture (skips loudly when absent; `COMMON_REQUIRE_FIXTURES=1`
 //! fails instead). Nothing is mocked.
 //!
-//! Sequence (and why): `peers pair` / `peers join` refuse while a daemon runs on their home, so
-//! trust is set up first and the two daemons start afterwards. With the daemons up, `peers revoke`,
-//! `peers rm`, `groups` and `privacy` go through the daemon's API (`serve.json`), and the test
-//! checks the daemons themselves: the revoked session closes within 5 s, the revoked key is refused
-//! in the handshake, and a later daemon write keeps the revocation.
+//! Sequence (and why): `peers pair` / `peers join` refuse while a daemon runs on their home (it
+//! runs this device's peer endpoint), so trust is set up first and the two daemons start
+//! afterwards. With the daemons up, `peers revoke`, `peers rm`, `groups` and `privacy` go through
+//! the daemon's API (`serve.json`), and the test checks the daemons themselves: the revoked session
+//! closes within 5 s, the revoked key is refused in the handshake, and a later daemon write keeps
+//! the revocation.
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -93,6 +94,15 @@ impl Home {
         );
         text(&o.stdout)
     }
+    /// `ok` at debug level (`-vv`), appending its stdout and stderr to `log`.
+    fn ok_vv(&self, args: &[&str], log: &mut String) -> String {
+        let o = self.run(&[args, &["-vv"]].concat());
+        let (out, err) = (text(&o.stdout), text(&o.stderr));
+        assert!(o.status.success(), "common {args:?} failed: {err}\n{out}");
+        log.push_str(&err);
+        log.push_str(&out);
+        out
+    }
     fn fails_with(&self, args: &[&str], code: &str) -> String {
         let o = self.run(args);
         let err = text(&o.stderr);
@@ -170,7 +180,9 @@ fn wait_http(port: u16, child: &mut Child) {
         }
         if let Some(st) = child.try_wait().unwrap() {
             let mut err = String::new();
-            child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+            if let Some(mut e) = child.stderr.take() {
+                e.read_to_string(&mut err).unwrap();
+            }
             panic!("daemon exited early ({st}): {err}");
         }
         assert!(Instant::now() < deadline, "daemon did not listen on {port} within 60 s");
@@ -231,74 +243,179 @@ fn b64(b: &[u8]) -> String {
         .collect()
 }
 
-fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Regular files under `dir`, symlinks not followed (counted in `links`).
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>, links: &mut usize) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            files_under(&p, out);
+        let (p, t) = (e.path(), e.file_type().unwrap());
+        if t.is_symlink() {
+            *links += 1;
+        } else if t.is_dir() {
+            files_under(&p, out, links);
         } else {
             out.push(p);
         }
     }
 }
 
-/// F-06-01 grep: the device key (its PKCS#8 file and the 32-byte seed inside) as raw bytes, hex,
-/// upper hex, base64 or base64url appears in no file under `logs/` (audit.jsonl, engine logs), in
-/// no `diag*.json` bundle and not in `output` (the daemon's stdout and stderr).
-fn assert_key_absent(home: &Home, output: &str) -> usize {
-    assert_eq!(
-        (b64(b"Man"), b64(b"Ma"), b64(b"M")),
-        ("TWFu".into(), "TWE".into(), "TQ".into())
-    );
-    let pkcs8 = std::fs::read(home.root.join("identity/device.key")).unwrap();
-    // ring's Ed25519 PKCS#8 v2 document: SEQUENCE header, version 1, id-Ed25519, OCTET STRING
-    // wrapping the 32-byte seed, then the public key (its [1] tag differs across ring versions).
-    let after_len = [
-        0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+/// What [`assert_key_absent`] searched: files, their bytes, symlinks not followed.
+struct Scanned {
+    /// Relative to the home.
+    files: Vec<String>,
+    bytes: usize,
+    links: usize,
+    /// Number of seed encodings searched for.
+    needles: usize,
+}
+
+/// ring's Ed25519 PKCS#8 v2 document after its 2-byte SEQUENCE header: version 1, id-Ed25519,
+/// OCTET STRING wrapping the 32-byte seed (bytes 16..48), then the public key (its [1] tag differs
+/// across ring versions).
+const PKCS8_AFTER_LEN: [u8; 14] = [
+    0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
+/// The forms the 32-byte Ed25519 seed could take in a log, file or bundle. Each also catches the
+/// PKCS#8 document (or seed||public key) printed the same way, since the seed sits inside it.
+/// Raw bytes; lower and upper hex; the comma-joined decimals that `{:?}`, `{:#?}` and serde_json
+/// print for a byte slice (matched after whitespace is dropped, see [`contains_key`]); base64 and
+/// base64url with the seed starting at byte 0, 1 or 2 of a 3-byte group of a larger buffer: the
+/// 30 seed bytes from offset 0, 1 or 2 are whole groups, so their 40 chars do not depend on
+/// neighbouring bytes or padding.
+// ponytail: not covered are `{:x?}` (unpadded hex list), per-byte `0x..` and other ad-hoc
+// formats; add a needle when a code path prints bytes that way.
+fn seed_needles(seed: &[u8]) -> Vec<Vec<u8>> {
+    assert_eq!(seed.len(), 32);
+    let h = hex::encode(seed);
+    let decimal: Vec<String> = seed.iter().map(u8::to_string).collect();
+    let mut n = vec![
+        seed.to_vec(),
+        h.to_uppercase().into_bytes(),
+        h.into_bytes(),
+        decimal.join(",").into_bytes(),
     ];
+    for i in 0..3 {
+        let b = b64(&seed[i..i + 30]);
+        n.push(b.replace('+', "-").replace('/', "_").into_bytes());
+        n.push(b.into_bytes());
+    }
+    n
+}
+
+/// Whether any needle occurs in `hay` as is or with all ASCII whitespace removed (so `{:?}`'s
+/// `", "`, pretty JSON and line-wrapped base64 or hex match too; extra hits only fail safe).
+fn contains_key(hay: &[u8], needles: &[Vec<u8>]) -> bool {
+    let squeezed: Vec<u8> = hay.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+    [hay, &squeezed[..]]
+        .iter()
+        .any(|h| needles.iter().any(|n| h.windows(n.len()).any(|w| w == &n[..])))
+}
+
+/// F-06-01 grep: the device key (the 32-byte Ed25519 seed in its PKCS#8 file, in every form of
+/// [`seed_needles`]) appears in no file under the home (`identity/device.key` itself excepted; the
+/// home must hold `audit.jsonl` and a `diag*` bundle) and not in `output` (daemon and CLI stdout
+/// and stderr). Symlinks are not followed: in these homes they point at the hash-pinned engine and
+/// model outside the home.
+fn assert_key_absent(home: &Home, output: &str) -> Scanned {
+    let key_file = home.root.join("identity/device.key");
+    let pkcs8 = std::fs::read(&key_file).unwrap();
     assert_eq!(
         (pkcs8[0], &pkcs8[2..16]),
-        (0x30, &after_len[..]),
+        (0x30, &PKCS8_AFTER_LEN[..]),
         "unexpected device.key layout"
     );
-    let needles: Vec<Vec<u8>> = [&pkcs8[..], &pkcs8[16..48]]
-        .into_iter()
-        .flat_map(|k| {
-            let (h, b) = (hex::encode(k), b64(k));
-            [
-                k.to_vec(),
-                h.to_uppercase().into_bytes(),
-                h.into_bytes(),
-                b.replace('+', "-").replace('/', "_").into_bytes(),
-                b.into_bytes(),
-            ]
-        })
-        .collect();
-    let mut files = vec![];
-    files_under(&home.root.join("logs"), &mut files);
-    files.extend(
-        std::fs::read_dir(&home.root)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("diag")),
+    let needles = seed_needles(&pkcs8[16..48]);
+    let (mut files, mut links) = (vec![], 0);
+    files_under(&home.root, &mut files, &mut links);
+    files.retain(|f| *f != key_file);
+    assert!(files.iter().any(|f| f.ends_with("logs/audit.jsonl")), "{files:?}");
+    assert!(
+        files
+            .iter()
+            .any(|f| f.parent() == Some(&home.root) && f.file_name().unwrap().to_string_lossy().starts_with("diag")),
+        "{files:?}"
     );
-    assert!(files.iter().any(|f| f.ends_with("audit.jsonl")), "{files:?}");
-    assert!(files.iter().any(|f| f.to_string_lossy().contains("diag")), "{files:?}");
     let mut hay: Vec<(String, Vec<u8>)> = files
         .iter()
         .map(|f| (f.display().to_string(), std::fs::read(f).unwrap()))
         .collect();
     hay.push(("daemon output".into(), output.as_bytes().to_vec()));
     for (name, h) in &hay {
-        for n in &needles {
-            assert!(
-                !h.windows(n.len()).any(|w| w == &n[..]),
-                "device key material in {name}"
-            );
-        }
+        assert!(!contains_key(h, &needles), "device key material in {name}");
     }
-    hay.len()
+    Scanned {
+        files: files
+            .iter()
+            .map(|f| f.strip_prefix(&home.root).unwrap().display().to_string())
+            .collect(),
+        bytes: hay.iter().map(|(_, h)| h.len()).sum(),
+        links,
+        needles: needles.len(),
+    }
+}
+
+/// SYNTHETIC key (a made-up seed, no daemon): the scan in [`assert_key_absent`] catches each form
+/// it claims, including the key inside a larger buffer at every base64 alignment, and does not
+/// fire on unrelated text. This is the positive control for the F-06-01 greps below.
+#[test]
+fn key_scan_catches_every_claimed_encoding_synthetic_key() {
+    assert_eq!(
+        (b64(b"Man"), b64(b"Ma"), b64(b"M")),
+        ("TWFu".into(), "TWE".into(), "TQ".into())
+    );
+    let seed: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(197).wrapping_add(251)).collect();
+    let public = [0xfeu8; 32];
+    let mut doc = vec![0x30, 0x51];
+    doc.extend(PKCS8_AFTER_LEN);
+    doc.extend(&seed);
+    doc.extend([0x81, 0x21, 0x00]);
+    doc.extend(public);
+    let pair = [&seed[..], &public[..]].concat();
+    let url = |s: String| s.replace('+', "-").replace('/', "_");
+    let mut leaks: Vec<Vec<u8>> = vec![
+        doc.clone(),
+        format!("key={seed:?}").into(),
+        format!("{doc:#?}").into(),
+        serde_json::to_vec(&doc).unwrap(),
+        serde_json::to_vec_pretty(&seed).unwrap(),
+        hex::encode(&doc).into(),
+        hex::encode_upper(&pair).into(),
+    ];
+    // Base64 of doc, of seed||public and of the seed behind 1 and 2 other bytes (alignments 1, 0,
+    // 1, 2), wrapped every 16 chars so each needle crosses a line break; base64url of each.
+    for buf in [
+        doc.clone(),
+        pair.clone(),
+        [&[1u8][..], &pair[..]].concat(),
+        [&[1u8, 2][..], &seed[..]].concat(),
+    ] {
+        let b = b64(&buf);
+        let wrapped: Vec<&str> = b
+            .as_bytes()
+            .chunks(16)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        leaks.push(wrapped.join("\n").into());
+        leaks.push(url(b).into());
+    }
+    let needles = seed_needles(&seed);
+    assert_eq!(needles.len(), 10);
+    for leak in &leaks {
+        assert!(contains_key(leak, &needles), "missed: {}", text(leak));
+    }
+    let clean = format!("{public:?} {} {}", hex::encode(public), b64(&doc[..16]));
+    assert!(!contains_key(clean.as_bytes(), &needles), "{clean}");
+}
+
+/// `remote_request` audit entries of `home` written by the sending side (`role: client`), or by
+/// the serving side (no role) when `client` is false.
+fn remote_entries(home: &Home, client: bool) -> Vec<Value> {
+    let all = json(&home.ok(&["audit", "--n", "500", "--json"]));
+    all.as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "remote_request" && (e["fields"]["role"] == "client") == client)
+        .cloned()
+        .collect()
 }
 
 fn terminate(mut child: Child, what: &str) -> String {
@@ -362,6 +479,20 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
     );
     assert!(b.ok(&["peers", "list"]).contains("no paired devices"));
     assert!(a.ok(&["peers", "list"]).contains("no paired devices"));
+    // A QR payload naming another device: A's key fails B's TLS verifier inside the handshake, so
+    // nothing is pinned on either side and A's window stays open.
+    let secret = qr.rsplit(':').next().unwrap();
+    let other = "ab".repeat(32);
+    let wrong_qr = format!("common-pair:v1:{other}:{pair_addr}:{secret}");
+    let err = b.fails_with(
+        &[&["peers", "join", &wrong_qr, "--name", "beta"][..], &net_b].concat(),
+        "pairing_failed",
+    );
+    assert!(err.contains("not the one in the QR code"), "{err}");
+    assert!(b.ok(&["peers", "list"]).contains("no paired devices"));
+    assert!(a.ok(&["peers", "list"]).contains("no paired devices"));
+    let raw = std::fs::read_to_string(b.root.join("logs/audit.jsonl")).unwrap();
+    assert!(raw.contains("qr_peer_mismatch") && raw.contains(&other), "{raw}");
     // A malformed code is refused before any packet.
     b.fails_with(
         &["peers", "join", &pair_addr, "12", "--name", "beta"],
@@ -381,11 +512,26 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
     );
     let st = pair.wait_with_output().unwrap();
     assert!(st.status.success(), "{}", text(&st.stderr));
-    let a_peers = json(&a.ok(&["peers", "list", "--json"]));
+    // No daemon: store-only, connection state unknown (null), and the text says why.
+    assert!(a.ok(&["peers", "list"]).contains("`common serve` is not running here"));
+    let a_list = json(&a.ok(&["peers", "list", "--json"]));
+    assert_eq!(
+        (&a_list["daemon"], &a_list["discovered"]),
+        (&Value::Null, &Value::Array(vec![]))
+    );
+    let a_peers = &a_list["peers"];
+    assert_eq!(a_peers[0]["connected"], Value::Null);
     let id_b = a_peers[0]["id"].as_str().unwrap().to_string();
     assert_eq!(a_peers[0]["name"], "beta");
     assert_eq!(a_peers[0]["last_addr"], format!("127.0.0.1:{pb}"));
-    let b_peers = json(&b.ok(&["peers", "list", "--json"]));
+    let b_list = json(&b.ok(&["peers", "list", "--json"]));
+    let b_peers = &b_list["peers"];
+    assert!(
+        b_list["this_device"]
+            .as_str()
+            .is_some_and(|me| me.len() == 64 && me != id_a),
+        "{b_list}"
+    );
     assert_eq!(b_peers[0]["id"], id_a);
     assert_eq!(b_peers[0]["name"], "alpha");
     let label_a = b_peers[0]["label"].as_str().unwrap().to_string();
@@ -457,6 +603,64 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
         "prompt text is not stored without --save-prompt"
     );
     let _ = std::fs::remove_dir_all(Path::new(v["manifest_path"].as_str().unwrap()).parent().unwrap());
+    // F-06-10, sending side: B audited `sent` then `finished` (done, 32 tokens), ids and counts only.
+    let sent = remote_entries(&b, true);
+    let phases: Vec<(&str, &str)> = sent
+        .iter()
+        .map(|e| {
+            (
+                e["fields"]["phase"].as_str().unwrap(),
+                e["fields"]["outcome"].as_str().unwrap_or("-"),
+            )
+        })
+        .collect();
+    assert_eq!(phases, [("sent", "-"), ("finished", "done")], "{sent:?}");
+    for e in &sent {
+        assert_eq!(
+            (&e["peer_id"], &e["fields"]["model_id"]),
+            (&Value::from(id_a.as_str()), &Value::from(MODEL))
+        );
+        assert_eq!(e["fields"]["peer"], label_a);
+    }
+    assert_eq!(sent[1]["fields"]["completion_tokens"], 32);
+    let raw = std::fs::read_to_string(b.root.join("logs/audit.jsonl")).unwrap();
+    assert!(
+        !raw.contains(PROMPT) && !raw.contains("Benny"),
+        "text leaked into B's audit"
+    );
+    // Both sides' entries join on the request id (A writes its entry once it has finished).
+    // `finished` carries it; `sent` carries the same id or none (common-api decides when the id
+    // is chosen relative to the `sent` entry).
+    let id = sent[1]["fields"]["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_string();
+    let first = &sent[0]["fields"]["request_id"];
+    assert!(first.is_null() || *first == id.as_str(), "{sent:?}");
+    wait_until(Duration::from_secs(5), "A audited the request B sent", || {
+        remote_entries(&a, false)
+            .iter()
+            .any(|e| e["fields"]["request_id"] == id.as_str() && e["fields"]["outcome"] == "done")
+    });
+    // No run without its `sent` entry: with B's audit log unwritable the request is cancelled as
+    // soon as it leaves, the run fails with `io` and prints no completion. (A may log the cancel.)
+    let log = b.root.join("logs/audit.jsonl");
+    let mode = |m: u32| std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
+    mode(0o400);
+    let o = b.run(&["run", MODEL, "-p", PROMPT, "-n", "4", "--peer", &id_a]);
+    mode(0o600);
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("error[io]") && err.contains("audit log not writable"),
+        "{err}"
+    );
+    assert_eq!(text(&o.stdout), "", "no completion without an audit entry");
+    assert_eq!(
+        remote_entries(&b, true).len(),
+        2,
+        "nothing recorded for the refused run"
+    );
     // Text mode names the target in the summary line.
     let o = b.run(&[
         "run", MODEL, "-p", PROMPT, "-n", "8", "--temp", "0", "--seed", "42", "--peer", &label_a,
@@ -493,9 +697,9 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
     );
     assert!(!bundle.contains(&id_a), "64-hex ids are masked in the bundle");
 
-    // While a daemon owns the trust store, CLI pairing (its own endpoint and pin) is refused.
+    // While a daemon runs this device's peer endpoint, CLI pairing (a second endpoint) is refused.
     let err = a.fails_with(&["peers", "pair"], "invalid_request");
-    assert!(err.contains("owns this device's trust store"), "{err}");
+    assert!(err.contains("runs this device's peer endpoint"), "{err}");
 
     // Daemon B opens a session to daemon A (the API's peer target); daemon A holds the other end.
     let completion = |target: &str| serde_json::json!({ "model": MODEL, "prompt": PROMPT, "max_tokens": 4, "temperature": 0, "target": format!("peer:{target}") });
@@ -503,6 +707,16 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(connected(api_b, &id_a), Some(true));
     assert_eq!(connected(api_a, &id_b), Some(true));
+    // `peers list` merges the daemon's live view (mDNS is off here, so nothing is discovered).
+    let live = json(&b.ok(&["peers", "list", "--json"]));
+    assert_eq!(live["daemon"], format!("http://127.0.0.1:{api_b}"), "{live}");
+    assert_eq!(
+        (&live["peers"][0]["id"], &live["peers"][0]["connected"]),
+        (&Value::from(id_a.as_str()), &Value::Bool(true))
+    );
+    assert_eq!(live["discovered"], Value::Array(vec![]));
+    let table = b.ok(&["peers", "list"]);
+    assert!(table.contains("CONNECTED") && !table.contains("not running"), "{table}");
 
     // Revocation with both daemons running (F-06-05). The CLI goes through daemon B (serve.json),
     // which closes A's session at once: daemon A sees it closed within 5 s.
@@ -568,6 +782,176 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
         let out = h.root.join("diag-final.json");
         h.ok(&["diagnostics", "--out", out.to_str().unwrap()]);
     }
-    let checked = assert_key_absent(&a, &out_a) + assert_key_absent(&b, &out_b);
-    eprintln!("SINGLE-HOST: device keys absent from {checked} logs, bundles and outputs");
+    for (h, out) in [(&a, &out_a), (&b, &out_b)] {
+        let s = assert_key_absent(h, out);
+        eprintln!(
+            "SINGLE-HOST: device key absent ({} encodings of its seed, default log level) from {} files {:?} and the daemon output ({} bytes; {} symlinked pinned assets not followed)",
+            s.needles, s.files.len(), s.files, s.bytes, s.links
+        );
+    }
+}
+
+/// F-06-01 at debug log level, with the paths that sign with the device key exercised: daemon A
+/// (`common serve --network --serve-peers -vv`, pinned engine, real fixture) opens a pairing
+/// window; install B (`-vv` CLI, no daemon) pairs with it over SPAKE2, then runs a remote request
+/// on A (TLS 1.3 handshakes with both raw public keys, signed capabilities both ways, real
+/// inference on A); A answers a local completion and revokes B through the daemon (a revocation
+/// signed with A's key). Then both keys are searched (every form of [`seed_needles`]) in every
+/// file under both homes, both diagnostics bundles and all daemon and CLI stdout and stderr.
+/// SINGLE-HOST: one daemon and one CLI on this Mac; nothing here is a two-machine result.
+#[test]
+fn private_key_absent_from_real_logs_and_bundle_single_host() {
+    let Some(real) = fixtures() else { return };
+    let h = Home::new("leak", &real);
+    let b = Home::new("leakb", &real);
+    let (api, udp, udp_b) = (
+        free_tcp_port(),
+        free_udp_port().to_string(),
+        free_udp_port().to_string(),
+    );
+    let net_b = ["--listen-port", &udp_b, "--listen-addr", "127.0.0.1", "--no-mdns"];
+    let (mut d, lines) = h.spawn(&[
+        "serve",
+        "--port",
+        &api.to_string(),
+        "--network",
+        "--serve-peers",
+        "-vv",
+        "--listen-port",
+        &udp,
+        "--listen-addr",
+        "127.0.0.1",
+        "--no-mdns",
+    ]);
+    // Debug logging is chatty: drain stderr so the daemon never blocks on a full pipe.
+    let mut stderr = d.stderr.take().unwrap();
+    let err_reader = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        stderr.read_to_end(&mut v).unwrap();
+        v
+    });
+    wait_http(api, &mut d);
+    // Stdout and stderr of every `-vv` CLI run, A's and B's.
+    let mut cli = String::new();
+
+    let (st, net) = http(api, "GET", "/api/network", None);
+    assert_eq!((st, net["enabled"].as_bool()), (200, Some(true)), "{net}");
+    assert_eq!(http(api, "GET", "/api/peers", None).0, 200);
+    let (st, pair) = http(
+        api,
+        "POST",
+        "/api/pair/start",
+        Some(serde_json::json!({ "name": "leak" })),
+    );
+    assert_eq!(st, 200, "{pair}");
+    let qr = pair["qr_payload"].as_str().unwrap_or_default();
+    assert!(qr.starts_with("common-pair:v1:"), "{pair}");
+    let id_a = qr.split(':').nth(2).unwrap().to_string();
+
+    // B pairs with the daemon's window (SPAKE2 inside TLS with A's device key).
+    let (addr, code) = (pair["pair_addr"].as_str().unwrap(), pair["code"].as_str().unwrap());
+    let joined = b.ok_vv(
+        &[&["peers", "join", addr, code, "--name", "leakb"][..], &net_b].concat(),
+        &mut cli,
+    );
+    assert!(joined.contains("paired leak"), "{joined}");
+    wait_until(Duration::from_secs(10), "daemon A finished pairing", || {
+        !http(api, "GET", "/api/pair/status", None).1["result"]["peer"].is_null()
+    });
+    let id_b = json(&b.ok(&["peers", "list", "--json"]))["this_device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(connected(api, &id_b), Some(false), "daemon A pinned B");
+
+    // Policy on both sides (default deny), then B runs the prompt on A: one handshake each way of
+    // signing (TLS CertificateVerify, capabilities), real inference on A.
+    h.ok_vv(&["groups", "create", "home", "--allow-remote"], &mut cli);
+    h.ok_vv(&["groups", "add", "home", &id_b], &mut cli);
+    b.ok_vv(&["groups", "create", "home", "--allow-remote"], &mut cli);
+    b.ok_vv(&["groups", "add", "home", &id_a], &mut cli);
+    b.ok_vv(&["privacy", "trusted-devices", "--yes"], &mut cli);
+    let remote = b.ok_vv(
+        &[
+            "run", MODEL, "-p", PROMPT, "-n", "8", "--temp", "0", "--seed", "42", "--peer", &id_a,
+        ],
+        &mut cli,
+    );
+    assert!(remote.starts_with(" named Benny"), "{remote}");
+
+    let (st, v) = http(
+        api,
+        "POST",
+        "/v1/completions",
+        Some(serde_json::json!({ "model": MODEL, "prompt": PROMPT, "max_tokens": 8, "temperature": 0 })),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v["choices"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with(" named Benny")),
+        "{v}"
+    );
+    // Daemon A signs the revocation of B with its device key.
+    let r = json(&h.ok_vv(&["peers", "revoke", &id_b, "--json"], &mut cli));
+    assert_eq!(
+        (&r["daemon_applied"], r["signature"].as_str().map(str::len)),
+        (&Value::Bool(true), Some(128)),
+        "{r}"
+    );
+    // A writes its `remote_request` entry once the request has finished.
+    wait_until(
+        Duration::from_secs(5),
+        "A audited pairing, the remote request and the revoke",
+        || {
+            let (st, audit) = http(api, "GET", "/api/audit", None);
+            assert_eq!(st, 200, "{audit}");
+            let kinds: Vec<&str> = audit["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e["kind"].as_str())
+                .collect();
+            ["pairing_succeeded", "remote_request", "peer_revoked"]
+                .iter()
+                .all(|k| kinds.contains(k))
+        },
+    );
+
+    let stdout = terminate(d, "daemon") + &lines.try_iter().collect::<Vec<_>>().join("\n");
+    let stderr = String::from_utf8_lossy(&err_reader.join().unwrap()).into_owned();
+    // rustls's debug line names the ALPN of each handshake the daemon served: the pairing one and
+    // the workload one were both logged at debug level, inside the output scanned below.
+    for alpn in ["common-pair/1", "common/1"] {
+        assert!(
+            stderr.contains(&format!("ProtocolName({})", hex::encode(alpn))),
+            "daemon logged no {alpn} handshake at debug"
+        );
+    }
+    for (who, out) in [("daemon", &stderr), ("CLI", &cli)] {
+        assert!(
+            out.contains("DEBUG"),
+            "{who} -vv logs at debug: {}",
+            &out[..out.len().min(500)]
+        );
+    }
+    for (home, name) in [(&h, "diag-leak.json"), (&b, "diag-leakb.json")] {
+        let bundle = home.root.join(name);
+        home.ok(&["diagnostics", "--out", bundle.to_str().unwrap()]);
+        assert_eq!(json(&std::fs::read_to_string(&bundle).unwrap())["schema_version"], 1);
+    }
+
+    let all = format!("{stdout}\n{stderr}\n{cli}");
+    for (home, who) in [(&h, "A (daemon)"), (&b, "B (CLI)")] {
+        let s = assert_key_absent(home, &all);
+        eprintln!(
+            "SINGLE-HOST: device key of {who}: 0 hits for {} encodings of its seed in {} files under its COMMON_HOME {:?} and {} bytes of -vv daemon+CLI stdout/stderr (pairing, handshakes, remote request, revocation); {} bytes scanned in all; {} symlinked pinned assets (engine, model) not followed",
+            s.needles,
+            s.files.len(),
+            s.files,
+            all.len(),
+            s.bytes,
+            s.links
+        );
+    }
 }

@@ -2,7 +2,8 @@
 //!
 //! Protocol `common-pair/1`, one bidirectional stream opened by the joiner B on the initiator A's
 //! pairing endpoint (TLS 1.3, raw public keys both ways, verifier accepts any key: trust comes
-//! from the code, not the handshake). Frames are `u8 length ‖ bytes` (≤ 255 bytes):
+//! from the code, not the handshake; a joiner holding a QR payload accepts only the QR's key, see
+//! [`join_with`]). Frames are `u8 length ‖ bytes` (≤ 255 bytes):
 //!
 //! 1. B → A: `selector ‖ SPAKE2 msg_B` (selector 0 = 6-digit code, 1 = QR secret).
 //! 2. A → B: `SPAKE2 msg_A`. Both derive `K` (`spake2` hashes pw, idA, idB, X, Y into it).
@@ -237,10 +238,7 @@ fn record(peer: PeerId, name: String, ip: IpAddr, port: u16) -> PeerRecord {
 }
 
 fn audit(node: &Node, kind: &str, peer: Option<&PeerId>, fields: serde_json::Value) {
-    let hex = peer.map(|p| p.to_hex());
-    if let Err(e) = node.audit.record(kind, hex.as_deref(), fields) {
-        tracing::debug!(kind, error = %e, "audit record not written");
-    }
+    node.audit(kind, peer, fields);
 }
 
 async fn exchange_with_deadline(
@@ -410,17 +408,60 @@ pub async fn start(
 /// Joiner: connect to `addr` (pairing endpoint), run SPAKE2 with `code`, verify HMAC confirmation
 /// bound to the TLS exporter and both PeerIds, pin the initiator. Wrong code / MITM → PairingFailed.
 pub async fn join(node: Arc<Node>, addr: SocketAddr, code: &str, device_name: &str) -> Result<PeerRecord> {
+    join_with(node, addr, code, device_name, None).await
+}
+
+/// [`join`], and when `expected` is `Some` (the id from a QR payload, see
+/// [`expected_peer_from_qr`]) the TLS verifier accepts only that key: any other device that
+/// answers at `addr` fails the handshake itself, before SPAKE2 starts, with `PairingFailed`
+/// ("the device that answered is not the one in the QR code"). Nothing is pinned and no
+/// revocation is touched on either side.
+pub async fn join_with(
+    node: Arc<Node>,
+    addr: SocketAddr,
+    code: &str,
+    device_name: &str,
+    expected: Option<PeerId>,
+) -> Result<PeerRecord> {
     selector_for(code)?;
     let name = clean_name(device_name);
-    let cc = tls::client_config(&node.identity, PeerPolicy::AcceptAny, ALPN_PAIRING)?;
+    let cc = match expected {
+        None => tls::client_config(&node.identity, PeerPolicy::AcceptAny, ALPN_PAIRING)?,
+        Some(want) => {
+            let only: tls::Check = Arc::new(move |id| {
+                if *id == want {
+                    tls::Verdict::Allowed
+                } else {
+                    tls::Verdict::Unpinned
+                }
+            });
+            tls::client_config_with(node.identity.pkcs8_der(), only, ALPN_PAIRING)?
+        }
+    };
     let connecting = node
         .endpoint
         .connect_with(cc, addr, "common")
         .map_err(|e| failed(format!("connect: {e}")))?;
-    let conn = tokio::time::timeout(EXCHANGE_TIMEOUT, connecting)
-        .await
-        .map_err(|_| failed("pairing endpoint did not answer"))?
-        .map_err(|e| failed(format!("pairing connect failed: {}", map_conn_error(&e).message)))?;
+    let conn = match tokio::time::timeout(EXCHANGE_TIMEOUT, connecting).await {
+        Err(_) => return Err(failed("pairing endpoint did not answer")),
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
+            let e = map_conn_error(&e);
+            // Our verifier refused the answering key: not the QR's device (or not Ed25519).
+            if expected.is_some() && e.code == ErrorCode::PeerUnauthorized {
+                tracing::info!("pairing refused: the device that answered is not the one in the QR code");
+                let want = expected.map(|id| id.to_hex());
+                audit(
+                    &node,
+                    "pairing_failed",
+                    None,
+                    serde_json::json!({ "role": "joiner", "addr": addr.to_string(), "reason": "qr_peer_mismatch", "expected": want }),
+                );
+                return Err(failed("the device that answered is not the one in the QR code"));
+            }
+            return Err(failed(format!("pairing connect failed: {}", e.message)));
+        }
+    };
     let port = node.local_addr()?.port();
     let role = Role::Joiner { pw: code };
     match exchange_with_deadline(&conn, &node.identity, role, &name, port).await {
@@ -484,8 +525,8 @@ fn first_routable(ips: &[IpAddr], v4: bool) -> Option<IpAddr> {
         .copied()
 }
 
-/// Parse `common-pair:v1:<peer hex>:<ip:port>:<secret hex>`; the secret is passed to [`join`] as
-/// the code. The caller compares the returned id with the pinned record's id after joining.
+/// Parse `common-pair:v1:<peer hex>:<ip:port>:<secret hex>`; pass the secret as the code and the
+/// id as `expected` to [`join_with`], which then refuses any other device inside the handshake.
 pub fn expected_peer_from_qr(payload: &str) -> Result<(PeerId, SocketAddr, String)> {
     let bad = |m: &str| CommonError::invalid(format!("QR payload: {m}"));
     let rest = payload

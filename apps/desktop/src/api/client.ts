@@ -155,6 +155,8 @@ export interface Discovered {
 export interface PairingSession {
   code: string;
   port: number;
+  /** `ip:port` the other device enters under "Join a device" (LAN address when bound on every interface); older daemons omit it. */
+  pair_addr?: string;
   qr_payload: string;
   /** Unix seconds (the daemon's form) or an ISO timestamp; see `expiresAtMs`. */
   expires_at: number | string;

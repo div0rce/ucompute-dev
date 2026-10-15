@@ -7,6 +7,7 @@
 pub mod conformance;
 pub mod llamacpp;
 pub mod manager;
+pub mod schema;
 pub mod types;
 
 pub use types::*;

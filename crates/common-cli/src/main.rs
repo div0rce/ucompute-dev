@@ -422,8 +422,8 @@ async fn parent_exited(enabled: bool) {
 /// `--network` / `--serve-peers` switch the persisted settings on (the same `config.json` the API's
 /// `PUT /api/network` writes; the API reads it in `AppState::new`), so the flags and the desktop
 /// toggle are one switch. Nothing listens for peers unless that switch is on (SD-04/SD-05).
-// ponytail: persisting is the only way in, `AppState::set_settings` is pub(crate); a run-only
-// override needs that to become pub (said in the report).
+// ponytail: persisted, not a run-only override: `AppState::set_settings` lasts only until
+// config.json next changes (any CLI or desktop edit). A per-run override needs an API flag.
 fn mesh_settings(a: &ServeArgs, paths: &Paths) -> Result<mesh::Settings> {
     let before = mesh::load_settings(paths)?;
     let after = mesh::Settings {
@@ -464,7 +464,7 @@ async fn serve(a: &ServeArgs) -> Result<()> {
         .await
         .map_err(|e| CommonError::io(format!("cannot bind {addr}: {e}")))?;
     let addr = listener.local_addr()?;
-    // While this runs it owns peers.json and config.json; CLI mesh commands find it here.
+    // CLI mesh mutations find this daemon here and go through its API for their live effects.
     mesh::write_serve_file(&paths, addr)?;
     println!("listening on http://{addr}");
     if settings.network_enabled {

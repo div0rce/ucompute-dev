@@ -616,3 +616,150 @@ async fn supervise_stops_when_the_peer_refuses() {
     assert_eq!(na.health(&b.id()), Some(PeerHealth::Disconnected));
     assert_eq!(connects.load(Ordering::SeqCst), 1);
 }
+
+/// Two daemons' dial loops dial each other at the same moment: within 2 s each side holds exactly
+/// one live connection to the other, the one initiated by the lower PeerId (outbound on that side,
+/// inbound on the other), it stays the only one, and a later `connect` returns it without
+/// dialling. Repeated with fresh identities so either id order and both race outcomes occur.
+/// SINGLE-HOST: two in-process nodes on loopback.
+#[tokio::test]
+async fn crossed_dials_keep_one_connection_single_host() {
+    for round in 0..6 {
+        let (a, b) = pair();
+        let (na, nb) = (a.start().await, b.start().await);
+        for n in [&na, &nb] {
+            let n = n.clone();
+            tokio::spawn(async move { while n.accept().await.is_some() {} });
+        }
+        let t0 = Instant::now();
+        let (ra, rb) = tokio::join!(
+            na.connect(nb.local_addr().unwrap(), b.id()),
+            nb.connect(na.local_addr().unwrap(), a.id())
+        );
+        let dialled = t0.elapsed();
+        let (ra, rb) = (ra.unwrap(), rb.unwrap());
+        assert_eq!((ra.peer_id, rb.peer_id), (b.id(), a.id()));
+        // From the moment its own dial returned, the lower id hands out that connection first, even
+        // while the higher id's crossed one is still open on its side (closed once idle).
+        let a_lower = a.id() < b.id();
+        let (lower, higher) = if a_lower { (&na, b.id()) } else { (&nb, a.id()) };
+        let first = lower.connections().into_iter().find(|c| c.peer_id == higher).unwrap();
+        assert!(
+            first.outbound,
+            "round {round}: the lower id routes onto its own connection"
+        );
+        assert!(Arc::ptr_eq(&first, &lower.live(&higher).unwrap()));
+        let live = |n: &Node, other| {
+            n.connections()
+                .into_iter()
+                .filter(|c| c.peer_id == other)
+                .collect::<Vec<_>>()
+        };
+        let took = poll_until(Duration::from_secs(2), || {
+            live(&na, b.id()).len() == 1 && live(&nb, a.id()).len() == 1
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "round {round}: a holds {:?}, b holds {:?}",
+                live(&na, b.id()),
+                live(&nb, a.id())
+            )
+        });
+        let (ka, kb) = (live(&na, b.id()).remove(0), live(&nb, a.id()).remove(0));
+        assert_eq!(ka.outbound, a_lower, "round {round}: a keeps the lower id's connection");
+        assert_eq!(
+            kb.outbound, !a_lower,
+            "round {round}: b keeps the lower id's connection"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(live(&na, b.id()).len(), 1);
+        assert_eq!(live(&nb, a.id()).len(), 1);
+        assert!(ka.conn.close_reason().is_none() && kb.conn.close_reason().is_none());
+        let again = na.connect(nb.local_addr().unwrap(), b.id()).await.unwrap();
+        assert!(Arc::ptr_eq(&again, &ka), "connect reuses the live connection");
+        assert_eq!(na.health(&b.id()), Some(PeerHealth::Connected));
+        assert_eq!(nb.health(&a.id()), Some(PeerHealth::Connected));
+        eprintln!(
+            "SINGLE-HOST crossed dials round {round}: both connects returned after {dialled:?}, one connection per side {took:?} later (a<b: {a_lower})"
+        );
+    }
+}
+
+/// A duplicate already carrying a request is retired, not cut: the higher id stops handing it out
+/// as soon as the lower id's connection registers, keeps it open while a request stream is in
+/// flight on it, and closes it with CLOSE_OK once idle. A revoke still closes a retired connection
+/// at once (F-06-05). SINGLE-HOST: two in-process nodes plus a raw client (the lower id's key) on
+/// loopback.
+#[tokio::test]
+async fn busy_duplicate_is_retired_not_cut_single_host() {
+    for revoke in [false, true] {
+        let (x, y) = pair();
+        let (hi, lo) = if x.id() > y.id() { (x, y) } else { (y, x) };
+        let (nh, nl) = (hi.start().await, lo.start().await);
+        let (out, at_lo) = tokio::join!(nh.connect(nl.local_addr().unwrap(), lo.id()), async {
+            nl.accept().await.unwrap()
+        });
+        let out = out.unwrap();
+        // A request starts on the higher id's connection, the only one so far.
+        let busy = out.in_flight();
+        let (mut send, mut recv) = out.conn.open_bi().await.unwrap();
+        send.write_all(b"ping").await.unwrap();
+        // The lower id's own connection arrives (a raw client with its key): it wins.
+        let (_ep, _raw, mut raw_send, _raw_recv, _) = raw_after_hello(
+            &lo,
+            nh.local_addr().unwrap(),
+            hello(&lo, PROTOCOL_MAJOR, PROTOCOL_MINOR),
+        )
+        .await;
+        let caps = sign_capabilities(&lo.identity, "{}".into(), 1, &[], &[]).unwrap();
+        write_frame(&mut raw_send, &Body::Capabilities(caps).into())
+            .await
+            .unwrap();
+        let won = timeout(Duration::from_secs(5), nh.accept()).await.unwrap().unwrap();
+        assert!(!won.outbound);
+        let handed: Vec<_> = nh.connections().into_iter().filter(|c| c.peer_id == lo.id()).collect();
+        assert_eq!(handed.len(), 1, "the retired connection is no longer handed out");
+        assert!(Arc::ptr_eq(&handed[0], &won) && Arc::ptr_eq(&nh.live(&lo.id()).unwrap(), &won));
+        // Well past the idle poll, the busy connection is still open and the request completes.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            out.conn.close_reason().is_none(),
+            "revoke={revoke}: a busy duplicate was cut"
+        );
+        let lo_side = at_lo.clone();
+        let echo = tokio::spawn(async move {
+            let (mut s, mut r) = lo_side.conn.accept_bi().await.unwrap();
+            let mut buf = [0u8; 4];
+            r.read_exact(&mut buf).await.unwrap();
+            s.write_all(&buf).await.unwrap();
+            s.finish().unwrap();
+            let _ = s.stopped().await;
+        });
+        send.finish().unwrap();
+        assert_eq!(recv.read_to_end(64).await.unwrap(), b"ping");
+        echo.await.unwrap();
+        let t0 = Instant::now();
+        let expect = if revoke {
+            // Still busy: a revoke does not wait for it.
+            nh.disconnect(&lo.id(), "revoked").await;
+            CLOSE_REVOKED
+        } else {
+            drop((busy, send, recv));
+            0 // CLOSE_OK
+        };
+        let reason = timeout(Duration::from_secs(3), at_lo.conn.closed())
+            .await
+            .expect("the retired duplicate closes");
+        assert_eq!(
+            app_close(&reason),
+            Some(u64::from(expect)),
+            "revoke={revoke}: {reason:?}"
+        );
+        eprintln!(
+            "SINGLE-HOST retired duplicate (revoke={revoke}): open while busy for 1.5 s, closed {:?} after {}",
+            t0.elapsed(),
+            if revoke { "the revoke" } else { "its last request ended" }
+        );
+    }
+}

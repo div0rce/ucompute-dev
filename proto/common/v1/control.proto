@@ -1,23 +1,94 @@
-// Common peer control protocol v1 (ADR-0003 D5). The Rust structs in crates/common-network/src/proto.rs
-// mirror this file by hand (no protoc at build time); keep tags identical.
+// Common peer control protocol v1 (ADR-0003 D5). Frame = u32 BE length || protobuf ControlMessage.
+// The Rust structs in crates/common-network/src/proto.rs mirror this file by hand (no protoc at
+// build time); `proto::tests::control_proto_mirrors_proto_rs` fails when a message name or field
+// tag differs. One field per line: that test parses this file line by line.
 syntax = "proto3";
 package common.v1;
 
-message Hello { uint32 major = 1; uint32 minor = 2; string common_version = 3; bytes peer_id = 4; bytes nonce = 5; }
-message Capabilities {
-  uint32 schema_version = 1; bytes peer_id = 2; string common_version = 3; string hardware_json = 4;
-  uint64 free_memory_bytes = 5; repeated string engines = 6; repeated string cached_model_sha256 = 7;
-  repeated string groups = 8; uint64 issued_at = 9; bytes signature = 10;
+message Hello {
+  uint32 major = 1;
+  uint32 minor = 2;
+  string common_version = 3;
+  bytes peer_id = 4;
+  bytes nonce = 5;
 }
-message Status { uint64 free_memory_bytes = 1; uint32 active_sessions = 2; uint32 queue_depth = 3; optional string loaded_model_id = 4; }
-message ErrorMsg { string code = 1; string message = 2; }
-message RevocationMsg { uint64 seq = 1; bytes peer_id = 2; bytes revoked_by = 3; string at_utc = 4; bytes signature = 5; }
-message RemoteRequest { string request_id = 1; string model_id = 2; string model_sha256 = 3; string request_json = 4; string privacy = 5; }
-message RemoteChunk { string request_id = 1; string event_json = 2; bool done = 3; }
-message Cancel { string request_id = 1; }
+
+// Capability record (F-02-04). Travels only as the signed bytes inside SignedCapabilities.
+message Capabilities {
+  // The old in-record signature; signatures now live in SignedCapabilities.
+  reserved 10;
+  uint32 schema_version = 1;
+  bytes peer_id = 2;
+  string common_version = 3;
+  // Exactly the `common hardware --json` document.
+  string hardware_json = 4;
+  uint64 free_memory_bytes = 5;
+  // "<name> <release> <platform>", e.g. "llama.cpp b11609 macos-arm64".
+  repeated string engines = 6;
+  repeated string cached_model_sha256 = 7;
+  repeated string groups = 8;
+  uint64 issued_at = 9;
+}
+
+// The exact Capabilities bytes the sender signed, plus Ed25519 over
+// "common/1 capabilities\0" || record. Verified before the record is decoded.
+message SignedCapabilities {
+  bytes record = 1;
+  bytes signature = 2;
+}
+
+message Status {
+  uint64 free_memory_bytes = 1;
+  uint32 active_sessions = 2;
+  uint32 queue_depth = 3;
+  optional string loaded_model_id = 4;
+}
+
+message ErrorMsg {
+  // A stable common_core::ErrorCode string, e.g. "peer_lost".
+  string code = 1;
+  string message = 2;
+}
+
+message RevocationMsg {
+  uint64 seq = 1;
+  bytes peer_id = 2;
+  bytes revoked_by = 3;
+  string at_utc = 4;
+  bytes signature = 5;
+}
+
+// Mode B: run one whole generation on the peer. request_json = common_runtime::GenerateRequest.
+message RemoteRequest {
+  string request_id = 1;
+  string model_id = 2;
+  string model_sha256 = 3;
+  string request_json = 4;
+  string privacy = 5;
+}
+
+// One streamed event back: event_json = common_runtime::GenerateEvent; the last one has done = true.
+message RemoteChunk {
+  string request_id = 1;
+  string event_json = 2;
+  bool done = 3;
+}
+
+message Cancel {
+  string request_id = 1;
+}
+
 message ControlMessage {
+  // Tag 2 was an unsigned Capabilities; an old peer sees tag 9 as an unknown variant.
+  reserved 2;
   oneof body {
-    Hello hello = 1; Capabilities capabilities = 2; Status status = 3; ErrorMsg error = 4;
-    RevocationMsg revocation = 5; RemoteRequest remote_request = 6; RemoteChunk remote_chunk = 7; Cancel cancel = 8;
+    Hello hello = 1;
+    SignedCapabilities capabilities = 9;
+    Status status = 3;
+    ErrorMsg error = 4;
+    RevocationMsg revocation = 5;
+    RemoteRequest remote_request = 6;
+    RemoteChunk remote_chunk = 7;
+    Cancel cancel = 8;
   }
 }

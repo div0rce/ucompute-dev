@@ -120,6 +120,8 @@ export const PEER_RECORD: PeerRecord = { id: PEER_ID, name: "Studio Mac", paired
 export const PEER: Peer = { ...PEER_RECORD, short_label: shortLabel(PEER_ID), groups: ["home"], connected: true };
 
 export const STRANGER: Discovered = { id: STRANGER_ID, addr: "192.168.1.77:8193", pairing: true, pair_port: 51234, proto: "common/1", trusted: false, seen_utc: "2026-10-14T12:00:00Z" };
+/** `pair_addr` the fake's pairing window reports: the LAN address another device dials (mesh.rs `pair_start`). */
+export const PAIR_ADDR = "192.168.1.10:51234";
 /** The QR text the fake's pairing window shows and `/api/pair/join` accepts in place of a code. */
 export const QR_PAYLOAD = `common-pair:v1:${SELF_ID}:192.168.1.10:51234:00112233445566778899aabbccddeeff`;
 
@@ -307,7 +309,7 @@ export function installFakeDaemon(
     if (path === "/api/pair/start" && method === "POST") {
       if (!fake.network.enabled) return disabled();
       if (fake.pairing.session && !fake.pairing.result) return apiError("overloaded", "a pairing session is already open; wait for it to finish or expire", 409);
-      fake.pairing = { session: { code: "482913", port: 51234, qr_payload: QR_PAYLOAD, expires_at: Math.floor(Date.now() / 1000) + 120 }, result: null };
+      fake.pairing = { session: { code: "482913", port: 51234, pair_addr: PAIR_ADDR, qr_payload: QR_PAYLOAD, expires_at: Math.floor(Date.now() / 1000) + 120 }, result: null };
       return json(fake.pairing.session);
     }
     if (path === "/api/pair/status") {

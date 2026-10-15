@@ -12,11 +12,14 @@
 //! the next request and is never written back over.
 //!
 //! Connections: the inbound accept loop and every outbound connect attach the same two tasks to a
-//! `PeerConnection`: `remote::serve_peer` (default deny per request) and [`control_loop`], which
-//! sends this device's revocations and applies (and forwards) the peer's (ADR-0003 D7). While
-//! networking is on, [`sync_loop`] keeps a connection to every pinned device (1, 2, 4 … 30 s
-//! backoff), so a revocation reaches members that are not mid-request and offline members
-//! converge when they return. Turning networking off also closes an open pairing window.
+//! `PeerConnection`, once per connection: `remote::serve_peer_with` (default deny per request;
+//! [`PeerQuota`] token buckets; a peer takes a free engine slot of the local admission or gets
+//! `overloaded`, never a place in the local queue) and [`control_loop`], which offers this
+//! device's revocations to peers that shared a group with the revoked device and applies (and
+//! passes on) the peer's (ADR-0003 D7). While networking is on, [`sync_loop`] keeps a connection
+//! to every pinned device (1, 2, 4 … 30 s backoff), so a revocation reaches members that are not
+//! mid-request and offline members converge when they return. Turning networking off also closes
+//! an open pairing window.
 
 use crate::{ApiError, AppState, Json};
 use axum::extract::{Path, Query, State};
@@ -24,13 +27,13 @@ use axum::http::StatusCode;
 use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_identity::{utc_now, DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
 use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, MAX_RECORD_AGE_SECS};
-use common_network::health::HealthTracker;
+use common_network::health::{HealthTracker, PeerHealth};
 use common_network::pairing;
 use common_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
 use common_network::transport::{ControlStream, Node, PeerConnection};
 use common_network::{remote, NetworkConfig, MAX_CONTROL_FRAME};
 use common_observability::Audit;
-use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode};
+use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode, QuotaConfig, Quotas};
 use common_runtime::{GenerateEvent, GenerateRequest, GenerateStream};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -71,6 +74,73 @@ pub struct Settings {
     pub network_enabled: bool,
     #[serde(default)]
     pub serve_peers: bool,
+    /// Limits on what paired devices may run here (F-06-04); read once when the daemon starts.
+    #[serde(default)]
+    pub peer_quota: PeerQuota,
+}
+
+/// `config.json` `"peer_quota"`: per-peer token buckets for requests served to paired devices.
+/// Every field is optional; 0 means unlimited for the two rates. Defaults are
+/// `common_policy::QuotaConfig::default()`. A request over a limit gets `overloaded` (429 at the
+/// sending device's API), never a queue slot: a peer takes a free engine slot or is refused, a
+/// slot that frees up goes to a waiting local request first, and peers together never hold the
+/// last engine slot ([`PeerQuota::peer_slots`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PeerQuota {
+    /// Requests one device may start per minute (burst up to the same number).
+    pub requests_per_minute: u32,
+    /// Generated tokens one device may use per minute; a request's whole `max_tokens` is charged
+    /// when it starts.
+    pub tokens_per_minute: u64,
+    /// Generations one device may run here at once; also the cap across all devices together,
+    /// which is further capped at the engine's slots minus one.
+    pub max_concurrent: u32,
+}
+
+impl Default for PeerQuota {
+    fn default() -> Self {
+        let q = QuotaConfig::default();
+        Self {
+            requests_per_minute: q.requests_per_minute,
+            tokens_per_minute: q.tokens_per_minute,
+            max_concurrent: q.max_concurrent,
+        }
+    }
+}
+
+impl PeerQuota {
+    /// Peer generations this daemon runs at once across all peers: `max_concurrent` (at least 1)
+    /// but at most `engine_slots - 1`, so one engine slot always stays with local work and a peer
+    /// generation (up to the peer's `max_tokens`, minutes) can never make local requests time out
+    /// in the queue (F-06-04). A single-slot engine (`--max-concurrent 1`) serves no peers.
+    // ponytail: a fixed reservation. Preempting a peer generation when a local request queues
+    // would let a single-slot device serve peers too; that needs a cancel hook in common-network.
+    pub(crate) fn peer_slots(&self, engine_slots: usize) -> usize {
+        (self.max_concurrent.max(1) as usize).min(engine_slots.saturating_sub(1))
+    }
+
+    /// The daemon's peer-serving options: these quotas, the API's load options (a peer request
+    /// never forces a reload) and its admission semaphore (`engine_slot_count` permits) as the
+    /// engine slots (ADR-0003 D5), peers capped at [`PeerQuota::peer_slots`].
+    pub(crate) fn serve_options(
+        self,
+        load: common_runtime::manager::LoadOptions,
+        engine_slots: Arc<tokio::sync::Semaphore>,
+        engine_slot_count: usize,
+    ) -> remote::ServeOptions {
+        remote::ServeOptions {
+            load,
+            quotas: Arc::new(Quotas::new(QuotaConfig {
+                requests_per_minute: self.requests_per_minute,
+                tokens_per_minute: self.tokens_per_minute,
+                bytes_per_second: 0,
+                max_concurrent: self.max_concurrent,
+            })),
+            engine_slots: Some(engine_slots),
+            peer_slots: Arc::new(tokio::sync::Semaphore::new(self.peer_slots(engine_slot_count))),
+        }
+    }
 }
 
 impl Settings {
@@ -116,6 +186,10 @@ impl SettingsCell {
         let stamp = file_stamp(&Settings::path(paths));
         let value = Settings::load(paths)?.unwrap_or_else(|| seed(config));
         Ok(SettingsCell { value, stamp })
+    }
+
+    pub(crate) fn peer_quota(&self) -> PeerQuota {
+        self.value.peer_quota
     }
 }
 
@@ -336,7 +410,7 @@ impl AppState {
             .collect();
         let port = node.local_addr()?.port();
         net.advertiser = Some(Advertiser::start(&cfg, self.identity.clone(), port, None)?);
-        net.browser = Some(Browser::start(&cfg, self.peers.clone())?);
+        net.browser = Some(Browser::start_excluding(&cfg, self.peers.clone(), self.identity.id)?);
         net.accept = Some(tokio::spawn(accept_loop(self.clone(), node.clone())));
         net.sync = Some(tokio::spawn(sync_loop(self.clone(), node.clone())));
         net.cfg = Some(cfg);
@@ -402,13 +476,17 @@ impl AppState {
         })
     }
 
-    /// An authenticated connection to `id`: the open one when there is one, else a new connect to
-    /// the address mDNS sees now, then the pinned `last_addr` (see [`dial_order`]). A successful
-    /// dial refreshes `last_addr`/`last_seen_utc`. Typed errors from `Node::connect`; an
-    /// unreachable address falls through to the next one, a refusal (revoked, unpinned) does not.
+    /// An authenticated connection to `id`: the open one when there is one (the [`survivor`] of a
+    /// crossed dial, not the duplicate about to close), else a new connect to the address mDNS
+    /// sees now, then the pinned `last_addr` (see [`dial_order`]). `last_seen_utc` is refreshed,
+    /// and `last_addr` only when this dial's handshake to it is the connection returned. Typed
+    /// errors from `Node::connect`; an unreachable address falls through to the next one, a
+    /// refusal (revoked, unpinned) does not.
     pub async fn peer_connection(self: &Arc<Self>, node: &Arc<Node>, id: PeerId) -> Result<Arc<PeerConnection>> {
-        if let Some(c) = node.connections().into_iter().find(|c| c.peer_id == id) {
-            return Ok(c);
+        let open: Vec<Arc<PeerConnection>> = node.connections().into_iter().filter(|c| c.peer_id == id).collect();
+        let flags: Vec<bool> = open.iter().map(|c| c.outbound).collect();
+        if let Some(i) = survivor(self.identity.id < id, &flags) {
+            return Ok(open[i].clone());
         }
         let discovered = self
             .net
@@ -431,7 +509,10 @@ impl AppState {
         for addr in dial_order(discovered, pinned) {
             match node.connect(addr, id).await {
                 Ok(conn) => {
-                    self.touch(id, Some(addr));
+                    // `connect` may hand back a connection it did not dial here (one that
+                    // registered meanwhile, or the survivor of a crossed dial): `addr` unproven.
+                    let dialled = conn.outbound && same_addr(conn.remote_addr, addr);
+                    self.touch(id, dialled.then_some(addr));
                     self.attach(node, conn.clone());
                     return Ok(conn);
                 }
@@ -460,16 +541,56 @@ impl AppState {
         }
     }
 
-    /// Serve the peer's requests (default deny per request) and run the control loop.
+    /// Serve the peer's requests (default deny per request, this daemon's quotas and engine slots)
+    /// and run the control loop; once per connection, however often it is handed out.
     fn attach(self: &Arc<Self>, node: &Arc<Node>, conn: Arc<PeerConnection>) {
-        let (manager, policy, audit) = (self.manager.clone(), self.policy(), self.audit.clone());
-        let served = conn.clone();
+        let id = conn.conn.stable_id();
+        if !lock(&self.attached).insert(id) {
+            return;
+        }
+        let (st, served) = (self.clone(), conn.clone());
         tokio::spawn(async move {
-            if let Err(e) = remote::serve_peer(served.clone(), manager, policy, audit).await {
+            let r = remote::serve_peer_with(
+                served.clone(),
+                st.manager.clone(),
+                st.policy(),
+                st.audit.clone(),
+                st.peer_serve.clone(),
+            )
+            .await;
+            if let Err(e) = r {
                 tracing::info!(peer = %served.peer_id.short_label(), code = %e.code, "peer connection ended");
             }
+            lock(&st.attached).remove(&id);
         });
         tokio::spawn(control_loop(self.clone(), node.clone(), conn));
+    }
+
+    /// The devices that share a group with `target` here, except `target` and this device: who
+    /// a revocation of `target` is for. Taken before the revocation, which drops its memberships.
+    fn revocation_audience(&self, target: &PeerId) -> HashSet<PeerId> {
+        self.peers
+            .groups_of(target)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|g| g.members)
+            .filter(|m| m != target && *m != self.identity.id)
+            .collect()
+    }
+
+    /// Write `r` to `peer`'s control stream when it is due there ([`RevocationFanout::due`]);
+    /// false when the stream is gone. A completed write is not a delivery (the frame is only
+    /// buffered and may die with a duplicate or dropped connection, or the peer may refuse it for
+    /// now), so nothing is marked: the next connection offers it again (ADR-0003 D7).
+    async fn offer_revocation<W>(&self, send: &mut W, peer: PeerId, r: &Revocation) -> bool
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let due = {
+            let fanout = lock(&self.fanout);
+            fanout.due(r, &peer, || self.peers.groups_of(&peer).is_ok_and(|g| !g.is_empty()))
+        };
+        !due || write_frame(send, &revocation_msg(r)).await.is_ok()
     }
 
     async fn network_status(&self) -> Value {
@@ -484,6 +605,8 @@ impl AppState {
             "peer_id": self.identity.id.to_hex(),
             "short_label": self.identity.id.short_label(),
             "connections": node.map_or(0, |n| n.connections().len()),
+            "peer_quota": self.peer_quota,
+            "peer_slots": self.peer_quota.peer_slots(self.admission.max_concurrent),
         })
     }
 }
@@ -507,6 +630,23 @@ fn dial_order(discovered: Option<SocketAddr>, pinned: Option<SocketAddr>) -> Vec
     let mut v: Vec<SocketAddr> = discovered.into_iter().chain(pinned).collect();
     v.dedup();
     v
+}
+
+/// Which of the open connections to one peer (their `outbound` flags, oldest first) to use: the
+/// one initiated by the lower id, which `Node::register` keeps when dials cross, else the oldest.
+// ponytail: mirrors common-network's private `transport::survivor`; call a public `Node::live`
+// instead once that crate exposes one, so the two rules cannot drift.
+fn survivor(me_lower: bool, outbound: &[bool]) -> Option<usize> {
+    outbound
+        .iter()
+        .position(|o| *o == me_lower)
+        .or((!outbound.is_empty()).then_some(0))
+}
+
+/// Same UDP address, an IPv4 address and its IPv4-mapped IPv6 form counting as one (a dual-stack
+/// endpoint reports the mapped form).
+fn same_addr(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port() && a.ip().to_canonical() == b.ip().to_canonical()
 }
 
 async fn accept_loop(st: Arc<AppState>, node: Arc<Node>) {
@@ -581,18 +721,75 @@ fn revocation_from_msg(m: RevocationMsg) -> Result<Revocation> {
     })
 }
 
-/// A revocation from a peer: ignored when already held or when it names this device; otherwise
+/// ADR-0003 D7 fan-out, per revocation record: the devices it is for (those that shared a group
+/// with the revoked device here when it was revoked or applied) and the devices that sent it to
+/// this one. A control loop offers a record to its peer when the peer is in the audience and has
+/// not sent it here, on every connection (at least once: a write is never taken as delivery); a
+/// peer that already holds it ignores it without an audit line.
+// ponytail: in memory. A record revoked before this daemon started (or by `common peers revoke`
+// while no daemon ran) has no recorded audience; it is offered once per connection to any device
+// in one of this device's groups. Persist this map next to peers.json if that over-sharing ever
+// matters; an applied-ack from the peer would let a reconnect skip records it already holds.
+#[derive(Default)]
+pub(crate) struct RevocationFanout(HashMap<(PeerId, u64, PeerId), Fanout>);
+
+#[derive(Default)]
+struct Fanout {
+    audience: Option<HashSet<PeerId>>,
+    done: HashSet<PeerId>,
+}
+
+fn fanout_key(r: &Revocation) -> (PeerId, u64, PeerId) {
+    (r.revoked_by, r.seq, r.peer_id)
+}
+
+impl RevocationFanout {
+    pub(crate) fn set_audience(&mut self, r: &Revocation, audience: HashSet<PeerId>) {
+        self.0.entry(fanout_key(r)).or_default().audience = Some(audience);
+    }
+
+    /// `peer` has `r`: it sent it here.
+    pub(crate) fn done(&mut self, r: &Revocation, peer: PeerId) {
+        self.0.entry(fanout_key(r)).or_default().done.insert(peer);
+    }
+
+    /// Should `r` go to `peer` now? Never to the revoked device itself or to a peer that has it;
+    /// else to the recorded audience, or (none recorded) when `in_a_group()` says `peer` is in one
+    /// of this device's groups.
+    pub(crate) fn due(&self, r: &Revocation, peer: &PeerId, in_a_group: impl FnOnce() -> bool) -> bool {
+        if *peer == r.peer_id {
+            return false;
+        }
+        match self.0.get(&fanout_key(r)) {
+            Some(f) if f.done.contains(peer) => false,
+            Some(Fanout { audience: Some(a), .. }) => a.contains(peer),
+            _ => in_a_group(),
+        }
+    }
+}
+
+/// A revocation from a peer: ignored when it names this device or is already held; otherwise
 /// checked and stored by `PeerStore::apply_revocation` (issuer pinned and sharing a group with the
 /// target, signature valid, not superseded by a later local re-pair, so a replay on reconnect
-/// cannot undo that re-pair), the revoked device disconnected, and the revocation forwarded to
-/// every other connected peer (a peer that already holds it stops there, so forwarding ends).
+/// cannot undo that re-pair), the revoked device disconnected, audited once, and offered to the
+/// connected peers that shared a group with the revoked device here (not back to `from`).
+/// The held-check and the apply run under `peer_writes`, so two connections delivering the same
+/// record at once write one `peer_revoked` line.
 async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revocation) {
-    if r.peer_id == st.identity.id || st.peers.revocations_since(0).unwrap_or_default().contains(&r) {
+    if r.peer_id == st.identity.id {
         return;
     }
-    if let Err(e) = st.peers.apply_revocation(&r) {
-        tracing::info!(peer = %from.short_label(), code = %e.code, "revocation from peer ignored");
-        return;
+    {
+        let _g = lock(&st.peer_writes);
+        if st.peers.revocations_since(0).unwrap_or_default().contains(&r) {
+            return;
+        }
+        let audience = st.revocation_audience(&r.peer_id);
+        if let Err(e) = st.peers.apply_revocation(&r) {
+            tracing::info!(peer = %from.short_label(), code = %e.code, "revocation from peer ignored");
+            return;
+        }
+        lock(&st.fanout).set_audience(&r, audience);
     }
     node.disconnect(&r.peer_id, "revoked").await;
     st.audit(
@@ -600,19 +797,20 @@ async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revo
         Some(&r.peer_id),
         json!({ "seq": r.seq, "by": r.revoked_by.short_label(), "source": "peer" }),
     );
-    let _ = st.revocations.send(revocation_msg(&r));
+    let _ = st.revocations.send(r);
 }
 
-/// Owns the control stream for the life of the connection: first sends every revocation this
-/// store holds (ADR-0003 D7 `revocations_since` on reconnect), then forwards new ones (local or
-/// applied from another peer) and applies the peer's ([`apply_peer_revocation`]). `Status` and
-/// unknown messages are ignored in this minor.
+/// Owns the control stream for the life of the connection: first offers every revocation this
+/// store holds (ADR-0003 D7 `revocations_since` on every reconnect), then new ones (local or applied
+/// from another peer), each only where [`RevocationFanout::due`] says, and applies the peer's
+/// ([`apply_peer_revocation`]). `Status` and unknown messages are ignored in this minor.
 async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnection>) {
+    let peer = conn.peer_id;
     let mut rx = st.revocations.subscribe();
     let mut guard = conn.control.lock().await;
     let ControlStream { send, recv } = &mut *guard;
     for r in st.peers.revocations_since(0).unwrap_or_default() {
-        if write_frame(send, &revocation_msg(&r)).await.is_err() {
+        if !st.offer_revocation(send, peer, &r).await {
             return;
         }
     }
@@ -623,8 +821,8 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
             tokio::select! {
                 r = &mut read => break r,
                 r = rx.recv() => match r {
-                    Ok(msg) => {
-                        if write_frame(send, &msg).await.is_err() {
+                    Ok(rev) => {
+                        if !st.offer_revocation(send, peer, &rev).await {
                             return;
                         }
                     }
@@ -637,9 +835,12 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
             Ok(Some(ControlMessage {
                 body: Some(Body::Revocation(m)),
             })) => match revocation_from_msg(m) {
-                Ok(r) => apply_peer_revocation(&st, &node, conn.peer_id, r).await,
+                Ok(r) => {
+                    lock(&st.fanout).done(&r, peer);
+                    apply_peer_revocation(&st, &node, peer, r).await;
+                }
                 Err(e) => {
-                    tracing::info!(peer = %conn.peer_id.short_label(), code = %e.code, "malformed revocation ignored");
+                    tracing::info!(peer = %peer.short_label(), code = %e.code, "malformed revocation ignored");
                 }
             },
             Ok(Some(_)) => {}
@@ -650,12 +851,21 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
 
 // ---------------------------------------------------------------- remote requests (F-06-10)
 
-/// `remote::generate_remote` with the sending side's audit (F-06-10): a `remote_request` entry
-/// (`phase: "sent"`, peer, model id) is written before the request frame leaves, and the request
-/// is refused (`io`) when that entry cannot be written; a second entry (`phase: "finished"`)
-/// records the outcome: `done`, the error code, `incomplete`, or `cancelled` when the caller
-/// dropped the stream (HTTP client gone, Stop). Ids, counts and durations only, never text.
-/// The API's `target: peer:<id>` uses it; `common run --peer` should too.
+/// `remote::generate_remote_with_id` with the sending side's audit (F-06-10):
+/// - `phase: "sent"` (peer, model id) before any byte of the request leaves the device. When it
+///   cannot be written nothing is sent and the call fails with `io`. A privacy mode other than
+///   `trusted_group` is refused (`policy_denied`) before this entry.
+/// - `phase: "finished"`: the outcome, `done`, the error code, `incomplete`, or `cancelled` when
+///   the caller dropped the stream (HTTP client gone, Stop); one per request. It carries the
+///   `request_id` of the `RemoteRequest`, the id the serving device writes into its own
+///   `remote_request` entry, so the two sides join on it; `null` when the request failed before
+///   its frame left (privacy refused, connection lost).
+///
+/// Ids, counts and durations only, never text. The API's `target: peer:<id>` and
+/// `common run --peer` use it.
+// ponytail: the request id is chosen inside `generate_remote_with_id`, after "sent" is written,
+// so only "finished" carries it. A common-network variant taking a caller-chosen id would let
+// "sent" carry it too.
 pub async fn generate_remote_audited(
     audit: Arc<Audit>,
     conn: Arc<PeerConnection>,
@@ -666,16 +876,21 @@ pub async fn generate_remote_audited(
     cancel: CancellationToken,
 ) -> Result<GenerateStream> {
     let peer = conn.peer_id;
-    audit
-        .record(
-            "remote_request",
-            Some(&peer.to_hex()),
-            json!({ "role": "client", "phase": "sent", "peer": peer.short_label(), "model_id": model_id }),
-        )
-        .map_err(|e| CommonError::io(format!("audit log not writable, request not sent: {}", e.message)))?;
+    // Any other mode is refused inside `generate_remote_with_id` before a stream opens.
+    let leaves = serde_json::from_value::<PrivacyMode>(Value::String(privacy.into()))
+        .is_ok_and(|m| m == PrivacyMode::TrustedGroup);
+    if leaves {
+        let sent = json!({ "role": "client", "phase": "sent", "peer": peer.short_label(), "model_id": model_id });
+        audit
+            .record("remote_request", Some(&peer.to_hex()), sent)
+            .map_err(|e| CommonError::io(format!("audit log not writable, request not sent: {}", e.message)))?;
+    }
     let mut outcome = Outcome::new(audit, peer, model_id);
-    match remote::generate_remote(conn, model_id, model_sha256, req, privacy, cancel).await {
-        Ok(inner) => Ok(Audited { inner, outcome }.boxed()),
+    match remote::generate_remote_with_id(conn, model_id, model_sha256, req, privacy, cancel).await {
+        Ok((request_id, inner)) => {
+            outcome.request_id = Some(request_id);
+            Ok(Audited { inner, outcome }.boxed())
+        }
         Err(e) => {
             outcome.finish(e.code.as_str());
             Err(e)
@@ -688,6 +903,7 @@ struct Outcome {
     audit: Arc<Audit>,
     peer: PeerId,
     model_id: String,
+    request_id: Option<String>,
     started: Instant,
     completion_tokens: u32,
     written: bool,
@@ -699,6 +915,7 @@ impl Outcome {
             audit,
             peer,
             model_id: model_id.to_string(),
+            request_id: None,
             started: Instant::now(),
             completion_tokens: 0,
             written: false,
@@ -712,6 +929,7 @@ impl Outcome {
         let fields = json!({
             "role": "client",
             "phase": "finished",
+            "request_id": self.request_id,
             "peer": self.peer.short_label(),
             "model_id": self.model_id,
             "outcome": outcome,
@@ -800,17 +1018,24 @@ pub async fn network_put(
     Ok(axum::Json(st.network_status().await))
 }
 
-/// Pinned peers (with `connected` and their groups), peers mDNS currently sees (`trusted` only
-/// when pinned here; never a trust decision by itself) and the revocations this store holds.
+/// Pinned peers (with `connected`, `health` and their groups), peers mDNS currently sees (never
+/// this device; `trusted` only when pinned here, never a trust decision by itself) and the
+/// revocations this store holds. `health` is `Node::health` (F-02-05): `connected`, `unhealthy`,
+/// `reconnecting` or `disconnected`; `disconnected` too while networking is off or before the
+/// first connection to that device.
 pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let (connected, discovered) = {
+    let (node, discovered) = {
         let net = st.net.lock().await;
-        let connected: HashSet<PeerId> = net
-            .node
-            .as_ref()
-            .map(|n| n.connections().iter().map(|c| c.peer_id).collect())
-            .unwrap_or_default();
-        (connected, net.discovered())
+        (net.node.clone(), net.discovered())
+    };
+    let connected: HashSet<PeerId> = node
+        .as_ref()
+        .map(|n| n.connections().iter().map(|c| c.peer_id).collect())
+        .unwrap_or_default();
+    let health = |id: &PeerId| {
+        node.as_ref()
+            .and_then(|n| n.health(id))
+            .unwrap_or(PeerHealth::Disconnected)
     };
     let groups = st.peers.groups()?;
     let peers: Vec<Value> = st
@@ -826,6 +1051,7 @@ pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<a
             let mut v = json!(p);
             v["short_label"] = json!(p.id.short_label());
             v["connected"] = json!(connected.contains(&p.id));
+            v["health"] = json!(health(&p.id));
             v["groups"] = json!(names);
             v
         })
@@ -856,18 +1082,25 @@ pub async fn peer_delete(
 }
 
 /// F-06-05: unpin, record the signed revocation, close every connection to the device with the
-/// REVOKED code and send the revocation to every connected peer (their control loops apply it).
+/// REVOKED code and send the revocation to the connected peers that shared a group with it here
+/// (ADR-0003 D7; their control loops apply it).
 pub async fn peer_revoke(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> std::result::Result<axum::Json<Revocation>, ApiError> {
     let id = st.resolve_peer(&id)?;
-    let rev = st.peers.revoke(&id, &st.identity)?;
+    let rev = {
+        let _g = lock(&st.peer_writes);
+        let audience = st.revocation_audience(&id);
+        let rev = st.peers.revoke(&id, &st.identity)?;
+        lock(&st.fanout).set_audience(&rev, audience);
+        rev
+    };
     let node = st.net.lock().await.node.clone();
     if let Some(node) = node {
         node.disconnect(&id, "revoked").await;
     }
-    let _ = st.revocations.send(revocation_msg(&rev));
+    let _ = st.revocations.send(rev.clone());
     st.audit(
         "peer_revoked",
         Some(&id),
@@ -1005,6 +1238,7 @@ pub struct PairJoinBody {
 }
 
 /// Join a pairing window from this device's workload endpoint; on success both sides are pinned.
+/// With a QR payload only the device the QR names can complete the handshake.
 pub async fn pair_join(
     State(st): State<Arc<AppState>>,
     Json(body): Json<PairJoinBody>,
@@ -1024,33 +1258,9 @@ pub async fn pair_join(
         })?;
         (addr, body.code, None)
     };
-    let revoked_before: HashSet<PeerId> = st.peers.revocations_since(0)?.into_iter().map(|r| r.peer_id).collect();
-    let rec = pairing::join(node.clone(), addr, &code, &name).await?;
-    if expected.is_some_and(|id| id != rec.id) {
-        // ponytail: `pairing::join` pins (and clears a revocation of) whoever answered before the
-        // id can be compared here. Rolled back: unpinned again, re-revoked when it was revoked,
-        // any connection it opened meanwhile closed. Checking the expected id inside the pairing
-        // handshake (common-network) is the upgrade that pins nothing at all.
-        {
-            let _g = lock(&st.peer_writes);
-            if revoked_before.contains(&rec.id) {
-                st.peers.revoke(&rec.id, &st.identity)?;
-            } else {
-                st.peers.remove(&rec.id)?;
-            }
-        }
-        node.disconnect(&rec.id, "not the device in the QR code").await;
-        st.audit(
-            "pairing_failed",
-            Some(&rec.id),
-            json!({ "role": "joiner", "reason": "qr_peer_mismatch" }),
-        );
-        return Err(CommonError::new(
-            ErrorCode::PairingFailed,
-            "the device that answered is not the one in the QR code; it was unpinned again",
-        )
-        .into());
-    }
+    // A QR names the device: any other key fails the TLS handshake before SPAKE2, so nothing is
+    // pinned and no revocation is touched on either side (`pairing_failed`, `qr_peer_mismatch`).
+    let rec = pairing::join_with(node, addr, &code, &name, expected).await?;
     Ok(axum::Json(rec))
 }
 
@@ -1162,6 +1372,7 @@ mod tests {
             privacy: PrivacyMode::TrustedGroup,
             network_enabled: true,
             serve_peers: false,
+            ..Settings::default()
         };
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths).unwrap(), Some(s));
@@ -1177,6 +1388,110 @@ mod tests {
         assert_eq!((s.privacy, s.network_enabled), (PrivacyMode::TrustedGroup, false));
         std::fs::write(Settings::path(&paths), "{nope").unwrap();
         assert_eq!(Settings::load(&paths).unwrap_err().code, ErrorCode::Io);
+    }
+
+    /// `peer_quota` is optional field by field; the defaults are the policy crate's.
+    #[test]
+    fn peer_quota_defaults_and_partial_config() {
+        let q = QuotaConfig::default();
+        let d = PeerQuota::default();
+        assert_eq!(
+            (d.requests_per_minute, d.tokens_per_minute, d.max_concurrent),
+            (q.requests_per_minute, q.tokens_per_minute, q.max_concurrent)
+        );
+        let s: Settings = serde_json::from_str(r#"{"peer_quota": {"max_concurrent": 1}}"#).unwrap();
+        assert_eq!(
+            s.peer_quota,
+            PeerQuota {
+                max_concurrent: 1,
+                ..PeerQuota::default()
+            }
+        );
+        let slots = Arc::new(tokio::sync::Semaphore::new(4));
+        let o = s.peer_quota.serve_options(Default::default(), slots.clone(), 4);
+        assert_eq!(o.peer_slots.available_permits(), 1);
+        assert!(o.engine_slots.is_some_and(|e| Arc::ptr_eq(&e, &slots)));
+        let zero = PeerQuota {
+            max_concurrent: 0,
+            ..PeerQuota::default()
+        };
+        assert_eq!(zero.peer_slots(4), 1, "0 is one generation, not unlimited");
+    }
+
+    /// F-06-04: peers together never hold the last engine slot, whatever `peer_quota` says, so a
+    /// local request never waits behind peer generations. Defaults: the library's one engine slot
+    /// serves no peers; `common serve` (4 slots, quota 4) lets peers use 3.
+    #[test]
+    fn peers_never_get_the_last_engine_slot() {
+        let d = PeerQuota::default();
+        assert_eq!(d.max_concurrent, 4);
+        let api_default = crate::ApiConfig::default().max_concurrent;
+        assert_eq!((api_default, d.peer_slots(api_default)), (1, 0));
+        assert_eq!(d.peer_slots(4), 3, "`common serve` default --max-concurrent 4");
+        assert_eq!(d.peer_slots(2), 1);
+        assert_eq!(d.peer_slots(16), 4, "the quota still caps");
+        assert_eq!(d.peer_slots(0), 0);
+        let o = d.serve_options(Default::default(), Arc::new(tokio::sync::Semaphore::new(1)), 1);
+        assert_eq!(
+            o.peer_slots.available_permits(),
+            0,
+            "one slot: every peer request is refused"
+        );
+    }
+
+    /// Crossed dials: the connection the lower id initiated, as `Node::register` keeps it; else the
+    /// oldest open one.
+    #[test]
+    fn survivor_is_the_connection_the_lower_id_dialled() {
+        // Lower id here: an inbound duplicate registered first must not be the one used.
+        assert_eq!(survivor(true, &[false, true]), Some(1));
+        assert_eq!(survivor(true, &[false]), Some(0));
+        // Higher id: the peer's (inbound) connection wins over this device's own dial.
+        assert_eq!(survivor(false, &[true, false]), Some(1));
+        assert_eq!(survivor(false, &[true]), Some(0));
+        assert_eq!(survivor(true, &[true, true]), Some(0), "the older of two own dials");
+        assert_eq!(survivor(false, &[]), None);
+    }
+
+    #[test]
+    fn same_addr_treats_v4_mapped_as_v4() {
+        let v4: SocketAddr = "192.168.1.20:8193".parse().unwrap();
+        assert!(same_addr(v4, "[::ffff:192.168.1.20]:8193".parse().unwrap()));
+        assert!(!same_addr(v4, "192.168.1.20:8194".parse().unwrap()));
+        assert!(!same_addr(v4, "192.168.1.21:8193".parse().unwrap()));
+    }
+
+    /// ADR-0003 D7: a record goes to its audience, on every connection until the member sends it
+    /// back (a write is not a delivery); never to the revoked device, never back to the device it
+    /// came from; without a recorded audience, to group members only.
+    #[test]
+    fn revocation_fanout_offers_a_record_to_its_audience_until_it_comes_back() {
+        let id = |b: u8| PeerId([b; 32]);
+        let (issuer, target, member, outsider) = (id(1), id(2), id(3), id(4));
+        let r = Revocation {
+            seq: 1,
+            peer_id: target,
+            revoked_by: issuer,
+            at_utc: "2026-10-15T00:00:00Z".into(),
+            signature: hex::encode([0u8; 64]),
+        };
+        let mut f = RevocationFanout::default();
+        // Unknown audience (revoked before this daemon started): group members only.
+        assert!(f.due(&r, &member, || true));
+        assert!(!f.due(&r, &outsider, || false));
+        assert!(!f.due(&r, &target, || true), "never to the revoked device");
+        f.set_audience(&r, [member, target].into_iter().collect());
+        assert!(f.due(&r, &member, || false));
+        assert!(!f.due(&r, &outsider, || true), "a recorded audience decides");
+        assert!(!f.due(&r, &target, || true));
+        assert!(f.due(&r, &member, || false), "still due on the next connection");
+        f.done(&r, member);
+        assert!(!f.due(&r, &member, || true), "the member sent it here: it has it");
+        // Received from a peer: never sent back to it, audience or not.
+        let other = Revocation { seq: 2, ..r.clone() };
+        f.done(&other, outsider);
+        assert!(!f.due(&other, &outsider, || true));
+        assert!(f.due(&other, &member, || true));
     }
 
     #[test]

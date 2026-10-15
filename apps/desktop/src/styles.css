@@ -688,6 +688,10 @@ progress {
   margin: 10px 0 8px;
   font-variant-numeric: tabular-nums;
 }
+/* One click selects the whole address, so it is copied exactly. */
+.pair-addr {
+  user-select: all;
+}
 .qr-payload,
 .device-id {
   display: block;

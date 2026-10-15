@@ -152,6 +152,9 @@ struct AdvertState {
     identity: Arc<DeviceIdentity>,
     port: u16,
     pairing_port: Option<u16>,
+    /// The bind address when it is one specific IP: the only address advertised. `None`
+    /// (0.0.0.0 / ::): every interface address, as mdns-sd finds them.
+    bound: Option<IpAddr>,
     instance: String,
     host: String,
     fullname: Mutex<String>,
@@ -167,16 +170,19 @@ impl AdvertState {
             proto: format!("{PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"),
             ts: now_unix(),
         };
+        let ips: Vec<IpAddr> = self.bound.into_iter().collect();
         let mut info = ServiceInfo::new(
             SERVICE_TYPE,
             &self.instance,
             &self.host,
-            (),
+            ips.as_slice(),
             self.port,
             advert.sign(&self.identity),
         )
-        .map_err(mdns_err)?
-        .enable_addr_auto();
+        .map_err(mdns_err)?;
+        if self.bound.is_none() {
+            info = info.enable_addr_auto();
+        }
         // A refresh re-announces the same name; probing it again would conflict with ourselves.
         info.set_requires_probe(probe);
         *lock(&self.fullname) = info.get_fullname().to_string();
@@ -192,7 +198,9 @@ pub struct Advertiser {
 
 impl Advertiser {
     /// Advertise (signed TXT: v, id, pair, pairport, proto, ts, sig). Dropping stops the advert.
-    /// Inert (`active() == false`) when mDNS is disabled.
+    /// Inert (`active() == false`) when mDNS is disabled. A specific `config.bind_addr` (e.g.
+    /// 127.0.0.1 for a SINGLE-HOST run) is the only address advertised, so nobody is told to dial
+    /// an interface nothing listens on; 0.0.0.0 / :: advertises every interface address.
     pub fn start(
         config: &NetworkConfig,
         identity: Arc<DeviceIdentity>,
@@ -212,6 +220,7 @@ impl Advertiser {
             identity,
             port,
             pairing_port,
+            bound: config.bind_addr.parse().ok().filter(|ip: &IpAddr| !ip.is_unspecified()),
             instance: short.clone(),
             host: format!("common-{short}.local."),
             fullname: Mutex::new(String::new()),
@@ -296,15 +305,32 @@ pub struct Browser {
     store: Arc<PeerStore>,
 }
 
-/// Prefer IPv4 (what the workload endpoint binds by default), then IPv6; lowest address wins.
+/// Loopback and link-local addresses only when nothing else is advertised (a LAN peer must never
+/// be told to dial 127.0.0.1, and a link-local IPv6 address needs a scope id we do not carry);
+/// then IPv4 (what the workload endpoint binds by default) before IPv6; lowest address wins.
 fn pick_addr(ips: impl Iterator<Item = IpAddr>, port: u16) -> Option<SocketAddr> {
-    ips.min_by_key(|ip| (ip.is_ipv6(), *ip))
+    let local_only = |ip: &IpAddr| match ip {
+        IpAddr::V4(v) => v.is_loopback() || v.is_link_local(),
+        IpAddr::V6(v) => v.is_loopback() || v.is_unicast_link_local(),
+    };
+    ips.min_by_key(|ip| (local_only(ip), ip.is_ipv6(), *ip))
         .map(|ip| SocketAddr::new(ip, port))
 }
 
 impl Browser {
     /// Browse `_common._udp.local.`; `store` decides `trusted`. Inert when mDNS is disabled.
+    /// Lists every valid record, this device's own included; a daemon uses [`Browser::start_excluding`].
     pub fn start(config: &NetworkConfig, store: Arc<PeerStore>) -> Result<Browser> {
+        Self::start_with(config, store, None)
+    }
+
+    /// [`Browser::start`] that never lists `own` (this device's id: its own advert comes back
+    /// over multicast loopback, and dialling itself is never useful).
+    pub fn start_excluding(config: &NetworkConfig, store: Arc<PeerStore>, own: PeerId) -> Result<Browser> {
+        Self::start_with(config, store, Some(own))
+    }
+
+    fn start_with(config: &NetworkConfig, store: Arc<PeerStore>, own: Option<PeerId>) -> Result<Browser> {
         let seen = Arc::new(Mutex::new(HashMap::new()));
         if !mdns_enabled(config) {
             tracing::info!("mdns disabled: not browsing");
@@ -324,6 +350,7 @@ impl Browser {
                         let txt = info.txt_properties.clone().into_property_map_str();
                         let addr = pick_addr(info.addresses.iter().map(|a| a.to_ip_addr()), info.port);
                         match (Advert::verify(&txt, info.port, now_unix()), addr) {
+                            (Ok(advert), _) if Some(advert.id) == own => {}
                             (Ok(advert), Some(addr)) => {
                                 let peer = DiscoveredPeer {
                                     id: advert.id,
@@ -562,5 +589,20 @@ mod tests {
         );
         assert!(pick_addr(ips[..1].iter().copied(), 7).unwrap().is_ipv6());
         assert!(pick_addr(std::iter::empty(), 7).is_none());
+    }
+
+    #[test]
+    fn pick_addr_never_offers_loopback_or_link_local_when_a_lan_address_exists() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let pick = |v: &[&str]| pick_addr(v.iter().map(|s| ip(s)), 7).unwrap().ip();
+        // 127.0.0.1 sorts below every LAN IPv4 address; it must still lose.
+        assert_eq!(pick(&["127.0.0.1", "192.168.1.5"]), ip("192.168.1.5"));
+        assert_eq!(pick(&["169.254.3.4", "127.0.0.1", "10.0.0.9"]), ip("10.0.0.9"));
+        // A routable IPv6 address beats IPv4 loopback and link-local.
+        assert_eq!(pick(&["127.0.0.1", "169.254.3.4", "fe80::1", "fd00::5"]), ip("fd00::5"));
+        assert_eq!(pick(&["::1", "fe80::1", "2001:db8::1"]), ip("2001:db8::1"));
+        // Only local addresses: still an answer (SINGLE-HOST tests advertise on loopback), IPv4 first.
+        assert_eq!(pick(&["fe80::1", "127.0.0.1"]), ip("127.0.0.1"));
+        assert_eq!(pick(&["::1"]), ip("::1"));
     }
 }
