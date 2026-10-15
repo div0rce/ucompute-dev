@@ -139,6 +139,47 @@ async fn enable_network(srv: &Server, serve_peers: bool) -> Value {
     v
 }
 
+/// A free UDP port on loopback, released before it is returned (a fixed port is what the shipped
+/// daemon uses; the ephemeral port in [`cfg`] hides rebind bugs because every start gets a new one).
+fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Changing network settings while networking is on restarts the endpoint on the SAME fixed port.
+/// Regression: the old endpoint's socket was still bound when the new one started, so the second
+/// PUT failed with "Address already in use" and left networking off (found driving the desktop UI).
+#[tokio::test]
+async fn network_settings_change_while_enabled_rebinds_the_fixed_port_single_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_udp_port();
+    let mut c = cfg();
+    c.network.listen_port = port;
+    let srv = Server::start(app(c, dir.path().to_path_buf(), HardwareReport::default())).await;
+    let want = format!("127.0.0.1:{port}");
+    for (i, serve_peers) in [false, true, false, true, true].into_iter().enumerate() {
+        let (status, v) = put(
+            &srv,
+            "/api/network",
+            json!({ "enabled": true, "serve_peers": serve_peers }),
+        )
+        .await;
+        assert_eq!(status, 200, "change {i}: {v}");
+        assert_eq!(v["enabled"], true, "change {i}: {v}");
+        assert_eq!(v["serve_peers"], serve_peers, "change {i}: {v}");
+        assert_eq!(v["listen_addr"], want.as_str(), "change {i}: {v}");
+    }
+    let (status, v) = put(&srv, "/api/network", json!({ "enabled": false, "serve_peers": false })).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["enabled"], false, "{v}");
+    let (status, v) = put(&srv, "/api/network", json!({ "enabled": true, "serve_peers": false })).await;
+    assert_eq!(status, 200, "off then on again: {v}");
+    assert_eq!(v["listen_addr"], want.as_str(), "{v}");
+}
+
 /// `joiner` joins `initiator`'s pairing window with the code it shows; both end up pinned.
 async fn pair(initiator: &Server, joiner: &Server, i_name: &str, j_name: &str) -> (PeerId, PeerId) {
     let (status, start) = post(initiator, "/api/pair/start", json!({ "name": i_name })).await;

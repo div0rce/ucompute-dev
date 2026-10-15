@@ -73,8 +73,13 @@ impl Home {
     }
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_common"));
-        c.args(args)
-            .env("COMMON_HOME", &self.root)
+        c.args(args);
+        // A daemon must not outlive the test binary: a failed assertion skips `terminate`, and a
+        // dropped `Child` is not killed, which left daemons and their engines running for hours.
+        if args.first() == Some(&"serve") {
+            c.arg("--exit-with-parent");
+        }
+        c.env("COMMON_HOME", &self.root)
             .env("COMMON_MDNS", "0")
             .env_remove("RUST_LOG")
             .env_remove("COMMON_API_KEY")

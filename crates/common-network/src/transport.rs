@@ -447,7 +447,7 @@ impl Node {
         let transport = transport_config(&config);
         let mut sc = tls::server_config(&identity, PeerPolicy::Pinned(peers.clone()), ALPN_WORKLOAD)?;
         sc.transport_config(transport.clone());
-        let endpoint = quinn::Endpoint::server(sc, addr)?;
+        let endpoint = bind_endpoint(sc, addr).await?;
         let hw = common_hardware::probe()?;
         let hardware_json = serde_json::to_string(&hw)?;
         let (tx, rx) = mpsc::channel(16);
@@ -886,6 +886,27 @@ impl Node {
         }
         self.endpoint.close(VarInt::from_u32(CLOSE_OK), b"shutdown");
         self.endpoint.wait_idle().await;
+    }
+}
+
+/// How long [`Node::start`] keeps retrying a fixed port that is still held.
+const REBIND_WAIT: Duration = Duration::from_secs(2);
+
+/// Bind the peer endpoint. A restart on the same fixed port (settings change, network toggled off
+/// and on) can arrive while the previous endpoint's driver is still releasing its socket, which
+/// quinn does asynchronously after the last handle is dropped; retry `AddrInUse` briefly instead
+/// of failing. A port held by another program still fails after [`REBIND_WAIT`] with the same error.
+// ponytail: fixed 25 ms polling up to 2 s; an explicit "endpoint driver finished" signal is the upgrade.
+async fn bind_endpoint(sc: quinn::ServerConfig, addr: SocketAddr) -> Result<quinn::Endpoint> {
+    let deadline = Instant::now() + REBIND_WAIT;
+    loop {
+        match quinn::Endpoint::server(sc.clone(), addr) {
+            Ok(e) => return Ok(e),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && addr.port() != 0 && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 

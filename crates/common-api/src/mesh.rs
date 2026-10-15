@@ -237,8 +237,11 @@ pub struct Net {
 
 impl Net {
     async fn stop(&mut self) {
+        // Abort, then wait for each task to be dropped: they hold the Node (and so the endpoint's
+        // UDP socket), and a restart on the same fixed port must not race their teardown.
         for t in [self.accept.take(), self.sync.take()].into_iter().flatten() {
             t.abort();
+            let _ = t.await;
         }
         self.advertiser = None;
         self.browser = None;
