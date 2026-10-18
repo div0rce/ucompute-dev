@@ -6,14 +6,15 @@ Newest first. Every entry: date, agent, what changed, counts, evidence, next com
 
 `target/` had been cleaned; the `.app`/`.dmg` were rebuilt from 08e267e and passed `verify_packaged_app.py` (15/15) with real inference; the executables are byte-identical to the 2026-10-15 build installed in `/Applications`. Workspace 367 passed, desktop 77 passed (docs/VERIFICATION.md).
 
-The installed app's audit log (`~/Library/Application Support/Common/logs/audit.jsonl`, 2026-10-15 22:12 to 2026-10-16 02:33 UTC) shows the first real two-machine use, with a Mac at 192.168.1.115 named "Kyle":
-- pairing over the LAN succeeded (twice: revoked once, re-paired);
-- that Mac connected to this one 10 times (inbound, reconnecting about hourly);
-- this Mac's 441 outbound dials to its UDP 8193 all failed with `peer_lost`, and it did not answer ping on 2026-10-17. Likely its macOS firewall blocks incoming connections (stealth mode drops ping) or it was asleep; not confirmed from this side;
-- no group contains it, so a remote request would have been refused (`peer_unauthorized`); none was attempted.
-Not evidence for any ledger row yet: no remote inference ran across the two machines, and the other Mac's side was not observed.
+The installed app's audit log (`~/Library/Application Support/Common/logs/audit.jsonl`, 2026-10-15 22:12 to 2026-10-16 02:33 UTC) shows the first real two-machine use, with an **HP laptop** (not a Mac; OS not recorded on this side) at 192.168.1.115, device name "Kyle":
+- pairing over the LAN succeeded (twice: revoked once, re-paired), so the peer protocol interoperated between this Mac and a non-Mac build;
+- the laptop connected to this Mac 10 times (inbound, reconnecting about hourly);
+- this Mac's 441 outbound dials to the laptop's UDP 8193 all failed with `peer_lost`; it did not answer ping on 2026-10-17. On Windows both are what the default Windows Defender Firewall does (unsolicited inbound UDP and ICMP echo are dropped unless allowed, stricter on a "Public" network profile); on Linux a host firewall (ufw/firewalld) would do the same; or the laptop was off or asleep. Not confirmed from this side;
+- no group contains it, so a remote request would have been refused (`peer_unauthorized`); none was attempted;
+- the laptop cannot serve inference with a pinned engine yet: `catalog/backends.json` pins llama.cpp b11609 for `macos-arm64` only, and only macOS packages exist (B-004). It must be running a `common` built from source there.
+Not evidence for any ledger row yet: no remote inference ran across the two machines, and the laptop's side was not observed.
 
-Next: on the other Mac, check System Settings > Network > Firewall for `Common`/`common` and allow incoming connections, create a group containing both devices with "run models" allowed, then run a remote request in both directions and collect both audit logs.
+Next: find the laptop's OS and how Common was built there; allow inbound UDP 8193 for the `common` daemon in its firewall (on Windows: an inbound allow rule for the daemon executable on the Private profile, with the Wi-Fi network set to Private); create a group with both devices and "run models" allowed; run a remote request from the laptop to this Mac (this Mac has the engine), then collect both audit logs. Serving from the laptop needs an engine pin for its platform (B-004).
 
 ## 2026-10-15 (evening) — Claude Code — packaged desktop app fixed (stale bundled daemon)
 
