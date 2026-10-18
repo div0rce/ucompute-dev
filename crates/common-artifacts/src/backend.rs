@@ -129,7 +129,15 @@ fn unavailable(msg: String) -> CommonError {
 
 /// Pin fields become path components, so they must be safe names.
 fn check_pin(pin: &BackendPin) -> Result<()> {
-    for s in [&pin.name, &pin.release, &pin.archive, &pin.directory] {
+    for s in [&pin.name, &pin.release, &pin.archive] {
+        if !safe_name(s) {
+            return Err(CommonError::invalid(format!(
+                "backend pin field {s:?} is not a safe name"
+            )));
+        }
+    }
+    // Empty `directory`: the binaries sit at the archive root (llama.cpp's Windows .zip releases).
+    for s in [&pin.directory].into_iter().filter(|d| !d.is_empty()) {
         if !safe_name(s) {
             return Err(CommonError::invalid(format!(
                 "backend pin field {s:?} is not a safe name"
@@ -161,6 +169,26 @@ fn verify_archive(archive: &Path, pin: &BackendPin) -> Result<()> {
     Ok(())
 }
 
+/// The two release formats llama.cpp ships: `.tar.gz` (macOS, Linux) and `.zip` (Windows).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    TarGz,
+    Zip,
+}
+
+fn archive_kind(pin: &BackendPin) -> Result<Kind> {
+    if pin.archive.ends_with(".tar.gz") {
+        Ok(Kind::TarGz)
+    } else if pin.archive.ends_with(".zip") {
+        Ok(Kind::Zip)
+    } else {
+        Err(CommonError::invalid(format!(
+            "backend archive {} is neither .tar.gz nor .zip",
+            pin.archive
+        )))
+    }
+}
+
 type Tar = tar::Archive<flate2::read::GzDecoder<std::io::BufReader<std::fs::File>>>;
 
 fn open_archive(archive: &Path) -> Result<Tar> {
@@ -174,10 +202,14 @@ fn open_archive(archive: &Path) -> Result<Tar> {
 /// a relative path under `directory` with no `..`; anything else is rejected.
 fn rel_path(p: &Path, directory: &str) -> Result<PathBuf> {
     let bad = || unavailable(format!("unsafe or unexpected archive entry {}", p.display()));
-    let mut comps = p.components().filter(|c| !matches!(c, Component::CurDir));
-    match comps.next() {
-        Some(Component::Normal(top)) if top == directory => {}
-        _ => return Err(bad()),
+    let mut comps = p.components().filter(|c| !matches!(c, Component::CurDir)).peekable();
+    if !directory.is_empty() {
+        match comps.next() {
+            Some(Component::Normal(top)) if top == directory => {}
+            _ => return Err(bad()),
+        }
+    } else if comps.peek().is_none() {
+        return Err(bad());
     }
     let mut rel = PathBuf::new();
     for c in comps {
@@ -222,12 +254,19 @@ fn check_link(rel: &Path, link: &Path) -> Result<()> {
 /// Extract into a fresh temp dir next to `dir`, then rename it to `dir`. Any rejected entry
 /// aborts the whole extraction and the temp dir is removed, so nothing partial ever lands.
 fn extract(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
+    let kind = archive_kind(pin)?;
     let parent = dir
         .parent()
         .ok_or_else(|| CommonError::internal("backend directory has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let tmp = tempfile::Builder::new().prefix(".extract-").tempdir_in(parent)?;
     let root = tmp.path();
+    if kind == Kind::Zip {
+        extract_zip(archive, pin, root)?;
+        std::fs::rename(root, dir)?;
+        let _ = tmp.keep();
+        return Ok(());
+    }
     let mut ar = open_archive(archive)?;
     for entry in ar.entries()? {
         let mut entry = entry?;
@@ -273,6 +312,9 @@ fn extract(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
 /// Every archive entry must exist on disk with the same content (regular files), the same target
 /// (symlinks) or as a directory. Extra files on disk are not checked.
 fn verify_tree(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
+    if archive_kind(pin)? == Kind::Zip {
+        return verify_zip_tree(archive, pin, dir);
+    }
     let mut ar = open_archive(archive)?;
     for entry in ar.entries()? {
         let mut entry = entry?;
@@ -323,6 +365,83 @@ fn verify_tree(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A zip entry's path relative to the pin's directory. Zip names are `/`-separated; a backslash,
+/// a drive letter or a NUL is rejected rather than interpreted, so a name means the same thing on
+/// every OS before [`rel_path`] applies the shared rules (relative, no `..`).
+fn zip_rel(name: &str, pin: &BackendPin) -> Result<PathBuf> {
+    if name.contains('\\') || name.contains(':') || name.contains('\0') {
+        return Err(unavailable(format!("unsafe or unexpected archive entry {name}")));
+    }
+    rel_path(Path::new(name.trim_end_matches('/')), &pin.directory)
+}
+
+fn open_zip(archive: &Path) -> Result<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
+    let f = std::io::BufReader::new(std::fs::File::open(archive)?);
+    zip::ZipArchive::new(f).map_err(|e| unavailable(format!("cannot read {}: {e}", archive.display())))
+}
+
+fn zip_err(e: zip::result::ZipError) -> CommonError {
+    unavailable(format!("backend archive: {e}"))
+}
+
+/// Same rules as the .tar.gz path: regular files and directories only (symlinks and encrypted
+/// entries are rejected), every path relative and inside the tree, `create_new` for every file.
+fn extract_zip(archive: &Path, pin: &BackendPin, root: &Path) -> Result<()> {
+    let mut z = open_zip(archive)?;
+    for i in 0..z.len() {
+        let mut e = z.by_index(i).map_err(zip_err)?;
+        let name = e.name().map_err(zip_err)?.into_owned();
+        let rel = zip_rel(&name, pin)?;
+        if e.is_symlink() || e.encrypted() {
+            return Err(unavailable(format!("archive entry {name} is a symlink or encrypted")));
+        }
+        let target = root.join(&rel);
+        if e.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        if let Some(p) = target.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+        std::io::copy(&mut e, &mut f)?;
+        set_mode(&target, e.unix_mode().unwrap_or(0o644))?;
+    }
+    Ok(())
+}
+
+/// Every zip entry must exist on disk with the same content (files) or as a directory.
+fn verify_zip_tree(archive: &Path, pin: &BackendPin, dir: &Path) -> Result<()> {
+    let mut z = open_zip(archive)?;
+    for i in 0..z.len() {
+        let mut e = z.by_index(i).map_err(zip_err)?;
+        let name = e.name().map_err(zip_err)?.into_owned();
+        let rel = zip_rel(&name, pin)?;
+        let on_disk = dir.join(&rel);
+        let meta = std::fs::symlink_metadata(&on_disk)
+            .map_err(|_| unavailable(format!("{} is missing from {}", rel.display(), dir.display())))?;
+        if e.is_dir() {
+            if !meta.is_dir() {
+                return Err(unavailable(format!("{} should be a directory", rel.display())));
+            }
+            continue;
+        }
+        if !meta.is_file() {
+            return Err(unavailable(format!("{} should be a regular file", rel.display())));
+        }
+        if e.unix_mode().is_some_and(|m| m & 0o111 != 0) && !is_executable(&meta) {
+            return Err(unavailable(format!("{} lost its executable bit", rel.display())));
+        }
+        if sha256_reader(&mut e)? != sha256_file(&on_disk)? {
+            return Err(unavailable(format!(
+                "{} does not match the pinned archive",
+                rel.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -338,7 +457,7 @@ fn symlink(link: &Path, at: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(link, at)
 }
 
-// ponytail: Windows ships .zip releases and needs privileges for symlinks; add a zip path when B-004 lands.
+// Windows: .zip releases (no symlinks, no mode bits); see extract_zip.
 #[cfg(not(unix))]
 fn set_mode(_: &Path, _: u32) -> std::io::Result<()> {
     Ok(())
@@ -669,5 +788,119 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(leftovers.len(), 2, "{leftovers:?}");
+    }
+
+    /// A .zip release in a fresh home, with the pin's `directory` as given ("" = archive root).
+    fn zip_home(entries: &[(&str, &[u8], u32)], directory: &str) -> (tempfile::TempDir, Paths, BackendPin) {
+        use zip::write::SimpleFileOptions;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, data, mode) in entries {
+            let opts = SimpleFileOptions::default().unix_permissions(*mode);
+            if name.ends_with('/') {
+                w.add_directory(*name, opts).unwrap();
+            } else if *mode & 0o170000 == 0o120000 {
+                w.add_symlink(*name, std::str::from_utf8(data).unwrap(), opts).unwrap();
+            } else {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(data).unwrap();
+            }
+        }
+        let bytes = w.finish().unwrap().into_inner();
+        let (d, paths, mut pin) = home_with(&bytes);
+        let old = archive_path(&paths, &pin);
+        pin.archive = "test.zip".into();
+        pin.directory = directory.into();
+        std::fs::rename(old, archive_path(&paths, &pin)).unwrap();
+        (d, paths, pin)
+    }
+
+    #[tokio::test]
+    async fn flat_zip_extracts_verifies_and_detects_tampering() {
+        let (_d, paths, pin) = zip_home(
+            &[
+                ("llama-server.exe", b"MZ engine", 0o755),
+                ("ggml-base.dll", b"dll", 0o644),
+                ("sub/", b"", 0o755),
+                ("sub/LICENSE", b"MIT", 0o644),
+            ],
+            "",
+        );
+        let dir = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap();
+        assert_eq!(
+            std::fs::read(binary(&dir, "llama-server").with_extension("exe")).unwrap(),
+            b"MZ engine"
+        );
+        assert_eq!(std::fs::read(dir.join("sub/LICENSE")).unwrap(), b"MIT");
+        assert_eq!(verify_backend(&paths, &pin).unwrap(), dir);
+        std::fs::write(dir.join("ggml-base.dll"), b"DLL").unwrap();
+        let err = verify_backend(&paths, &pin).unwrap_err();
+        assert!(
+            err.code == ErrorCode::BackendUnavailable && err.message.contains("ggml-base.dll"),
+            "{err}"
+        );
+        std::fs::remove_file(dir.join("sub/LICENSE")).unwrap();
+        std::fs::write(dir.join("ggml-base.dll"), b"dll").unwrap();
+        assert!(verify_backend(&paths, &pin).unwrap_err().message.contains("LICENSE"));
+    }
+
+    #[tokio::test]
+    async fn malicious_zips_extract_nothing() {
+        for (name, mode) in [
+            ("../escape", 0o644),
+            ("/absolute", 0o644),
+            ("C:/windows/evil.dll", 0o644),
+            ("sub\\..\\..\\evil.dll", 0o644),
+            ("link", 0o120777),
+        ] {
+            let data: &[u8] = if mode == 0o120777 { b"../../escape" } else { b"evil" };
+            let (d, paths, pin) = zip_home(&[("safe.txt", b"ok", 0o644), (name, data, mode)], "");
+            let err = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::BackendUnavailable, "{name}: {err}");
+            assert!(!backend_dir(&paths, &pin).exists(), "{name}: nothing extracted");
+            assert!(only_archive_left(&paths, &pin), "{name}: temp dir cleaned up");
+            assert!(!d.path().join("escape").exists());
+        }
+    }
+
+    #[test]
+    fn windows_pins_point_at_zip_releases_at_the_archive_root() {
+        let pins = BackendPins::builtin().unwrap();
+        for plat in ["win-x64", "win-arm64"] {
+            let p = pins
+                .backends
+                .iter()
+                .find(|b| b.platform == plat)
+                .unwrap_or_else(|| panic!("no {plat} pin"));
+            assert!(
+                p.archive.ends_with(".zip") && p.directory.is_empty() && p.url.ends_with(&p.archive),
+                "{p:?}"
+            );
+            check_pin(p).unwrap();
+            assert_eq!(archive_kind(p).unwrap(), Kind::Zip);
+        }
+    }
+
+    /// The real llama.cpp Windows release: COMMON_WIN_ENGINE_ZIP=<downloaded zip>. Skips without it.
+    #[tokio::test]
+    async fn extracts_real_windows_llama_cpp_zip() {
+        let Some(zip_path) = std::env::var_os("COMMON_WIN_ENGINE_ZIP").map(PathBuf::from) else {
+            eprintln!("SKIP: set COMMON_WIN_ENGINE_ZIP to a downloaded llama.cpp Windows release");
+            return;
+        };
+        let name = zip_path.file_name().unwrap().to_str().unwrap().to_string();
+        let pin = BackendPins::builtin()
+            .unwrap()
+            .backends
+            .into_iter()
+            .find(|b| b.archive == name)
+            .expect("a pinned archive");
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(d.path());
+        std::fs::create_dir_all(archive_path(&paths, &pin).parent().unwrap()).unwrap();
+        std::fs::copy(&zip_path, archive_path(&paths, &pin)).unwrap();
+        let dir = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap();
+        assert!(dir.join("llama-server.exe").is_file());
+        assert!(dir.join("ggml-base.dll").is_file());
+        verify_backend(&paths, &pin).unwrap();
     }
 }

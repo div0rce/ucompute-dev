@@ -504,6 +504,12 @@ pub fn device_name() -> String {
             }
         }
     }
+    #[cfg(windows)]
+    if let Some(n) = std::env::var_os("COMPUTERNAME").and_then(|n| n.into_string().ok()) {
+        if !n.trim().is_empty() {
+            return n.trim().to_string();
+        }
+    }
     "common".into()
 }
 

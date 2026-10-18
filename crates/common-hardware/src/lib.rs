@@ -14,6 +14,7 @@ use std::time::Instant;
 
 mod linux;
 mod macos;
+mod windows;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct CpuInfo {
@@ -89,12 +90,14 @@ impl From<&HardwareReport> for HostSummary {
 use linux::probe as platform_probe;
 #[cfg(target_os = "macos")]
 use macos::probe as platform_probe;
+#[cfg(target_os = "windows")]
+use windows::probe as platform_probe;
 
-/// Windows and anything else: only what `std` knows.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Anything else: only what `std` knows.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn platform_probe() -> Result<HardwareReport> {
-    // ponytail: std cannot see physical cores, memory or GPUs here; add a WMI/sysinfo path when
-    // Windows becomes a supported target. Unknown strings stay empty, unknown numbers stay 0.
+    // ponytail: std cannot see physical cores, memory or GPUs here. Unknown strings stay empty,
+    // unknown numbers stay 0.
     let n = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
@@ -145,9 +148,13 @@ pub fn probe() -> Result<HardwareReport> {
         backend("cuda", !nvidia.is_empty(), ENGINE_BACKENDS, "no NVIDIA GPU detected"),
         backend(
             "vulkan",
-            on_path("vulkaninfo"),
+            vulkan_loader(),
             ENGINE_BACKENDS,
-            "vulkaninfo not found on PATH (no Vulkan loader installed)",
+            if cfg!(windows) {
+                "vulkan-1.dll not found in System32 (no GPU driver with Vulkan installed)"
+            } else {
+                "vulkaninfo not found on PATH (no Vulkan loader installed)"
+            },
         ),
     ];
     r.disk_free_bytes = disk_free(&common_core::Paths::from_env().root);
@@ -155,16 +162,28 @@ pub fn probe() -> Result<HardwareReport> {
     Ok(r)
 }
 
-/// Backends the pinned llama.cpp build ships (ADR-0002 §2: only macos-arm64 is pinned, CPU+Metal).
+/// Backends the pinned llama.cpp build ships (ADR-0002 §2): macos-arm64 CPU+Metal, Windows CPU+Vulkan.
 /// Mirrors `capabilities().devices` in `common_runtime::llamacpp`, which cannot be called from here
 /// because common-runtime depends on this crate.
 // ponytail: one engine, one pinned platform. When a second pin lands, put the device list in
 // catalog/backends.json (or common-core) and read it from both crates.
 const ENGINE_BACKENDS: &[&str] = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     &["cpu", "metal"]
+} else if cfg!(target_os = "windows") {
+    // catalog/backends.json pins the llama.cpp Vulkan build for win-x64 and win-arm64.
+    &["cpu", "vulkan"]
 } else {
     &["cpu"]
 };
+
+/// The Vulkan loader: GPU drivers install `vulkan-1.dll` on Windows; elsewhere `vulkaninfo` on PATH.
+fn vulkan_loader() -> bool {
+    if cfg!(windows) {
+        windows::system32("vulkan-1.dll").is_file()
+    } else {
+        on_path("vulkaninfo")
+    }
+}
 
 /// `available` only when the backend is detected on the host and `engine` ships it. The engine gap
 /// is reported first because no host change (installing a loader, adding a card) can close it.

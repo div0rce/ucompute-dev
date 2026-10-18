@@ -71,6 +71,8 @@ uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 tar = "0.4"
 flate2 = "1"
+# Windows engine releases ship as .zip; deflate only, through flate2 (already used for .tar.gz).
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 prometheus = { version = "0.14", default-features = false }
 tempfile = "3"
 # M3 peer networking (ADR-0003): QUIC + TLS 1.3 raw public keys, Ed25519 via ring, SPAKE2 pairing, mDNS, protobuf framing

@@ -233,6 +233,9 @@ impl InferenceBackend for LlamaCppBackend {
             formats: vec!["gguf".into()],
             devices: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                 vec!["cpu".into(), "metal".into()]
+            } else if cfg!(windows) {
+                // catalog/backends.json pins the Vulkan build on Windows (CPU backends included).
+                vec!["cpu".into(), "vulkan".into()]
             } else {
                 vec!["cpu".into()]
             },

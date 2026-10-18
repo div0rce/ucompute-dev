@@ -1,6 +1,7 @@
 //! macOS probe: one `sysctl` call, `vm_stat`, `ioreg`, `sw_vers`. All parsers are pure.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+#[cfg(target_os = "macos")]
 use crate::GpuInfo;
 use std::collections::HashMap;
 

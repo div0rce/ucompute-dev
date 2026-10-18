@@ -191,7 +191,22 @@ pub async fn shutdown_signal() -> Stop {
             () = wait(SignalKind::hangup()) => Stop::Terminate,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Closing the console window, logging off and shutting down arrive as their own console
+        // events, not Ctrl+C; each gets the same graceful stop (unload the model, stop the engine).
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_logoff, ctrl_shutdown};
+        let (mut close, mut logoff, mut shutdown, mut brk) =
+            (ctrl_close(), ctrl_logoff(), ctrl_shutdown(), ctrl_break());
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Stop::Interrupt,
+            Some(()) = async { close.as_mut().ok()?.recv().await } => Stop::Terminate,
+            Some(()) = async { logoff.as_mut().ok()?.recv().await } => Stop::Terminate,
+            Some(()) = async { shutdown.as_mut().ok()?.recv().await } => Stop::Terminate,
+            Some(()) = async { brk.as_mut().ok()?.recv().await } => Stop::Interrupt,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
         Stop::Interrupt
@@ -230,6 +245,7 @@ pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
 }
 
 /// Pids in `ps -axo pid=,ppid=,args=` output whose parent is 1 and whose argv[0] is `binary`.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn orphans(ps: &str, binary: &Path) -> Vec<u32> {
     ps.lines()
         .filter_map(|l| {

@@ -12,6 +12,30 @@
       "sha256": "d03f28b5a5baa9cdfbb01db5ed22c695126c11c193326f14cdc51d001be10f4e",
       "bytes": 12117158,
       "license": "MIT"
+    },
+    {
+      "name": "llama.cpp",
+      "release": "b11609",
+      "source_commit": "fcac19079",
+      "platform": "win-x64",
+      "archive": "llama-b11609-bin-win-vulkan-x64.zip",
+      "directory": "",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-win-vulkan-x64.zip",
+      "sha256": "7b50bdb2a27b5fe17759104b1d86e082a05583ff1bca8b3202bcfb2a7232a005",
+      "bytes": 32134342,
+      "license": "MIT"
+    },
+    {
+      "name": "llama.cpp",
+      "release": "b11609",
+      "source_commit": "fcac19079",
+      "platform": "win-arm64",
+      "archive": "llama-b11609-bin-win-vulkan-arm64.zip",
+      "directory": "",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-win-vulkan-arm64.zip",
+      "sha256": "e64f14b7e44fdc1307c95ef0082209293a16ba35f1615b5b696ec924227b00d4",
+      "bytes": 24730844,
+      "license": "MIT"
     }
   ]
 }
