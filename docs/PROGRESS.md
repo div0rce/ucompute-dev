@@ -2,6 +2,19 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-17 — Claude Code — packaged app rebuilt and re-verified; first two-Mac observations
+
+`target/` had been cleaned; the `.app`/`.dmg` were rebuilt from 08e267e and passed `verify_packaged_app.py` (15/15) with real inference; the executables are byte-identical to the 2026-10-15 build installed in `/Applications`. Workspace 367 passed, desktop 77 passed (docs/VERIFICATION.md).
+
+The installed app's audit log (`~/Library/Application Support/Common/logs/audit.jsonl`, 2026-10-15 22:12 to 2026-10-16 02:33 UTC) shows the first real two-machine use, with a Mac at 192.168.1.115 named "Kyle":
+- pairing over the LAN succeeded (twice: revoked once, re-paired);
+- that Mac connected to this one 10 times (inbound, reconnecting about hourly);
+- this Mac's 441 outbound dials to its UDP 8193 all failed with `peer_lost`, and it did not answer ping on 2026-10-17. Likely its macOS firewall blocks incoming connections (stealth mode drops ping) or it was asleep; not confirmed from this side;
+- no group contains it, so a remote request would have been refused (`peer_unauthorized`); none was attempted.
+Not evidence for any ledger row yet: no remote inference ran across the two machines, and the other Mac's side was not observed.
+
+Next: on the other Mac, check System Settings > Network > Firewall for `Common`/`common` and allow incoming connections, create a group containing both devices with "run models" allowed, then run a remote request in both directions and collect both audit logs.
+
 ## 2026-10-15 (evening) — Claude Code — packaged desktop app fixed (stale bundled daemon)
 
 A tester's packaged `Common.app` never started its daemon: the bundled `common` predated `--exit-with-parent`, which the shell passes. `tauri build` now builds and checks the daemon from the same checkout (`apps/desktop/scripts/build-sidecar.sh`), and the daemon's arguments live in one file (`apps/desktop/src-tauri/daemon-args.txt`). Three more defects found while verifying were fixed: quit orphaned the engine (SIGKILL), a crashed app orphaned it too (SIGPIPE on the daemon's next write), and the bundle was not signed. Evidence: `docs/evidence/desktop-sidecar-fix-2026-10-15.md`; the rebuilt `Common_0.1.0_aarch64.dmg` passed all 15 checks of `apps/desktop/scripts/verify_packaged_app.py` with real inference. Workspace 367 passed, desktop 77 passed. Ledger unchanged (F-10-01 stays IMPLEMENTED_UNVERIFIED: fresh-account, UI-only first token not yet run; B-008).
