@@ -117,6 +117,9 @@ fn stop_daemon(child: CommandChild, exited: &AtomicBool) {
         }
         eprintln!("common-desktop: daemon still running {STOP_TIMEOUT:?} after SIGTERM; killing it");
     }
+    // Windows has no SIGTERM to send: TerminateProcess the daemon; its job object ends the engine.
+    #[cfg(not(unix))]
+    let _ = exited;
     let _ = child.kill();
 }
 
