@@ -248,6 +248,21 @@ fn parse_nvidia_smi(out: &str) -> Vec<GpuInfo> {
 }
 
 /// Free bytes on the volume holding `root` (or its nearest existing ancestor), via `df -Pk`.
+/// Free space for the user on the volume holding `root` (or its nearest existing ancestor).
+#[cfg(windows)]
+fn disk_free(root: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let p = root.ancestors().find(|p| p.exists())?;
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free = 0u64;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the one out-pointer is a valid u64,
+    // the two totals we do not need are null, which the API allows.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(not(windows))]
 fn disk_free(root: &Path) -> Option<u64> {
     // ponytail: shelling out to df avoids a libc dep and unsafe statvfs; swap in when df parsing bites.
     root.ancestors()
@@ -256,6 +271,7 @@ fn disk_free(root: &Path) -> Option<u64> {
 }
 
 /// POSIX `df -P` output: header line, then one line whose 4th column is available 1K-blocks.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_df(out: &str) -> Option<u64> {
     out.lines()
         .nth(1)?
@@ -364,7 +380,7 @@ mod tests {
     #[test]
     fn disk_free_walks_up_to_existing_ancestor() {
         let cwd = std::env::current_dir().unwrap();
-        assert!(disk_free(&cwd.join("does").join("not").join("exist")).unwrap_or(0) > 0 || cfg!(windows));
+        assert!(disk_free(&cwd.join("does").join("not").join("exist")).unwrap_or(0) > 0);
     }
 
     /// Acceptance for F-01-01 on the development Mac: values match sysctl, probe is fast, unprivileged.

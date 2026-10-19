@@ -82,7 +82,17 @@ fn device(line: &str) -> Option<String> {
         return None;
     }
     let rest = rest[dev.len()..].strip_prefix(" (")?;
-    let name = &rest[..rest.find(')')?];
+    // Up to the matching `)`: names nest parentheses, e.g. `Vulkan0 (Intel(R) Arc(TM) 140V GPU (16GB))`.
+    let mut depth = 1usize;
+    let end = rest.char_indices().find_map(|(i, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        (depth == 0).then_some(i)
+    })?;
+    let name = &rest[..end];
     Some(format!("{dev} ({name})"))
 }
 
@@ -210,6 +220,12 @@ mod tests {
             Some("Metal0 (Apple M2)")
         );
         assert_eq!(device("using device CPU (Apple M2)"), None);
+        assert_eq!(
+            device("llama_prepare_model_devices: using device Vulkan0 (Intel(R) Arc(TM) 140V GPU (16GB)) (0000:00:02.0) - 15872 MiB free").as_deref(),
+            Some("Vulkan0 (Intel(R) Arc(TM) 140V GPU (16GB))"),
+            "nested parentheses (Windows, Intel Arc)"
+        );
+        assert_eq!(device("using device Vulkan0 (Intel(R) Arc"), None, "unterminated name");
         assert_eq!(device("using device MTL (x)"), None, "needs an index");
         assert_eq!(device("using device MTL0"), None, "needs a name");
     }
