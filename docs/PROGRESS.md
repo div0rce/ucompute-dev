@@ -2,6 +2,17 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-19 — Claude Code — hotspot discovery; desktop to desktop on two machines; Windows pairing firewall finding
+
+- Implemented / verified: LAN discovery on two physical machines (F-02-01 VERIFIED, 88183a9/1a36b3c); native Windows NSIS build of the desktop app, installed and paired with the macOS app through their UIs, prompts run both ways (af3e37c, `docs/evidence/desktop-two-machine-2026-10-19.md`). Ledger text of F-10-01 and F-10-05 updated; both stay IMPLEMENTED_UNVERIFIED (fresh-account install-to-first-token, UI-only wrong-code and Mac-side steps, Windows-initiated pairing).
+- Found: pairing that the Windows app initiates is dropped by Windows Firewall on the random pairing port (pktmon `receive inspection`); the Mac's audit log held 567 `peer_rejected` lines for one unreachable paired Mac (one per ~35 s redial); the Windows app shows macOS wording and names the laptop "This Mac"; Chat needs a local model even for remote runs; Windows quit kills the daemon (no mDNS goodbye).
+- In progress: discovery/reconnection and desktop fixes (manual connect-at-address, two dial candidates, re-signed record after interface changes, redial backoff with one audit line per state change, graceful shutdown route, platform-neutral wording, remote chat without a local model), then a consent-gated Windows Firewall rule scoped to the bundled daemon, then rebuilt apps re-tested on both machines with `tests/distributed/two_machine/discovery_two_machine.py`.
+- Limits: two machines only; no pooling; fixture throughput is a path check.
+
+Next:
+    cargo test --workspace --no-fail-fast; (cd apps/desktop && pnpm test)
+    python3 -I tests/distributed/two_machine/discovery_two_machine.py --a http://127.0.0.1:8192 --b http://127.0.0.1:18302 --out <dir>
+
 ## 2026-10-19 — Claude Code, completing Codex (GPT-6, 2026-10-18) — Operation UCompute: additive infrastructure program
 
 Codex extended the specification on 2026-10-18 and stopped on a usage limit before recording evidence or committing. Its work is committed unchanged in 915562a and completed in the completion commit that follows 915562a.
