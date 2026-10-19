@@ -21,7 +21,8 @@ case "${1:-}" in
     exec ssh $SSH_OPTS "$USER_@$HOST" "$@"
     ;;
   ps)
-    enc=$(printf '%s' "$2" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
+    # Progress records arrive as CLIXML on stderr and drown the output; switch them off first.
+    enc=$(printf '$ProgressPreference="SilentlyContinue"; %s' "$2" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
     # shellcheck disable=SC2086
     exec ssh $SSH_OPTS "$USER_@$HOST" "powershell -NoProfile -NonInteractive -EncodedCommand $enc"
     ;;
