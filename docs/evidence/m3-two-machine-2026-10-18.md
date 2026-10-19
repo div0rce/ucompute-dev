@@ -41,7 +41,7 @@ Both daemons ran `serve --network --serve-peers`. The laptop was driven from the
 
 ## Run 3: phone hotspot (discovery), 2026-10-19 02:38 UTC
 
-Same two machines, both joined to an iPhone personal hotspot (one subnet that carries mDNS; the laptop's profile set to Private by the owner). Fresh Mac data folder (new identity), so the two started unpaired. Commit 5bbd4b7-era binaries: the Mac debug build and the laptop's `common.exe` with the job-object fix.
+Same two machines, both joined to an iPhone personal hotspot (one subnet that carries mDNS; the laptop's profile set to Private by the owner). Fresh Mac data folder (new identity), so the two started unpaired. Binaries built from bf40e20: the Mac debug build and the laptop's `common.exe` with the job-object fix.
 
 | Step | Result | Numbers |
 |---|---|---|
