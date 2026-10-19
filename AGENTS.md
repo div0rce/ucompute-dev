@@ -3,7 +3,7 @@
 Read this first, every session, whichever agent you are (Claude, Codex, other). It is the restart point.
 
 ## Authority
-1. `docs/SPEC_HANDOFF_V2.md` — authoritative product specification (verbatim copy of PROJECT_COMMON_AUTONOMOUS_HANDOFF_V2). All 148 capabilities are P0.
+1. `docs/SPEC_HANDOFF_V2.md` — authoritative product specification. Original sections 1–24 and 148 F/X/I capabilities remain P0; sections 25–33 extend the UCompute infrastructure program with four additive U requirements (P1/P2). The root handoff is historical; see ADR-0004.
 2. `docs/REQUIREMENTS.csv` — the single requirements ledger (spec section 21 fields). `docs/requirements/REGISTRY.md` is generated from it.
 3. `docs/research/` — M0 research **baseline**, not verified truth. Keep its ✅/⚠️/`unknown/unverified` markers. Re-verify before relying on anything not ✅.
 4. `docs/DECISIONS.md` + `docs/decisions/ADR-*.md` — architectural decisions.
@@ -48,11 +48,12 @@ cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 - Never expose llama.cpp `rpc-server` (or any unauthenticated service) beyond loopback. Cross-machine traffic goes only through Common's authenticated, encrypted transport.
 - Default API bind is `127.0.0.1`. No public ports, no paid services, no real-money settlement, no releases without explicit owner approval (spec section 4).
 - No silent model, quantization, or privacy-mode substitution.
-- Never copy code from GPL/AGPL projects (ex-exo, KoboldCpp). See ADR-0001.
+- Never copy GPL/AGPL code (including historical ex-exo or KoboldCpp code). Verify the exact upstream revision and component license; the current Exo tree has a different license recorded in the 2026-10-18 research refresh. See ADR-0001.
 - Never fabricate benchmark numbers. Results live in `benchmarks/results/` with hardware manifest, command line, versions.
 - Preserve existing code; inspect before editing.
 
 ## Environment
 - Primary dev host: owner's MacBook Air (Apple M2, 8 GB unified memory, 10-core GPU, macOS 26.2). Run `scripts/inspect-env.sh` to (re)record `docs/environment/`. Disk is tight (B-010); the owner authorized deleting caches when needed.
 - Test assets live in `COMMON_HOME` (default `./.common`, git-ignored): `backends/llama.cpp/b11609/`, `models/blobs/sha256-*`, `models/manifests/*.json`.
-- Only one physical machine is currently available (see `docs/BLOCKERS.md`).
+- Two physical machines have recorded evidence: this Mac and a Windows 11 x64 HP laptop (Intel Arc 140V). Do not assume the laptop is currently reachable. Mode B and hotspot discovery evidence is in `docs/evidence/m3-two-machine-2026-10-18.md`; Windows desktop, Linux qualification and genuine pooling remain open.
+- Next implementation: specification §30 WP-01, native Windows desktop qualification; WP-02 default peer fairness and Windows key ACL checks can proceed independently. Program/schema-only changes need registry/documentation checks; runtime evidence is not re-certified by a documentation commit.

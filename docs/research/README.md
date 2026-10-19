@@ -39,3 +39,7 @@ All benchmark figures are as published by their authors. **None were replicated 
 ## Rule for future agents
 
 Before relying on any ⚠️ or `unknown/unverified` item for a decision, re-verify it against the primary source and record the result (date, URL, finding) in the relevant file. Do not silently upgrade a marker.
+
+## Subsequent research
+
+The dated 2026-10-18 sections in COMPETITIVE_MATRIX.md, SOURCES.md and RESEARCH_GAPS.md are a new primary-page refresh and strategic experiments, not part of the imported M0 report. Conflicting present-tense interpretations defer to that dated refresh; historical markers remain intact. None of the refreshed competitors was benchmarked. Audience, distribution-loop and revenue claims remain hypotheses H6–H9, linked to the execution program in [the existing specification](../SPEC_HANDOFF_V2.md), sections 26–33.

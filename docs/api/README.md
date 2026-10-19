@@ -43,7 +43,7 @@ See `examples/clients/openai-js/smoke.mjs` for the JavaScript client.
 
 ## Common Mesh (paired devices)
 
-Peer networking is **off by default**. The settings live in `COMMON_HOME/config.json` (mode 0600): `privacy` (`local_only`), `network_enabled` (false), `serve_peers` (false) and `peer_quota`. Nothing binds the peer endpoint until `PUT /api/network {"enabled": true}` or `common serve --network`. Everything here is tested SINGLE-HOST only (B-002). Design and tests: `docs/decisions/ADR-0003-peer-transport-and-pairing.md` §9. Threats: `docs/security/THREAT_MODEL.md` §2.13.
+Peer networking is **off by default**. The settings live in `COMMON_HOME/config.json` (mode 0600): `privacy` (`local_only`), `network_enabled` (false), `serve_peers` (false) and `peer_quota`. Nothing binds the peer endpoint until `PUT /api/network {"enabled": true}` or `common serve --network`. SINGLE-HOST tests are supplemented by the bounded physical Mac/Windows Mode B and discovery run in [two-machine evidence](../evidence/m3-two-machine-2026-10-18.md). Two packaged desktop installs and model partitioning remain unverified. Design and tests: `docs/decisions/ADR-0003-peer-transport-and-pairing.md` §9. Threats: `docs/security/THREAT_MODEL.md` §2.13.
 
 ### Mesh routes
 
@@ -119,3 +119,16 @@ Same OpenAI error shape as above.
 | `cancelled` | 499 | the client stopped; or a pairing window closed because networking was turned off |
 | `invalid_request` | 400 | malformed `target`, a peer target on embeddings, bad `addr`, bad QR payload or bad group |
 | `io` | 500 | the audit entry could not be written, so the request was not sent |
+
+
+## Infrastructure contracts (2026-10-18 program)
+
+**Current implementation.** HTTP/OpenAPI and the peer protocol are different contracts. Existing official-client smoke tests establish the tested HTTP subset, not a complete OpenAI implementation or a Common SDK. The peer profile is the [control schema](../../proto/common/v1/control.proto) plus [ADR-0003 §9](../decisions/ADR-0003-peer-transport-and-pairing.md): bounded protobuf envelopes, TLS 1.3 raw keys, signed capability bytes and JSON GenerateRequest/GenerateEvent payloads. Rust mirrors the protobuf schema by hand. Status is defined but not periodically sent. These are experimental contracts; a compatible minor-version test between two Common peers does not prove independent interoperability.
+
+**Committed scope.** U-01/WP-07 requires a complete independently implementable profile: identity/pairing/signature transcript, exact JSON and binary schemas, units and limits, version/feature negotiation, timeout/error/cancel behavior, authorization/revocation, replay semantics, extension namespaces and published vectors. Unknown optional fields remain tolerable; unknown required capabilities are refused. A separate implementation sharing no common-network code must exchange real work and pass negative conformance cases. No protocol stability promise is made before that evidence.
+
+U-02/WP-10 will introduce a versioned workload envelope around existing inference, preserving its conformance tests. Workload schemas declare IO, runtime/artifact pins, hardware, permissions, quotas, deadline, privacy, lifecycle, integrity and accounting. Unknown workloads/permissions fail before spawn or network. No arbitrary-program endpoint is added by this design.
+
+**Developer delivery.** F-09-05/WP-06 delivers versioned Python and TypeScript clients with live-server tests, streaming/cancel/typed-error examples, documented authentication, explicit execution targets and migrations. Keep current OpenAI-client examples working. Local mock fixtures must be labelled and must never count as inference evidence. U-04 adds an independent study: three developers, at least two separately maintained apps, two of three first real streams within 30 minutes without author help; all apps test cancellation, refusal and default-local behavior. [Specification](../SPEC_HANDOFF_V2.md) §§30–33 owns gate targets and evidence requirements.
+
+**Compatibility policy target.** Once beta contracts are supported, publish current/previous minor support and migrations for at least 90 days after a successor, except disclosed urgent security removals. Breaking wire meanings require a new major; reserved tags cannot be reused. Version SDK packages independently and test their declared server matrix. Protocol decisions use the contribution/ADR process in [CONTRIBUTING](../../CONTRIBUTING.md), including independent implementer review. These are launch obligations, not retroactive guarantees for today's experimental protocol.

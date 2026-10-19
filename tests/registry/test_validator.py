@@ -115,6 +115,97 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(after[10]["observed_evidence"], "kept")
         self.assertEqual(after[10]["status"], "IN_PROGRESS")
 
+    def test_additive_priorities_and_cohort_counts(self):
+        _, rows = self.rows()
+        added = [r for r in rows if r["id"].startswith("U-")]
+        self.assertEqual([r["priority"] for r in added], ["P1", "P2", "P1", "P1"])
+        code, out = self.run_validator()
+        self.assertEqual(code, 0, out)
+        self.assertIn("4 added; 152 total", out)
+        md = (self.tmp / "docs/requirements/REGISTRY.md").read_text()
+        self.assertIn("| Status | Original | Added | Total |", md)
+
+    def test_additive_initial_status_without_existing_ledger(self):
+        self.csv.unlink()
+        subprocess.run([sys.executable, str(self.tmp / "scripts/gen_registry.py")],
+                       check=True, capture_output=True)
+        _, rows = self.rows()
+        self.assertTrue(all(r["status"] == "NOT_STARTED" for r in rows if r["id"].startswith("U-")))
+
+    def test_original_acceptance_and_priority_protected(self):
+        for field, value in (("acceptance_criteria", "Any output counts"), ("priority", "P2")):
+            with self.subTest(field=field):
+                f, rows = self.rows()
+                old = rows[0][field]
+                rows[0][field] = value
+                self.write(f, rows, regen=False)
+                code, out = self.run_validator()
+                self.assertEqual(code, 1)
+                self.assertIn("changed from ddc39f6", out)
+                rows[0][field] = old
+                self.write(f, rows, regen=False)
+
+    def test_missing_additive_row_rejected(self):
+        f, rows = self.rows()
+        self.write(f, [r for r in rows if r["id"] != "U-01"], regen=False)
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("missing=['U-01']", out)
+
+    def test_duplicate_csv_id_rejected(self):
+        f, rows = self.rows()
+        self.write(f, rows + [rows[-1]], regen=False)
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate ids", out)
+
+    def test_duplicate_spec_id_rejected(self):
+        spec = self.tmp / "docs/SPEC_HANDOFF_V2.md"
+        spec.write_text(spec.read_text() + "\n• P1 / U-01: Duplicate.\n")
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate id in spec", out)
+
+    def test_duplicate_design_id_rejected(self):
+        data = self.tmp / "scripts/registry_data.py"
+        data.write_text(data.read_text() + "\nR.append(R[-1])\n")
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate id in registry_data", out)
+
+    def test_invalid_spec_priority_rejected(self):
+        spec = self.tmp / "docs/SPEC_HANDOFF_V2.md"
+        spec.write_text(spec.read_text().replace("• P1 / U-01:", "• P9 / U-01:"))
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("invalid requirement declaration", out)
+
+    def test_unknown_additive_id_rejected(self):
+        f, rows = self.rows()
+        rows[-1]["id"] = "Z-01"
+        self.write(f, rows, regen=False)
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("id set differs from spec", out)
+
+    def test_invalid_priority_and_milestone_rejected_without_traceback(self):
+        f, rows = self.rows()
+        rows[-1].update(priority="urgent", milestone="next")
+        self.write(f, rows, regen=False)
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("invalid priority", out)
+        self.assertIn("invalid milestone", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_additive_progress_preserved(self):
+        f, rows = self.rows()
+        rows[-1].update(status="IN_PROGRESS", observed_evidence="design inspected", blocker="test host", last_verified_commit="")
+        before = rows[-1].copy()
+        self.write(f, rows)
+        _, after = self.rows()
+        self.assertEqual(before, after[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

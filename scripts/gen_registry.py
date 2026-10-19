@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate docs/REQUIREMENTS.csv and docs/requirements/REGISTRY.md.
 
-Source of truth for requirement descriptions: docs/SPEC_HANDOFF_V2.md (verbatim).
+Source of truth for requirement descriptions and priorities: docs/SPEC_HANDOFF_V2.md (verbatim).
 Source of truth for all other spec section 21 fields: scripts/registry_data.py,
 EXCEPT status/evidence/blocker/commit, which live in docs/REQUIREMENTS.csv once it
 exists. Regeneration preserves those four ledger columns from the existing CSV so
@@ -38,12 +38,12 @@ FIELDS = [
 LEDGER = ("observed_evidence", "status", "blocker", "last_verified_commit")
 STATUSES = ["NOT_STARTED", "IN_PROGRESS", "BLOCKED", "IMPLEMENTED_UNVERIFIED",
             "VERIFIED", "INFEASIBLE_WITH_EVIDENCE"]
-REQ_RE = re.compile(r"^• P0 / (F-\d{2}-\d{2}|X-\d{2}|I-\d{2}): (.+)$")
-SEC_RE = re.compile(r"^(18\.\d+\.|19\.|20\.)\s*(.+)$")
+REQ_RE = re.compile(r"^• (P[0-2]) / (F-\d{2}-\d{2}|X-\d{2}|I-\d{2}|U-\d{2}): (.+)$")
+SEC_RE = re.compile(r"^(18\.\d+\.|19\.|20\.|25\.)\s*(.+)$")
 
 
-def parse_spec() -> "OrderedDict[str, tuple[str, str]]":
-    out: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
+def parse_spec() -> "OrderedDict[str, tuple[str, str, str]]":
+    out: "OrderedDict[str, tuple[str, str, str]]" = OrderedDict()
     section = ""
     for line in SPEC.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -53,7 +53,12 @@ def parse_spec() -> "OrderedDict[str, tuple[str, str]]":
             continue
         m = REQ_RE.match(line)
         if m:
-            out[m.group(1)] = (m.group(2).strip(), section)
+            priority, rid, description = m.groups()
+            if rid in out:
+                raise SystemExit(f"duplicate id in spec: {rid}")
+            out[rid] = (description.strip(), section, priority)
+        elif line.startswith("• P"):
+            raise SystemExit(f"invalid requirement declaration: {line}")
     return out
 
 
@@ -67,13 +72,15 @@ def existing_ledger() -> dict[str, dict[str, str]]:
 def build_rows() -> list[dict[str, str]]:
     spec = parse_spec()
     data = {t[0]: t for t in R}
+    if len(data) != len(R):
+        raise SystemExit("duplicate id in registry_data")
     missing = [i for i in spec if i not in data]
     extra = [i for i in data if i not in spec]
     if missing or extra:
         raise SystemExit(f"registry_data mismatch vs spec. missing={missing} extra={extra}")
     ledger = existing_ledger()
     rows = []
-    for rid, (desc, section) in spec.items():
+    for rid, (desc, section, priority) in spec.items():
         (_, ms, owner, deps, analogy, design, impl, unit, integ, sec, bench, accept) = data[rid]
         if rid in ledger:
             led = ledger[rid]
@@ -81,7 +88,7 @@ def build_rows() -> list[dict[str, str]]:
             st, ev, bl = OVERRIDES.get(rid, ("NOT_STARTED", "", ""))
             led = {"observed_evidence": ev, "status": st, "blocker": bl, "last_verified_commit": ""}
         rows.append({
-            "id": rid, "priority": "P0", "milestone": ms, "owner": owner,
+            "id": rid, "priority": priority, "milestone": ms, "owner": owner,
             "section": section, "description": desc, "analogy": analogy,
             "dependencies": deps, "design": design, "implementation_paths": impl,
             "unit_tests": unit, "integration_tests": integ, "security_tests": sec,
@@ -114,17 +121,20 @@ def render_md(rows: list[dict[str, str]]) -> str:
         "last_verified_commit) or `scripts/registry_data.py`, then regenerate. "
         "`scripts/validate_registry.py` enforces the rules below.",
         "",
-        "**Rules.** All 148 items are P0. Status values: " + ", ".join(f"`{s}`" for s in STATUSES) + ". "
+        "**Rules.** The original 148 F/X/I items remain P0; additive U items use their declared priority. Status values: " + ", ".join(f"`{s}`" for s in STATUSES) + ". "
         "`VERIFIED` requires observed evidence and a commit hash. `INFEASIBLE_WITH_EVIDENCE` is not done. "
         "Test and path names in the CSV are planned identifiers until a row leaves `NOT_STARTED`. "
         "Single-host multiprocess runs never satisfy a two-machine criterion.",
         "",
-        f"**Total:** {len(rows)}",
+        f"**Original:** 148 P0. **Added:** {len(rows) - 148}. **Total:** {len(rows)}.",
         "",
-        "| Status | Count |",
-        "|---|---|",
+        "| Status | Original | Added | Total |",
+        "|---|---|---|---|",
     ]
-    lines += [f"| {s} | {by_status.get(s, 0)} |" for s in STATUSES]
+    for status in STATUSES:
+        original = sum(r["status"] == status and not r["id"].startswith("U-") for r in rows)
+        added = sum(r["status"] == status and r["id"].startswith("U-") for r in rows)
+        lines.append(f"| {status} | {original} | {added} | {by_status.get(status, 0)} |")
     lines += ["", "| Milestone | Count |", "|---|---|"]
     lines += [f"| {m} | {by_ms[m]} |" for m in ms_order]
     current = None
@@ -132,11 +142,11 @@ def render_md(rows: list[dict[str, str]]) -> str:
         if r["section"] != current:
             current = r["section"]
             lines += ["", f"## {current}", "",
-                      "| ID | Requirement | MS | Owner | Status | Depends on | Acceptance criteria | Evidence / blocker |",
-                      "|---|---|---|---|---|---|---|---|"]
+                      "| ID | Priority | Requirement | MS | Owner | Status | Depends on | Acceptance criteria | Evidence / blocker |",
+                      "|---|---|---|---|---|---|---|---|---|"]
         evb = "; ".join(x for x in (r["observed_evidence"], r["blocker"]) if x)
         lines.append("| " + " | ".join(md_cell(x) for x in (
-            r["id"], r["description"], r["milestone"], r["owner"], f"`{r['status']}`",
+            r["id"], r["priority"], r["description"], r["milestone"], r["owner"], f"`{r['status']}`",
             r["dependencies"].replace(";", ", "), r["acceptance_criteria"], evb)) + " |")
     return "\n".join(lines) + "\n"
 

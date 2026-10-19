@@ -1,6 +1,6 @@
 """Authoritative source data for docs/REQUIREMENTS.csv.
 
-Descriptions are parsed verbatim from docs/SPEC_HANDOFF_V2.md (sections 18-20) by
+Descriptions are parsed verbatim from docs/SPEC_HANDOFF_V2.md (sections 18-20 and 25) by
 gen_registry.py; this file supplies the remaining spec section 21 fields.
 
 Tuple layout per requirement:
@@ -657,3 +657,27 @@ OVERRIDES = {
     "X-02":    ("NOT_STARTED", "", "Requires a physical smartphone"),
     "X-09":    ("NOT_STARTED", "", "Any real cloud call requires explicit approval and incurs cost (spec section 4); test with fake provider only"),
 }
+
+# Additive infrastructure requirements (ADR-0004). Priorities/descriptions come from spec section 25.
+R.extend([
+("U-01", "M13", "network", "F-08-10;F-06-02;F-09-04", "Open protocol interoperability",
+ "Publish the complete peer profile, nested JSON schemas and conformance vectors; qualify an independent implementation without sharing common-network code",
+ "proto/;docs/api/README.md;tests/protocol", "wire_vectors; unknown_fields", "independent_peer_conformance",
+ "independent_peer_auth_revoke_and_bounds", "bench:protocol-overhead",
+ "A complete implementation-independent peer profile, nested schemas and signed-message/lifecycle/extension vectors are published; a separately maintained peer/client implementation sharing no common-network code interoperates with the Rust reference at pinned versions for real generation, streaming and cancellation; both reject bad identity, forged or stale capabilities, incompatible major versions and malformed lengths before work, tolerate unknown optional fields, and enforce revocation during active sessions and on reconnection; source and reproducible results for both implementations plus a published current/previous minor compatibility window of at least 90 days after a successor (except disclosed urgent security removals) are recorded"),
+("U-02", "M11", "runtime", "F-01-06;X-15;F-08-10", "Portable workload manifest",
+ "Version a workload envelope around the existing inference adapter; declare permissions, resources, privacy and lifecycle without enabling arbitrary code",
+ "crates/common-runtime;proto/;docs/api/README.md", "workload_schema_roundtrip", "envelope_preserves_inference_conformance",
+ "unknown_workload_refused_before_spawn_or_network", "bench:workload-envelope",
+ "A versioned schema covers kind, input/output, runtime pin, hardware, permissions, privacy, deadline, integrity and accounting; round-trip tests pass; same pinned backend/model retains golden output, streaming and cancellation through the envelope; unknown kinds/versions and unauthorized permissions are rejected before process spawn or peer traffic; no arbitrary-code workload is enabled"),
+("U-03", "M13", "release", "F-01-01;F-09-04", "Evidence-based portability",
+ "Machine-check platform/backend/role records and support claims against exact artifacts, evidence and release gates",
+ "docs/SPEC_HANDOFF_V2.md;docs/VERIFICATION.md;scripts/", "compatibility_record_validation", "supported_record_has_real_install_and_workload_evidence",
+ "unsupported_role_not_advertised", "bench:install-time",
+ "Versioned machine-readable records enumerate the platform/backend/role matrix; each SUPPORTED record names exact OS, driver, runtime, artifact hash, maintainer and real fresh-install/workload evidence plus passed release gate; validation rejects missing or contradictory evidence; a pin, cross-build or hardware probe alone cannot promote PLANNED or EXPERIMENTAL to SUPPORTED"),
+("U-04", "M13", "devex", "F-09-05;F-09-04;F-08-03", "Independent application ecosystem",
+ "Observe independent developers integrating versioned Python and TypeScript clients against real inference without author assistance",
+ "examples/;docs/api/README.md;docs/evidence/", "", "independent_developer_onboarding",
+ "client_defaults_local_and_surfaces_refusal", "bench:developer-first-result",
+ "Three independent developers produce at least two separately maintained applications collectively using the versioned Python and TypeScript SDKs; at least two of three reach a real streamed result unaided within 30 minutes; every application demonstrates cancellation, typed refusal and default-local execution; versioned reproducible run and issue records are retained with consent and without private prompts"),
+])

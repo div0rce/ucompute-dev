@@ -2,16 +2,18 @@
 
 **Run AI models on the best compute you have, with one install and no account.**
 
-Common is an open-source (Apache-2.0) universal AI inference platform. Think of it as the VLC of AI compute: pick a model, press Run, and Common figures out the hardware, the backend, the memory budget and (soon) the other devices you trust.
+Common is an open-source (Apache-2.0) universal AI inference platform. Think of it as the VLC of AI compute: pick a model, press Run, and Common figures out the hardware, the backend, the memory budget and, with explicit authorization, a selected device you trust. Automatic multi-device planning remains future work.
 
-> Status (2026-10-14): **M1, local inference, is implemented and tested on Apple Silicon.** The desktop app runs against the local daemon. Peer networking (M3), genuine multi-device model partitioning (M4) and the opt-in swarm (M9+) are designed (ADR-0003) but not built. See `docs/PROGRESS.md` for the honest ledger; every one of the 148 registered capabilities is tracked in `docs/REQUIREMENTS.csv`.
+> Status (2026-10-18 baseline): local CPU/Metal inference and trusted Mode B remote execution have recorded evidence, including a physical Mac↔Windows Arc/Vulkan pair and hotspot discovery. Windows desktop qualification, Linux execution and genuine multi-device model partitioning remain incomplete. See [progress](docs/PROGRESS.md), [evidence](docs/VERIFICATION.md), and the [requirements ledger](docs/requirements/REGISTRY.md). No stable cross-platform release is claimed.
+
+UCompute is the proposed public identity for the open computing infrastructure program, pending naming clearance. Existing Common names and interfaces stay compatible. The [existing specification](docs/SPEC_HANDOFF_V2.md), sections 25–33, defines the product, device roles, developer platform, delivery backlog and release gates; [ADR-0004](docs/decisions/ADR-0004-infrastructure-program.md) records the integration decision. The 148 original P0 requirements are preserved, with four additive requirements for interoperability, workload contracts, compatibility evidence and independent developer adoption.
 
 ## What works today
 
 | Product | Status |
 |---|---|
 | **Common Run** (local inference) | CLI + OpenAI-compatible API + desktop app on macOS arm64; real GGUF models through a pinned, hash-verified llama.cpp engine; CPU and Metal; streaming; cancellation; memory feasibility before load |
-| **Common Mesh** (trusted devices) | Not yet. Design: `docs/decisions/ADR-0003-peer-transport-and-pairing.md` |
+| **Common Mesh** (trusted devices) | Opt-in authenticated pairing, encrypted remote inference, privacy policy and revocation; recorded Mac/Windows daemon evidence. Whole requests run on one selected peer. Genuine pooling remains unimplemented |
 | **Common Swarm** (opt-in network) | Not yet; disabled by design until security gates pass |
 | **Common Cloud** | Not yet |
 

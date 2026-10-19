@@ -62,3 +62,50 @@ Scheduler consequence (feeds F-04-03, F-04-04, F-03-11): default to local; distr
 - **H5:** Policy enforcement (local-only, trusted-LAN-only, swarm-allowed) adds < 1 ms scheduling overhead and produces zero violations under a fuzzed request mix.
 - **Benchmark:** audit-log diff against packet capture.
 - Registry: F-06-07, I-05, F-10-10.
+
+## 2026-10-18 — adoption and infrastructure hypotheses
+
+The M0 H1–H5 statements above are historical research hypotheses. In particular, bandwidth relevance depends on batching, framing, model and concurrency; the arithmetic example is not a universal finding. Exo's current README describes topology-aware splitting, and the refresh in COMPETITIVE_MATRIX.md invalidates any assumption that those concepts alone are unique. The H1 plaintext control must remain SINGLE-HOST: never expose unauthenticated RPC on a LAN to benchmark it.
+
+### Beachhead comparison (decision under uncertainty)
+
+| Candidate audience | Evidence supporting investigation | Likely friction / reason not first |
+|---|---|---|
+| Local-first developers with two owned machines | Existing OpenAI clients and Mac↔Windows Mode B evidence offer a concrete integration path; incumbent runner APIs demonstrate an established workflow | Demand and willingness to switch unmeasured; VPN+runner and LM Link are credible alternatives |
+| Homelab / self-hosting community | Can reproduce heterogeneous device and private networking experiments | Tolerates manual setup, so success here can overstate consumer usability; support-heavy hardware variety |
+| Research/university teams | Reproducibility, memory capacity and controlled data workflows align with X-15/20 | Campus multicast/firewall policy, research-specific model needs and administration delay adoption |
+| Multi-computer AI enthusiasts | Underused hardware and bigger-model interest fit future pooling | Pooling not delivered, added devices may slow inference, novelty may not produce retention |
+| General consumers | Local model UI is a familiar distribution category | Mature alternatives and current installer gaps; weak differentiation before qualified Mesh/pooling |
+| Portable inference/enterprise developers | Stable contracts and fleet policy could create maintained integrations | Compatibility/support commitments exceed today's evidence; sales/compliance burden before validated demand |
+
+Choose the first segment for a limited experiment, with homelab users as reproducibility partners. This is an evidence-informed hypothesis about accessible technical value, **not** market research establishing customer demand. No interviews, recruitment, outreach or payments occurred in this task.
+
+### H6 — private developer workflow earns repeat use
+
+- Owner: product/devex; work packages WP-06/08; requirements F-09-05, U-04.
+- Recruit, only after authorization, 10 independent developers with two controlled computers; record current runner/VPN/cloud workaround and one useful weekly task before showing the product.
+- Target: at least 6/10 complete that task unaided through the chosen local/remote interface, and at least 4/10 repeat useful use in week 4. U-04's separate 3-developer/2-app acceptance still applies.
+- Compare time, failures and maintainability with their existing workflow, not a deliberately poor baseline. Report all withdrawals and support interventions.
+- Falsified for this segment if either target fails after one documented onboarding correction; prioritize the observed missing value or narrow the segment, rather than buying more acquisition.
+
+### H7 — second-device value creates a private growth loop
+
+- Owner: network/product; WP-01/02/08; F-10-05, F-06-04.
+- Mechanism: one useful local install motivates adding a privately owned device; that device's availability provides recurring value. Preconditions: qualified installers, informed sharing, useful model/device advantage and stable availability.
+- Target: at least 8/10 independent pairs complete a useful authorized peer request within 10 min after installation, at least 5/10 use the second device on three separate days in the following fortnight, with no local-only violation or failed revocation.
+- Falsified if setup/availability/latency harms the baseline task or repeat use misses target. More discovered peers without useful work is not success. Benchmark a supported runner over an already-authorized private network as an alternative.
+
+### H8 — independent integrations and contributions compound usefulness
+
+- Owner: devex/maintainers; WP-06/07/12; U-01/04, F-09-07/12.
+- Mechanism: independently maintained apps bring users; reproducible tests make additional platforms cheaper to maintain; contributions improve those apps. Preconditions: compatibility policy, easy conformance, reviews and maintainer capacity.
+- After U-04, target >=3 independently maintained useful integrations still passing live compatibility tests at 90 days, >=2 contributors completing a reviewed change without founder debugging, and a second maintainer performing a release rehearsal.
+- Falsified if integrations stop working after minor upgrades, users require the official desktop, or support/review labor grows faster than accepted useful contributions. Fork counts and generated example apps do not count as independent adoption.
+
+### H9 — optional services or public supply have sustainable economics
+
+- Owner: product/operations; WP-11/12; F-07-02/09/11, X-06/09.
+- Mechanism: reliable compatible supply attracts eligible jobs and paid operational convenience funds maintenance. Preconditions: demonstrated demand, isolation/privacy/abuse gates, credible metering, provider availability, legal approval and sufficient matching density for the actual workload.
+- First test: cost >=100 representative successful and failed jobs across cold/warm runs, plus 10 buyer interviews; obtain >=3 written scoped pilot interests before building paid service infrastructure. No binding prices or payments in this research stage.
+- Compare marginal and fully loaded useful-job costs with best feasible private device and managed alternative; include verification, provider payout, network, support, acquisition and failure costs. Stress utilization/egress/churn under spec §29.4. Pilot interest is not willingness to pay demonstrated by a transaction.
+- Falsified if measured costs exceed the price buyers actually accept under pessimistic plausible assumptions, or verification/abuse costs overwhelm useful work. Stop the service hypothesis; do not weaken security or require a token to subsidize it.

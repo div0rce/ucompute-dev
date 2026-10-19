@@ -6,6 +6,8 @@ Exit code 0 = valid, 1 = violations (printed). Intended for CI and pre-commit.
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -26,17 +28,28 @@ def ms_num(m: str) -> int:
 
 def main() -> int:
     errs: list[str] = []
-    spec = parse_spec()
-    if len(spec) != 148:
-        errs.append(f"spec parse found {len(spec)} requirements, expected 148")
+    try:
+        spec = parse_spec()
+    except SystemExit as e:
+        print(f"REGISTRY INVALID: {e}")
+        return 1
+    original_ids = [rid for rid in spec if not rid.startswith("U-")]
+    if len(original_ids) != 148:
+        errs.append(f"spec parse found {len(original_ids)} original requirements, expected 148")
     with CSV_PATH.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames != FIELDS:
             errs.append(f"CSV header mismatch: {reader.fieldnames}")
         rows = list(reader)
     ids = [r["id"] for r in rows]
-    if len(rows) != 148:
-        errs.append(f"CSV has {len(rows)} rows, expected 148")
+    original = [r for r in rows if not r["id"].startswith("U-")]
+    if len(original) != 148:
+        errs.append(f"CSV has {len(original)} original rows, expected 148")
+    # Freeze original acceptance at ddc39f6; ledger progress remains mutable (ADR-0004).
+    protected = [{k: r[k] for k in ("id", "priority", "description", "acceptance_criteria")} for r in original]
+    digest = hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if digest != "f1e23801a2edf7b18040ea9fafc70b8491e6182e5e75c6e88b5016e02ca7c81d":
+        errs.append("original IDs, priorities, descriptions or acceptance criteria changed from ddc39f6")
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:
         errs.append(f"duplicate ids: {sorted(dupes)}")
@@ -46,8 +59,10 @@ def main() -> int:
 
     for r in rows:
         rid = r["id"]
-        if r["priority"] != "P0":
-            errs.append(f"{rid}: priority {r['priority']!r} != P0")
+        if r["priority"] not in ("P0", "P1", "P2") or r["priority"] != spec.get(rid, ("", "", ""))[2]:
+            errs.append(f"{rid}: invalid priority {r['priority']!r} or differs from spec")
+        if not re.fullmatch(r"M(?:[0-9]|1[0-4])", r["milestone"]):
+            errs.append(f"{rid}: invalid milestone {r['milestone']!r}")
         if r["status"] not in STATUSES:
             errs.append(f"{rid}: invalid status {r['status']!r}")
         if spec.get(rid, ("",))[0] != r["description"]:
@@ -71,7 +86,9 @@ def main() -> int:
         for d in filter(None, r["dependencies"].split(";")):
             if d not in by_id:
                 errs.append(f"{rid}: unknown dependency {d!r}")
-            elif ms_num(by_id[d]["milestone"]) > ms_num(r["milestone"]):
+            elif (re.fullmatch(r"M(?:[0-9]|1[0-4])", by_id[d]["milestone"])
+                  and re.fullmatch(r"M(?:[0-9]|1[0-4])", r["milestone"])
+                  and ms_num(by_id[d]["milestone"]) > ms_num(r["milestone"])):
                 errs.append(f"{rid} ({r['milestone']}): depends on {d} in later milestone {by_id[d]['milestone']}")
             elif r["status"] == "VERIFIED" and by_id[d]["status"] != "VERIFIED":
                 errs.append(f"{rid}: VERIFIED but dependency {d} is {by_id[d]['status']}")
@@ -105,7 +122,7 @@ def main() -> int:
             print(" -", e)
         return 1
     counts = {s: sum(r["status"] == s for r in rows) for s in STATUSES}
-    print("registry valid: 148 P0 rows;", ", ".join(f"{k}={v}" for k, v in counts.items()))
+    print(f"registry valid: 148 P0 rows (original); {len(rows) - 148} added; {len(rows)} total;", ", ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
 

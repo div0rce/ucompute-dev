@@ -14,15 +14,18 @@ How evidence is recorded, and the current state of each quality gate (spec secti
 A row in `docs/REQUIREMENTS.csv` may be marked `VERIFIED` only when its `observed_evidence` points to an entry here covering every acceptance criterion.
 
 ## Quality gates
+
+Current summary reconciled 2026-10-18 against the committed evidence below; this documentation review did not re-run runtime qualification. Historical entries retain their dates and limitations. Release cohort targets are in SPEC_HANDOFF_V2 §§31–33.
+
 | Gate | Scope | State | Evidence |
 |---|---|---|---|
-| A — Build | clean build, lint, fmt, dependency/license scan, secrets check | Not assessed | — |
-| B — Inference | real load, generation, streaming, cancellation, cleanup | Not assessed in this ledger (existing Mac repo reports partial; B-009) | — |
-| C — Network | discovery, auth, revocation, disconnects, malformed messages | Not started | — |
-| D — Pooling | genuine two-node partitioned execution, correctness, memory, failure semantics | Not started; real verification blocked (B-002) | — |
-| E — Product | install, select, run, pair, pool, diagnose without developer | Not started | — |
-| F — Public swarm | adversarial review, accounting, privacy, abuse, churn | Not started; disabled by default | — |
-| G — Release | signed/checksummed, reproducible, compat matrix, CI, docs, benchmarks | Not started (B-007, B-008) | — |
+| A — Build | build, lint, fmt, dependency/license and secrets checks | Historical builds/tests exist; no current cross-platform release certification | M1/M3 entries; Windows checks; CI definitions are not an executed pipeline |
+| B — Inference | real load, generation, streaming, cancellation, cleanup | Bounded real CPU/Metal and Windows Arc/Vulkan evidence; current artifact qualification still required | M1, packaged macOS, physical M3 reports |
+| C — Network | discovery, auth, revocation, disconnects, malformed messages | SINGLE-HOST tests plus physical Mac/Windows Mode B and hotspot discovery; full default-quota/platform security qualification open | [Physical run](evidence/m3-two-machine-2026-10-18.md); B-014/015/017 |
+| D — Pooling | partitioned execution, correctness, memory, failure semantics | Not implemented or verified; whole-request remote execution does not satisfy it | ADR-0003 D6; B-016 |
+| E — Product | install, select, run, pair, pool, diagnose unaided | Partial developer/packaged Mac evidence; fresh-account UI, native Windows/Linux and independent-user study incomplete | Desktop evidence; F-10-01/05/11 remain open |
+| F — Public swarm | adversarial review, accounting, privacy, abuse, churn | Not verified; public contribution remains disabled | Threat model and frontier research; no deployment approval |
+| G — Release | signed artifacts, provenance, compatibility, CI, docs, benchmarks | Checksummed/ad-hoc Mac artifact evidence only; stable/public gate incomplete | B-007/008/018; no stable cross-platform release claim |
 
 ## Evidence log
 

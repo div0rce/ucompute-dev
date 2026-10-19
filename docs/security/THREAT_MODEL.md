@@ -1,5 +1,7 @@
 # Threat Model — Project Common
 
+> Current reading note (2026-10-18): original M0/M1 actor tables and Appendix A retain historical planning labels. The dated implementation corrections and infrastructure extension below take precedence for current implementation; no new security tests or public-execution approval are implied.
+
 - **Requirement:** F-06-06 (M0). Companion test: `default_config_binds_localhost` in `crates/common-api` (written separately).
 - **Status:** living document; revise at every milestone that adds a trust zone (M3, M7, M9, M10, M12). Last revised 2026-10-15 for M3 as built.
 - **Inputs:** `docs/SPEC_HANDOFF_V2.md` §7, §9, §18.6; `docs/REQUIREMENTS.csv`; ADR-0001; ADR-0002; ADR-0003 (§9, implementation notes); `docs/evidence/m3-single-host-2026-10-15.md`; `docs/research/COMPETITIVE_MATRIX.md` (llama.cpp RPC notes); `AGENTS.md`; decisions D-004, D-007; blockers B-002, B-005, B-006, B-007, B-008, B-011.
@@ -376,13 +378,13 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 | # | Risk | Why it remains | Owner action |
 |---|---|---|---|
 | R1 | **TOCTOU between hash verification and engine load.** `Store::verify` re-hashes the blob; the engine then opens the path by name. A same-user writer can swap the file in between. | Loopback-and-same-user is the OS trust boundary; `llama-server` takes a path, not an fd. Mitigation options: open once and hash the open fd, hard-link into a private per-run directory, or verify via `/proc/self/fd` style path. | Decide in M1 implementation; document in `common-artifacts`. |
-| R2 | **Single-machine testing only (B-002, D-004).** Every multi-node security property (pairing, revocation, capture tests) can only be exercised `SINGLE-HOST`. | No second physical machine. | `SINGLE-HOST` label mandatory; topology-independent rows are `VERIFIED` from SINGLE-HOST tests; anything needing two machines waits for a two-machine run. M3 SINGLE-HOST evidence: `docs/evidence/m3-single-host-2026-10-15.md`. |
-| R3 | **No code signing (B-008), no CI (B-007).** Installers unsigned; dependency audit not automated. | Missing identities and remote. | Checksums only; owner to provide identities and authorize remote. |
+| R2 | **Bounded physical coverage (updated 2026-10-18).** Mac/Windows Mode B and hotspot discovery have evidence; pooling and two packaged UIs do not. | No LAN kernel packet capture; limited host/network configurations. | Retain SINGLE-HOST capture labels; see [two-machine evidence](../evidence/m3-two-machine-2026-10-18.md). Do not infer arbitrary platform or distributed-execution security. |
+| R3 | **Public signing and executed release CI unavailable (B-007/008).** Mac artifact is ad-hoc signed; pipeline definitions exist, not a demonstrated release pipeline. | Developer ID/Windows signing and publication authorization absent; origin exists. | Qualify signed exact artifacts and target-native CI before public promotion. |
 | R4 | **Upstream engine binary is trusted at pin time.** The SHA-256 pins what was downloaded, not what the source produces. | No reproducible build of llama.cpp releases. | Consider building from the pinned `source_commit` in CI once B-007 is resolved. |
 | R5 | **llama.cpp memory-safety surface.** GGUF loader and `rpc-server` are C++ with known robustness issues (COMPETITIVE_MATRIX: #15055, #13185, #20315; no fuzzer upstream). | Not Common's code. | Process isolation now (ADR-0002); sandbox at M7 (F-06-08); never expose beyond loopback (D-007). |
 | R6 | **Same-user local attacker.** Anything running as the user can read `$COMMON_HOME` and reach loopback ports. | Inherent to desktop OS model. | Document in user privacy notes. M3 chose a 0600 file over the keychain (ADR-0003 D1); revisit with signed builds (M13). |
 | R7 | **Fixture license (B-011).** TinyStories weights have no verified license. | Upstream ambiguity. | Never bundle; download at test time. |
-| R8 | **Engine API key in process memory and command line.** `--api-key` passed as argv is visible to same-user `ps`. | llama-server accepts key via argv or env; env is scrubbed, argv is readable by the same user. | Same boundary as R6; prefer env var `LLAMA_API_KEY` if supported by the pinned build and re-add it after scrubbing. |
+| R8 | **Engine secret handling (corrected 2026-10-18).** Code uses a temporary `--api-key-file`, not the secret in argv. | Same-user memory/file access remains; Windows ACL guarantees require native tests. | `crates/common-runtime/src/llamacpp/process.rs`; recorded `key_file_is_owner_only_and_never_overwritten` test in VERIFICATION. Do not equate Unix mode tests with Windows isolation. |
 | R9 | **rustls `tls12` is compiled into the binary.** reqwest (hyper-rustls) enables the feature, so TLS 1.2 code ships although no Common config uses it. | Cargo feature unification: reqwest's `rustls-tls` turns it on through hyper-rustls. | Every peer config pins TLS 1.3 (`tls12_downgrade_attempt_fails`). Remove it when reqwest can be built without it. |
 | R10 | **`spake2` 0.4.0 is unaudited** and, by its own statement, probably not constant-time. | Accepted in ADR-0003 D2 for a short-lived pairing code. | It protects only a one-time 120 s code; lockout after 5 failures; long-term trust rests on TLS 1.3 + pinned Ed25519 keys. Track `spake2` 0.5. |
 
@@ -440,3 +442,37 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 | SD-14 | `disclosure_names_the_risk`, `privacy_mode_enforced_end_to_end_single_host` | `crates/common-api` | F-10-10 | present (SINGLE-HOST) |
 
 Present today: `safe_names`, `error_codes_are_stable`, `backoff_is_bounded`, `every_code_has_status_type_and_user_message`, `openai_json_shape`, and the rows marked `present` above (M3, 2026-10-15). M1 rows still marked planned were not re-checked in this revision. Tests marked M4+ cannot run until the corresponding crate exists; tests for gaps 1–6 need requirement rows or an amendment to an existing row before they can carry evidence in the ledger.
+
+
+## 6. Infrastructure-program extension (2026-10-18)
+
+### 6.1 Implementation corrections and evidence scope
+
+These corrections come from inspected code and the existing verification record, not a new runtime run. [VERIFICATION](../VERIFICATION.md) F-06-06 records environment scrubbing, API auth, cross-origin/Host rejection, request size bounds, malicious archive rejection, key-file handling and redaction tests. They supersede original “stub/planned” labels for those specific implementations. Section 5.2 remains a historical gap list: engine loopback/auth/scrubbing/archive bounds are now represented by F-06-06/F-01-05 evidence; catalog signing, disk quota and verify-to-load TOCTOU still need their own proof. A coverage mapping is not a new acceptance claim.
+
+The M3 trust profile is [ADR-0003 §9](../decisions/ADR-0003-peer-transport-and-pairing.md), including its differences from the proposal. Physical Mode B tests supplement SINGLE-HOST security tests; they do not establish model pooling, kernel LAN capture, Windows desktop qualification or Windows multi-user isolation. Unknown Windows key/config ACL behavior is a release blocker, not an assumed exploit or an assumed guarantee.
+
+### 6.2 Additional threat-to-work mapping
+
+All entries below are committed design/verification obligations. Public execution remains disabled; none is claimed implemented by this extension.
+
+| Actor / attack | Asset / failure | Required control and falsifiable check | Work / requirements |
+|---|---|---|---|
+| Malicious provider or compromised trusted device; false hardware/load or result | Prompt/activation/result exposure, bad placement, incorrect output | Disclose endpoint plaintext; treat capability signatures as provenance, not truth; bounded independent probes, stale-claim refusal and correctness checks; inject false capacity and wrong output | WP-04/05/11; F-02-04, F-03-04, F-07-09, X-07 |
+| Malicious consumer; unauthorized expensive requests | Device resources, battery, metered cost | Policy before admission/load/network; hard per-workload quotas and deadline; flood with local foreground work and assert shipped-default fairness, cancellation and resource release | WP-02/09; F-06-02/04, F-08-08, X-03 |
+| Credential theft, impersonation or revoked/offline device | Device and group authority | Owner-only secret access on every OS; revoke active/resumed/new sessions; rejoin after offline revocation; no bearer secrets in diagnostics | WP-02/07; F-06-01/05/10, U-01 |
+| Replay, downgrade, forged capabilities or protocol extensions | Authorization/lifecycle consistency | Publish canonical signatures, nonce/expiry/replay semantics, required-capability rules; independent negative vectors and no fallback to unauthenticated transport | WP-07; F-08-10, U-01 |
+| Malicious model, backend, plugin or workload package | Provider host execution and supply chain | Pin/verify artifacts, license/notice review, bounded parsers, explicit permission manifest; reject unknown workload/permissions before spawn; extension listing never authorizes execution | WP-03/10; F-06-08/09, F-09-07/12, U-02 |
+| Arbitrary code or cross-tenant escape | Host data, credentials and neighboring workloads | No arbitrary code until audited sandbox/isolation model; filesystem/network/process/device denial tests, escape/fault attempts and independent review before narrow public workload admission | WP-11; F-06-08, Gate F |
+| Provider/consumer collusion, receipt replay, Sybil identities | Credits, reputation, payments | Signed accounting plus independent useful-work verification, replay protection, conservative reputation confidence and reconciliation; adversarial duplicate/wrong/fabricated job tests | WP-09/11; F-07-07..11, X-05/06/07 |
+| Relay/routing abuse, public ingress floods | Network availability, operator bandwidth bill | Authenticated bounded relay sessions, budgets/limits, no arbitrary destination proxying, isolation, operator shutdown and abuse response; churn/flood/cost-bound experiments | WP-11; F-02-06/11, F-06-04, Gate F |
+| Privacy-policy bypass, logging or retention leak | Prompts, outputs, local files and metadata | Explicit target/permission flow, local-only packet-negative tests, no content in default logs, consented aggregate analytics, retention/deletion tests | WP-06/08/10; F-06-07/10, X-14, U-02 |
+| Compromised update or rollback | Persistent unauthorized code or lost data | Signed artifacts, tamper refusal, pinned provenance, migration/rollback with user-data retention and malicious update tests | WP-08; F-10-07, F-06-09 |
+
+### 6.3 Separate promotion gates
+
+Private Mesh promotion requires qualified identities/storage/transport/policy, default resource limits, consent, revocation and failure behavior on advertised physical platforms. A paired device remains capable of observing its workload; household trust is not enterprise tenant isolation. Resolve B-014/B-015 and Windows ACL evidence before broad promotion.
+
+Public contribution additionally requires a narrow isolated workload allow-list, enforceable owner power/time/resource limits, accounting reconciliation, inference-verification limits, Sybil/fraud controls, churn/failure tests, abuse contacts and an independently reviewed incident shutdown path. Passing private Mesh tests or signing receipts cannot open public contribution. Confidential-computing and arbitrary-inference proof research remain F-06-11/12; no breakthrough is assumed.
+
+[Specification](../SPEC_HANDOFF_V2.md) §§28/31 defines proposed measurable gate targets. They are not evidence of security or permission to deploy. Owner consent, security review and any required qualified settlement/legal assessment remain distinct conditions. Contributor revocation must stop new work and terminate admitted work within the applicable cancellation bound without silently moving private data elsewhere.

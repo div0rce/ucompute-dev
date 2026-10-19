@@ -107,3 +107,24 @@ The research tool's source list was returned truncated; this is every URL it ret
 - https://www.techtimes.com/articles/318490/20260616/peer-peer-library-iroh-10-ships-dial-devices-key-not-ip-address.htm
 - https://crates.io/crates/libp2p
 - https://crates.io/keywords/pake
+
+## Infrastructure-program refresh (accessed 2026-10-18)
+
+These are primary pages read for the dated refresh in COMPETITIVE_MATRIX.md and spec sections 27/29. Upstream `main`/`master` and live docs are mutable; no stable-version benchmark or full dependency audit is implied. License observations apply to the linked implementation, not all ecosystem components or model weights. No competitor was installed or benchmarked in this pass.
+
+- Ollama: [project](https://github.com/ollama/ollama), [MIT license](https://raw.githubusercontent.com/ollama/ollama/main/LICENSE).
+- LM Studio: [docs](https://lmstudio.ai/docs/app), [local/remote/cloud choice](https://lmstudio.ai/docs/bionic/models), [app terms](https://lmstudio.ai/app-terms), [privacy](https://lmstudio.ai/app-privacy). Terms and service behavior are distinct from open SDK licenses.
+- Exo: [README](https://raw.githubusercontent.com/exo-explore/exo/main/README.md), [Apache-2.0 license](https://raw.githubusercontent.com/exo-explore/exo/main/LICENSE). Current tree differs from historical exo/ex-exo license assumptions; unresolved Linux GPU wording noted in matrix.
+- Petals: [README](https://raw.githubusercontent.com/bigscience-workshop/petals/main/README.md), [MIT license](https://raw.githubusercontent.com/bigscience-workshop/petals/main/LICENSE).
+- llama.cpp: [project](https://github.com/ggml-org/llama.cpp), [MIT license](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/LICENSE).
+- OpenRouter: [privacy](https://openrouter.ai/privacy), [ZDR explanation](https://openrouter.ai/blog/insights/zero-data-retention/). One attempted docs URL returned a tool error; no claim relies on that page.
+- BOINC: [project](https://github.com/BOINC/boinc), [copyright/component terms](https://raw.githubusercontent.com/BOINC/boinc/master/COPYRIGHT).
+- Ray: [project](https://github.com/ray-project/ray), [license/notices](https://raw.githubusercontent.com/ray-project/ray/master/LICENSE), [security](https://docs.ray.io/en/latest/ray-security/index.html).
+- vLLM: [hardware](https://docs.vllm.ai/en/stable/getting_started/installation/index.html), [GPU feature limits](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html), [license](https://raw.githubusercontent.com/vllm-project/vllm/main/LICENSE).
+- SGLang: [project](https://github.com/sgl-project/sglang), [disaggregation](https://docs.sglang.ai/backend/pd_disaggregation.html), [license](https://raw.githubusercontent.com/sgl-project/sglang/main/LICENSE).
+- Akash: [provider/lease concepts](https://akash.network/docs/learn/core-concepts/providers-leases/), [provider license](https://raw.githubusercontent.com/akash-network/provider/main/LICENSE).
+- Tailscale: [security](https://tailscale.com/security), [client license](https://raw.githubusercontent.com/tailscale/tailscale/main/LICENSE).
+- Kubernetes: [multi-tenancy](https://kubernetes.io/docs/concepts/security/multi-tenancy/); no fresh component license audit performed.
+- Apple: [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/), §2.5.2 execution/container restrictions and §2.5.4 background services. No app review approval is implied.
+- Android: [foreground-service background-start restrictions](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start); platform lifecycle limits support consumer-first mobile planning.
+- Apache Software Foundation: [Apache-2.0 text](https://www.apache.org/licenses/LICENSE-2.0), including patent and trademark terms. The project license remains unchanged; no trademark clearance or legal opinion obtained.
