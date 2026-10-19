@@ -34,7 +34,7 @@ Both daemons ran `serve --network --serve-peers`. The laptop was driven from the
 
 ## Limits
 
-- One run of each, on one network. Discovery (F-02-01) is still unverified: it needs two machines on a network that carries mDNS.
+- Runs 1 and 2 were on eduroam, which drops mDNS between clients; discovery was then verified on a phone hotspot (run 3 below).
 - The Windows desktop app (Tauri) is not built yet; F-10-05 (two installs pairing through the UI) still needs it.
 - No packet capture on the LAN (the Mac has no sudo for tcpdump); the in-process relay capture (SINGLE-HOST) remains the capture evidence.
 - The Mac side ran a debug build.
