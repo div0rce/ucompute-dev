@@ -38,3 +38,21 @@ Both daemons ran `serve --network --serve-peers`. The laptop was driven from the
 - The Windows desktop app (Tauri) is not built yet; F-10-05 (two installs pairing through the UI) still needs it.
 - No packet capture on the LAN (the Mac has no sudo for tcpdump); the in-process relay capture (SINGLE-HOST) remains the capture evidence.
 - The Mac side ran a debug build.
+
+## Run 3: phone hotspot (discovery), 2026-10-19 02:38 UTC
+
+Same two machines, both joined to an iPhone personal hotspot (one subnet that carries mDNS; the laptop's profile set to Private by the owner). Fresh Mac data folder (new identity), so the two started unpaired. Commit 5bbd4b7-era binaries: the Mac debug build and the laptop's `common.exe` with the job-object fix.
+
+| Step | Result | Numbers |
+|---|---|---|
+| Discovery (mDNS) | **PASS** | Each daemon listed the other at its hotspot address (laptop `:8193`, Mac `:18401`) by the first poll, within about 1 s of both daemons answering `/health` (bound 5 s) |
+| Unpaired peer is untrusted | PASS | Both entries `trusted: false`, neither pinned |
+| Unpaired peer cannot receive work | PASS | Mac → laptop request before pairing: 403 `peer_unauthorized` in 3.2 ms |
+| Pairing (wrong, then right code) | PASS | 401 `pairing_failed`; join 198 ms, connected 0.6 s later |
+| Remote execution both ways | PASS | Golden JSON and SSE; Mac → laptop warm 116 ms total, 768 tok/s; laptop → Mac warm 222 ms, 275 tok/s (hotspot latency) |
+| local_only, audit, revocation, re-pair | PASS | 403 in 4.4 ms; no prompt text; laptop disconnected 0.061 s after the revoke, `peer_revoked`; re-paired in 1.1 s |
+| Laptop daemon killed / restarted | PASS | Loss seen after 4.0 s; reconnected 5.6 s after the restart; golden again |
+
+No `llama-server.exe` was left on the laptop after its daemon was killed at the end.
+
+"mDNS can be disabled by config" (the third F-02-01 criterion) is covered by `disabled_config_is_inert` (crate test) and by the CLI's `--no-mdns` / `COMMON_MDNS=0`, which the CLI mesh test uses.

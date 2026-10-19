@@ -133,12 +133,25 @@ def main():
     ida, idb = na["peer_id"], nb["peer_id"]
     print(f"A {na['short_label']} listen {na['listen_addr']}  |  B {nb['short_label']} listen {nb['listen_addr']}", flush=True)
 
-    # 1. discovery (mDNS; needs one L2 segment)
+    # 1. discovery (mDNS; needs one L2 segment that carries multicast)
     seen = wait(lambda: any(d["id"] == idb for d in call(A, "GET", "/api/peers")[1].get("discovered", []))
-                and any(d["id"] == ida for d in call(B, "GET", "/api/peers")[1].get("discovered", [])), 15, 1.0)
+                and any(d["id"] == ida for d in call(B, "GET", "/api/peers")[1].get("discovered", [])), 15, 0.25)
+    a_disc = call(A, "GET", "/api/peers")[1].get("discovered", [])
+    b_disc = call(B, "GET", "/api/peers")[1].get("discovered", [])
     step("discovery: each daemon lists the other (mDNS)", seen is not None, seconds=seen,
-         a_discovered=call(A, "GET", "/api/peers")[1].get("discovered"),
-         b_discovered=call(B, "GET", "/api/peers")[1].get("discovered"))
+         a_discovered=a_disc, b_discovered=b_disc)
+    if seen is not None:
+        a_entry = next(d for d in a_disc if d["id"] == idb)
+        b_entry = next(d for d in b_disc if d["id"] == ida)
+        unpaired = peer(A, idb) is None and peer(B, ida) is None
+        step("discovery: an unpaired peer is listed as untrusted", unpaired and not a_entry["trusted"] and not b_entry["trusted"],
+             a_sees=a_entry, b_sees=b_entry)
+        s, v, _ = call(A, "PUT", "/api/privacy", {"mode": "trusted_group", "acknowledged": True})
+        s, v, ms = call(A, "POST", "/v1/completions",
+                        {"model": MODEL, "prompt": PROMPT, "max_tokens": 8, "target": f"peer:{idb}"})
+        step("discovery: an unpaired peer cannot receive work", s >= 400 and (v.get("error") or {}).get("code") in
+             ("peer_unauthorized", "policy_denied"), status=s, code=(v.get("error") or {}).get("code"), ms=ms)
+        call(A, "PUT", "/api/privacy", {"mode": "local_only"})
 
     # 2. pairing: A shows a code, B joins with a wrong code once, then the right one
     s, start, _ = call(A, "POST", "/api/pair/start", {"name": "mac"})
