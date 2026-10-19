@@ -45,11 +45,11 @@ def main() -> int:
     original = [r for r in rows if not r["id"].startswith("U-")]
     if len(original) != 148:
         errs.append(f"CSV has {len(original)} original rows, expected 148")
-    # Freeze original acceptance at ddc39f6; ledger progress remains mutable (ADR-0004).
-    protected = [{k: r[k] for k in ("id", "priority", "description", "acceptance_criteria")} for r in original]
+    # Freeze original scope at ddc39f6 (ADR-0004 decision 4, amended 2026-10-19); ledger progress remains mutable.
+    protected = [{k: r[k] for k in ("id", "priority", "milestone", "dependencies", "description", "acceptance_criteria")} for r in original]
     digest = hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    if digest != "f1e23801a2edf7b18040ea9fafc70b8491e6182e5e75c6e88b5016e02ca7c81d":
-        errs.append("original IDs, priorities, descriptions or acceptance criteria changed from ddc39f6")
+    if digest != "c22f992989e5fa50be35af7967cf48d38f3eed943ca1b071c2d3fb01f42259ce":
+        errs.append("original IDs, priorities, milestones, dependencies, descriptions or acceptance criteria changed from ddc39f6")
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:
         errs.append(f"duplicate ids: {sorted(dupes)}")

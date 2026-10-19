@@ -19,7 +19,6 @@ Out of scope: vulnerabilities in third-party models' *behaviour*, and issues in 
 
 See `docs/security/THREAT_MODEL.md`. In short: the local API binds `127.0.0.1` only; the inference engine's port is never exposed; no peer traffic without authentication and encryption; no off-device execution without explicit authorization; no prompt text in logs or metrics; model files are hash-verified before load.
 
-
 ## Trust boundaries and launch readiness
 
 A trusted compute provider sees workload data it processes; encrypted transport does not provide confidential execution. Same-user processes are within the present local OS trust boundary. Backend process supervision provides crash containment, not an arbitrary-code sandbox or verified tenant isolation. Public contribution and arbitrary downloaded programs remain disabled until their separate gates are satisfied.

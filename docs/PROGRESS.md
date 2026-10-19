@@ -2,6 +2,23 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-19 — Claude Code, completing Codex (GPT-6, 2026-10-18) — Operation UCompute: additive infrastructure program
+
+Codex extended the specification on 2026-10-18 and stopped on a usage limit before recording evidence or committing. Its work is committed unchanged in 915562a and completed in the completion commit that follows 915562a.
+
+- Program: SPEC_HANDOFF_V2 §§25–33 appended (§§1–24 byte-identical to ddc39f6); ADR-0004; U-01..U-04 (P1/P2) appended to the single ledger; generator/validator cohort support with a frozen digest of the original rows; registry tests 8 → 19; research refresh (13-project competitive refresh, H6–H9); entry docs, threat model §6, B-016..B-018, D-015..D-017.
+- Completed 2026-10-19: D-018 naming: UCompute is the program's public-facing name in use (owner directive 2026-10-19) and ucompute.org (owner-held) its intended canonical site (§26.1, §29.5, WP-13); naming and trademark clearance remain open and are not claimed. Core/Protocol/Scheduler/SDK definitions and Run/Mesh/Swarm/Cloud cross-references (§26.1); every open ledger row named in a §30 package; af3e37c desktop evidence reflected in §27.1, WP-01, next action, README, AGENTS, API docs, threat model, blockers and gates E/G; broken DECISIONS/BLOCKERS tables fixed; validator digest now also freezes original milestones and dependencies.
+- Counts (unchanged by this documentation work): original 148 P0: VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, NOT_STARTED 101, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0. Added 4 (U-01..U-04): NOT_STARTED 4. Total 152.
+- Verified (tooling only): VERIFICATION.md PROGRAM-UCOMPUTE.
+- Review: Codex adversarial review (seven perspectives) found 4 material issues, all fixed before it stopped: WP-11 depended on the Gate F it must establish; WP-12 required its own research/rehearsal outputs; a registry test rejected legitimate U-row progress; U-01 acceptance was weaker than §28.2. Its final read of the entry documents did not finish; a 2026-10-19 review of the same files produced the completion edits.
+- Limits: no runtime, platform or security re-verification; no application code; no U row progressed. ucompute.org site work happens outside this repository and has no evidence here. Validator limits are listed in VERIFICATION.
+
+Next:
+```
+python3 scripts/validate_registry.py && python3 -m unittest discover -s tests/registry -q && python3 scripts/gen_registry.py --check
+```
+Then the integrator commit for the 2026-10-19 desktop evidence and fixes (F-10-05/F-10-01 ledger text, WP-01 remaining checks); WP-02 in parallel.
+
 ## 2026-10-18 — Claude Code — Windows daemon; first two-machine M3 run
 
 The `common` daemon now runs on Windows 11 (x64/arm64 pins). Tested on the owner's HP laptop (Core Ultra 7 258V, Arc 140V), driven from the Mac over SSH: setup, golden inference on the Arc GPU via Vulkan, and the full M3 flow against the Mac on eduroam — pairing, remote execution both ways, local_only refusal, revocation, loss detection and reconnection — PASS twice. Discovery fails on eduroam (the network drops mDNS between clients). Three Windows defects fixed on the way (disk free, GPU name parsing, engine outliving a killed daemon). Evidence: `docs/evidence/m3-two-machine-2026-10-18.md`. Ledger statuses unchanged; two-machine evidence added to F-02-02/03/05, F-06-02/05/10; F-02-01 and F-10-05 still open (B-002, B-004 updated).

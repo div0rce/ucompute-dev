@@ -15,7 +15,7 @@ A row in `docs/REQUIREMENTS.csv` may be marked `VERIFIED` only when its `observe
 
 ## Quality gates
 
-Current summary reconciled 2026-10-18 against the committed evidence below; this documentation review did not re-run runtime qualification. Historical entries retain their dates and limitations. Release cohort targets are in SPEC_HANDOFF_V2 §§31–33.
+Current summary reconciled 2026-10-18, gates E and G updated 2026-10-19 for af3e37c, against the committed evidence below and docs/evidence/desktop-two-machine-2026-10-19.md; this documentation review did not re-run runtime qualification. Historical entries retain their dates and limitations. Release cohort targets are in SPEC_HANDOFF_V2 §§31–33.
 
 | Gate | Scope | State | Evidence |
 |---|---|---|---|
@@ -23,9 +23,9 @@ Current summary reconciled 2026-10-18 against the committed evidence below; this
 | B — Inference | real load, generation, streaming, cancellation, cleanup | Bounded real CPU/Metal and Windows Arc/Vulkan evidence; current artifact qualification still required | M1, packaged macOS, physical M3 reports |
 | C — Network | discovery, auth, revocation, disconnects, malformed messages | SINGLE-HOST tests plus physical Mac/Windows Mode B and hotspot discovery; full default-quota/platform security qualification open | [Physical run](evidence/m3-two-machine-2026-10-18.md); B-014/015/017 |
 | D — Pooling | partitioned execution, correctness, memory, failure semantics | Not implemented or verified; whole-request remote execution does not satisfy it | ADR-0003 D6; B-016 |
-| E — Product | install, select, run, pair, pool, diagnose unaided | Partial developer/packaged Mac evidence; fresh-account UI, native Windows/Linux and independent-user study incomplete | Desktop evidence; F-10-01/05/11 remain open |
+| E — Product | install, select, run, pair, pool, diagnose unaided | Partial: packaged Mac evidence; installed macOS and Windows apps paired through their UIs; the Windows app ran a prompt on the Mac; a Mac daemon-API request ran on the Windows GPU (af3e37c, defects open); fresh-account UI, Windows accessibility, Linux and independent-user study incomplete | Desktop evidence; [desktop two-machine](evidence/desktop-two-machine-2026-10-19.md); F-10-01/05/11 remain open |
 | F — Public swarm | adversarial review, accounting, privacy, abuse, churn | Not verified; public contribution remains disabled | Threat model and frontier research; no deployment approval |
-| G — Release | signed artifacts, provenance, compatibility, CI, docs, benchmarks | Checksummed/ad-hoc Mac artifact evidence only; stable/public gate incomplete | B-007/008/018; no stable cross-platform release claim |
+| G — Release | signed artifacts, provenance, compatibility, CI, docs, benchmarks | Checksummed ad-hoc-signed Mac artifact and a checksummed native Windows NSIS development build from caf1497 (sha256 df13fe79…; evidence af3e37c) without a code-signing certificate (B-008); stable/public gate incomplete | B-007/008/018; no stable cross-platform release claim |
 
 ## Evidence log
 
@@ -212,3 +212,14 @@ Everything in this section is **SINGLE-HOST**: two or more Common nodes running 
 - Windows defects fixed: disk free read 0; GPU names with nested parentheses cut short; a killed daemon left `llama-server.exe` running (now a kill-on-close job object; verified on the laptop: engine gone 1.5 s after `taskkill /F` of the daemon alone).
 - Two-machine run (Mac + laptop, eduroam), `tests/distributed/two_machine/mesh_two_machine.py`, twice: pairing, remote execution in both directions (golden, JSON and SSE), local_only refusal, prompt-free audit logs, revocation (0.012 s) with re-pairing, and loss detection (4.19 / 4.23 s) with reconnection all PASS. Discovery FAILS because eduroam drops mDNS between clients (confirmed with the OS mDNS stacks). Details: `docs/evidence/m3-two-machine-2026-10-18.md`.
 - Mac: `cargo clippy --workspace --all-targets -- -D warnings` and `cargo clippy --target x86_64-pc-windows-gnu -p common-cli -p common-runtime -p common-hardware -p common-artifacts -- -D warnings` clean; hardware 17, artifacts 33 (incl. the real Windows zip), runtime log parser tests pass.
+
+### PROGRAM-UCOMPUTE — additive infrastructure program: ledger and document integrity
+- Date / commit: 2026-10-19 / working tree on 915562a (baseline ddc39f6; committed as 915562a and the completion commit that follows 915562a)
+- Host: owner's Mac (Apple M2, 8 GB, macOS 26.2) · label: REAL (documentation and registry tooling only; no product code)
+- Command: `python3 scripts/validate_registry.py` → exit 0: `registry valid: 148 P0 rows (original); 4 added; 152 total; NOT_STARTED=105, IN_PROGRESS=3, BLOCKED=0, IMPLEMENTED_UNVERIFIED=8, VERIFIED=36, INFEASIBLE_WITH_EVIDENCE=0`
+- Command: `python3 -m unittest discover -s tests/registry -q` → `Ran 19 tests … OK`
+- Command: `python3 scripts/gen_registry.py --check` → `registry outputs up to date`
+- Integrity: `git show ddc39f6:docs/REQUIREMENTS.csv` (80,476 bytes, 148 rows) is a byte prefix of the working ledger (84,446 bytes; only U-01..U-04 appended). `git show ddc39f6:docs/SPEC_HANDOFF_V2.md` (25,523 bytes, §§1–24) is a byte prefix of the working spec (85,525 bytes). The frozen digest of the 148 original rows matches ddc39f6 (f1e23801… for id/priority/description/acceptance; c22f9929… with milestone and dependencies). `git diff --check ddc39f6 -- <program paths>` clean. No commit between ddc39f6 and af3e37c touches the program files.
+- Mutation probe (scratch copies of docs/ and scripts/, re-run with the completion edits): rejected: deleted, duplicated or added original rows; changed original description, priority, acceptance, milestone or dependencies; unknown or later-milestone dependencies; U row VERIFIED without evidence or commit; vague U acceptance; BLOCKED without blocker. Accepted (limits): U-row priority, milestone, dependency or acceptance edits (additive rows evolve by reviewed decision); an original row's owner or section label; a well-formed but nonexistent commit hash or evidence path; a deleted ledger, or a deleted leaf row, regenerated to default statuses (D-002 relies on the existing CSV; history is in Git); a VERIFIED row downgraded with evidence erased.
+- Review: Codex adversarial review 2026-10-18 found 4 material findings, all fixed: WP-11/Gate F circularity; WP-12 prerequisites; cohort test rejecting U-row progress; U-01 acceptance weaker than §28.2. A 2026-10-19 review of spec coverage, website/distribution and staleness against af3e37c produced the completion edits.
+- Scope: proves ledger structure, preservation of the original scope and document consistency only. No runtime, platform or security re-verification; no requirement status changed.

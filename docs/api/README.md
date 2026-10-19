@@ -43,7 +43,7 @@ See `examples/clients/openai-js/smoke.mjs` for the JavaScript client.
 
 ## Common Mesh (paired devices)
 
-Peer networking is **off by default**. The settings live in `COMMON_HOME/config.json` (mode 0600): `privacy` (`local_only`), `network_enabled` (false), `serve_peers` (false) and `peer_quota`. Nothing binds the peer endpoint until `PUT /api/network {"enabled": true}` or `common serve --network`. SINGLE-HOST tests are supplemented by the bounded physical Mac/Windows Mode B and discovery run in [two-machine evidence](../evidence/m3-two-machine-2026-10-18.md). Two packaged desktop installs and model partitioning remain unverified. Design and tests: `docs/decisions/ADR-0003-peer-transport-and-pairing.md` §9. Threats: `docs/security/THREAT_MODEL.md` §2.13.
+Peer networking is **off by default**. The settings live in `COMMON_HOME/config.json` (mode 0600): `privacy` (`local_only`), `network_enabled` (false), `serve_peers` (false) and `peer_quota`. Nothing binds the peer endpoint until `PUT /api/network {"enabled": true}` or `common serve --network`. SINGLE-HOST tests are supplemented by the bounded physical Mac/Windows Mode B and discovery run in [two-machine evidence](../evidence/m3-two-machine-2026-10-18.md). Installed macOS and Windows desktop apps paired through their UIs; the Windows app ran a prompt on the Mac; a Mac daemon-API request ran on the Windows GPU ([desktop two-machine evidence](../evidence/desktop-two-machine-2026-10-19.md)). Clean-account installs and model partitioning remain unverified. Design and tests: `docs/decisions/ADR-0003-peer-transport-and-pairing.md` §9. Threats: `docs/security/THREAT_MODEL.md` §2.13.
 
 ### Mesh routes
 
@@ -119,7 +119,6 @@ Same OpenAI error shape as above.
 | `cancelled` | 499 | the client stopped; or a pairing window closed because networking was turned off |
 | `invalid_request` | 400 | malformed `target`, a peer target on embeddings, bad `addr`, bad QR payload or bad group |
 | `io` | 500 | the audit entry could not be written, so the request was not sent |
-
 
 ## Infrastructure contracts (2026-10-18 program)
 

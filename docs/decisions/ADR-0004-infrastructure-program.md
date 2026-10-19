@@ -1,6 +1,7 @@
 # ADR-0004: Extend Common into the UCompute infrastructure program
 
 - **Status:** Accepted for program integration, 2026-10-18; new product behavior remains unimplemented until verified.
+- **Amended 2026-10-19:** D-018 supersedes decision 2's “proposed public identity” wording: UCompute is the program's public-facing name in use (owner directive 2026-10-19) and ucompute.org (owner-held) its intended canonical site (spec §§26.1, 29.5); naming and trademark clearance remain open and are not claimed. [Desktop two-machine evidence](../evidence/desktop-two-machine-2026-10-19.md) (af3e37c) supersedes “Windows desktop unbuilt” below and narrows “two packaged UIs pairing” to the remaining F-10-05 checks (still IMPLEMENTED_UNVERIFIED). Decision 4's frozen digest also covers original milestones and dependencies. The context below remains the 2026-10-18 baseline.
 - **Inputs:** Owner's Operation UCompute directive; clean `integration/recover-codex-m1` at `ddc39f6609a60cdcb50da09136cddbc90324295f`; source, ledger, ADRs, research and committed evidence inspected before edits.
 
 ## Context and recovered baseline

@@ -133,7 +133,7 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "NOT_STARTED" for r in rows if r["id"].startswith("U-")))
 
     def test_original_acceptance_and_priority_protected(self):
-        for field, value in (("acceptance_criteria", "Any output counts"), ("priority", "P2")):
+        for field, value in (("acceptance_criteria", "Any output counts"), ("priority", "P2"), ("milestone", "M14"), ("dependencies", "F-06-01")):
             with self.subTest(field=field):
                 f, rows = self.rows()
                 old = rows[0][field]
