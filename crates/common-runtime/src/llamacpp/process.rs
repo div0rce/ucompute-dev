@@ -151,12 +151,61 @@ pub fn spawn(binary: &Path, args: &[String], log_path: &Path) -> Result<Child> {
         .stderr(stderr)
         .kill_on_drop(true)
         .spawn()
+        .inspect(|_child| {
+            #[cfg(windows)]
+            end_with_this_process(_child);
+        })
         .map_err(|e| {
             CommonError::new(
                 ErrorCode::BackendUnavailable,
                 format!("cannot start {}: {e}", binary.display()),
             )
         })
+}
+
+/// Windows: put the engine in a job object that ends every process in it when its last handle
+/// closes. Only this process holds that handle, and Windows closes it when this process exits for
+/// any reason, including TerminateProcess, so a killed daemon can no longer leave `llama-server.exe`
+/// running with the model resident (observed on the HP test laptop). The Unix counterpart is the
+/// graceful stop path plus the orphan reaper at the next start.
+#[cfg(windows)]
+fn end_with_this_process(child: &Child) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // HANDLE is a raw pointer (not Sync); the job lives for the whole process, so keep it as usize.
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls; `info` is a zeroed POD struct passed with its exact size.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                return 0;
+            }
+            job as usize
+        }
+    });
+    let assigned = job != 0
+        && child.raw_handle().is_some_and(|h| {
+            // SAFETY: `h` is the live process handle tokio owns for this child; `job` is ours.
+            unsafe { AssignProcessToJobObject(job as _, h as _) != 0 }
+        });
+    if !assigned {
+        tracing::warn!("could not tie the engine to this process; it may outlive a killed daemon");
+    }
 }
 
 /// Poll `/health` every 100 ms until `{"status":"ok"}`. Exit before readiness → BackendFailed or

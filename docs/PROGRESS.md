@@ -2,6 +2,17 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-18 — Claude Code — Windows daemon; first two-machine M3 run
+
+The `common` daemon now runs on Windows 11 (x64/arm64 pins). Tested on the owner's HP laptop (Core Ultra 7 258V, Arc 140V), driven from the Mac over SSH: setup, golden inference on the Arc GPU via Vulkan, and the full M3 flow against the Mac on eduroam — pairing, remote execution both ways, local_only refusal, revocation, loss detection and reconnection — PASS twice. Discovery fails on eduroam (the network drops mDNS between clients). Three Windows defects fixed on the way (disk free, GPU name parsing, engine outliving a killed daemon). Evidence: `docs/evidence/m3-two-machine-2026-10-18.md`. Ledger statuses unchanged; two-machine evidence added to F-02-02/03/05, F-06-02/05/10; F-02-01 and F-10-05 still open (B-002, B-004 updated).
+
+Next:
+```
+# on a network that carries mDNS (home Wi-Fi or a phone hotspot), with both daemons running:
+python3 -I tests/distributed/two_machine/mesh_two_machine.py --a http://127.0.0.1:18301 --b http://127.0.0.1:18302 --out <dir>
+```
+Then the Windows desktop build (Tauri: MSVC toolchain needs the owner's license acceptance, or build on the laptop) for F-10-05 and F-10-01 on Windows.
+
 ## 2026-10-17 — Claude Code — packaged app rebuilt and re-verified; first two-Mac observations
 
 `target/` had been cleaned; the `.app`/`.dmg` were rebuilt from 08e267e and passed `verify_packaged_app.py` (15/15) with real inference; the executables are byte-identical to the 2026-10-15 build installed in `/Applications`. Workspace 367 passed, desktop 77 passed (docs/VERIFICATION.md).
