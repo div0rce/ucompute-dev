@@ -114,17 +114,16 @@ cargo check -p common-desktop   # from the repo root; the Tauri shell
 cd apps/desktop && pnpm tauri build --bundles app,dmg     # macOS: Common.app + Common_<version>_aarch64.dmg
 ```
 
-`pnpm tauri build` first runs `scripts/build-sidecar.sh` (`build.beforeBuildCommand`). It builds `common`
+`pnpm tauri build` first runs `scripts/build-sidecar.mjs` (`build.beforeBuildCommand`; Node, so it runs on Windows too). It builds `common`
 from this checkout (`cargo build --release --locked -p common-cli`, with `--target` when Tauri builds for
 another triple), copies it to `src-tauri/binaries/common-<triple>`, checks the copy is the binary just built,
 and checks that it accepts the exact arguments the app starts it with. A bundle can therefore no longer
 carry a daemon from an older commit: that happened once, and the packaged daemon exited with
-"unexpected argument '--exit-with-parent' found" on every launch. `src-tauri/binaries/` is git-ignored;
-`pnpm prepare-sidecar` (copy only) remains for unusual cases.
+"unexpected argument '--exit-with-parent' found" on every launch. `src-tauri/binaries/` is git-ignored.
 
 The app's daemon arguments live in one file, `src-tauri/daemon-args.txt`
 (`serve --host 127.0.0.1 --port 8192 --exit-with-parent`). The shell reads it at compile time;
-`crates/common-cli/tests/desktop_sidecar.rs` and `build-sidecar.sh` read the same file, so a CLI change that
+`crates/common-cli/tests/desktop_sidecar.rs` and `build-sidecar.mjs` read the same file, so a CLI change that
 the app's arguments no longer parse fails a test and the build.
 
 Daemon lifecycle:
@@ -160,7 +159,6 @@ src/components/        FitBar (memory fit), ErrorNotice, RunOn (device selector)
 src/test/              fake daemon (fetch mock), axe scan, keyboard-only flows, pairing and privacy flows
 src-tauri/src/lib.rs   sidecar spawn and graceful stop, health probe, quit on SIGTERM, daemon_info command
 src-tauri/daemon-args.txt   the daemon's command line (single source of truth)
-scripts/build-sidecar.sh    build + stage + check the sidecar (run by `tauri build`)
+scripts/build-sidecar.mjs   build + stage + check the sidecar (run by `tauri build`)
 scripts/verify_packaged_app.py   end-to-end check of a built .app/.dmg
-scripts/prepare-sidecar.sh
 ```

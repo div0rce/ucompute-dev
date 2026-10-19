@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "sh scripts/build-sidecar.sh && pnpm build",
+    "beforeBuildCommand": "node scripts/build-sidecar.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {

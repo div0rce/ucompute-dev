@@ -142,8 +142,12 @@ pub async fn free_port() -> Result<u16> {
 pub fn spawn(binary: &Path, args: &[String], log_path: &Path) -> Result<Child> {
     let log = std::fs::File::create(log_path)?;
     let stderr = log.try_clone()?;
-    Command::new(binary)
-        .args(args)
+    let mut cmd = Command::new(binary);
+    // Windows: the desktop app starts the daemon without a console; a console child would then get a
+    // console window of its own popping up over the app.
+    #[cfg(windows)]
+    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    cmd.args(args)
         .env_clear()
         .envs(clean_environment(std::env::vars_os()))
         .stdin(Stdio::null())

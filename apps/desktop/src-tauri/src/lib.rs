@@ -12,7 +12,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// The exact arguments the app starts the bundled daemon with, one whitespace-separated line.
-/// `crates/common-cli/tests/desktop_sidecar.rs` and `scripts/build-sidecar.sh` read the same file and
+/// `crates/common-cli/tests/desktop_sidecar.rs` and `scripts/build-sidecar.mjs` read the same file and
 /// fail when the CLI they build does not accept these arguments, so the app and its bundled daemon
 /// cannot drift apart again (a stale sidecar rejected `--exit-with-parent` and never started).
 const DAEMON_ARGS: &str = include_str!("../daemon-args.txt");
@@ -21,6 +21,56 @@ const SIDECAR: &str = "common"; // tauri resolves sidecars by basename next to t
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a quitting app waits for the daemon to stop its engine and exit after SIGTERM.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Windows has no `--exit-with-parent` (no parent pid to poll) and no SIGTERM: put the daemon in a job
+/// object that ends its processes when its last handle closes. Only this app holds that handle and
+/// Windows closes it when the app exits for any reason (crash, Task Manager), so the daemon goes with
+/// it; the daemon's own job then ends its engine.
+#[cfg(windows)]
+fn end_with_this_app(pid: u32) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls; `info` is a zeroed POD struct passed with its exact size.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                return 0;
+            }
+            job as usize
+        }
+    });
+    // SAFETY: OpenProcess on our own child's pid; the handle is closed right after the assignment.
+    let assigned = job != 0
+        && unsafe {
+            let h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            let ok = !h.is_null() && AssignProcessToJobObject(job as _, h) != 0;
+            if !h.is_null() {
+                CloseHandle(h);
+            }
+            ok
+        };
+    if !assigned {
+        eprintln!("common-desktop: could not tie the daemon to this app; it may outlive a crash");
+    }
+}
 
 fn daemon_args() -> Vec<&'static str> {
     DAEMON_ARGS.split_whitespace().collect()
@@ -151,6 +201,8 @@ pub fn run() {
                         .spawn()
                     {
                         Ok((mut rx, c)) => {
+                            #[cfg(windows)]
+                            end_with_this_app(c.pid());
                             child = Some(c);
                             spawned = true;
                             let code = Arc::new(AtomicI32::new(i32::MIN));

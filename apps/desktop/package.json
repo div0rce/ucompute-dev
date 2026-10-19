@@ -10,8 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "prepare-sidecar": "sh scripts/prepare-sidecar.sh",
-    "build-sidecar": "sh scripts/build-sidecar.sh"
+    "build-sidecar": "node scripts/build-sidecar.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",
