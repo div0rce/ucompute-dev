@@ -3,7 +3,7 @@
 Read this first, every session, whichever agent you are (Claude, Codex, other). It is the restart point.
 
 ## Authority
-1. `docs/SPEC_HANDOFF_V2.md` — authoritative product specification. Original sections 1–24 and 148 F/X/I capabilities remain P0; sections 25–33 extend the UCompute infrastructure program with four additive U requirements (P1/P2). The root handoff is historical; see ADR-0004.
+1. `docs/SPEC_HANDOFF_V2.md` — authoritative product specification. Original sections 1–24 and 148 F/X/I capabilities remain P0; sections 25–33 extend the UCompute infrastructure program with five additive U requirements (P1/P2). The root handoff is historical; see ADR-0004.
 2. `docs/REQUIREMENTS.csv` — the single requirements ledger (spec section 21 fields). `docs/requirements/REGISTRY.md` is generated from it.
 3. `docs/research/` — M0 research **baseline**, not verified truth. Keep its ✅/⚠️/`unknown/unverified` markers. Re-verify before relying on anything not ✅.
 4. `docs/DECISIONS.md` + `docs/decisions/ADR-*.md` — architectural decisions.
@@ -48,6 +48,7 @@ cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 - Never expose llama.cpp `rpc-server` (or any unauthenticated service) beyond loopback. Cross-machine traffic goes only through Common's authenticated, encrypted transport.
 - Default API bind is `127.0.0.1`. No public ports, no paid services, no real-money settlement, no releases without explicit owner approval (spec section 4).
 - No silent model, quantization, or privacy-mode substitution.
+- Unified compute credits with contributor consent (D-019, spec §26.5): no code path may charge for, or require a purchase or a UCompute-operated account or service for, Run, private Mesh or self-hosted operation. None may charge for, or require a purchase or a UCompute-operated account for, joining the network, contributing or donating. No code path may allocate contributed capacity beyond its owner's explicit sharing mode (default off; private, donate, share for credits) and limits; donate-only capacity never serves credit-funded requests. Credits are one balance, issued only against funded consumption or budgeted labelled grants, never requiring cryptocurrency or blockchain (none is implemented at this stage), and neither transferable between users nor redeemable for cash before the F-07-11 gates. No production payments, contributor payouts or real-money settlement without explicit owner authorization (spec §4, B-006).
 - Never copy GPL/AGPL code (including historical ex-exo or KoboldCpp code). Verify the exact upstream revision and component license; the current Exo tree has a different license recorded in the 2026-10-18 research refresh. See ADR-0001.
 - Never fabricate benchmark numbers. Results live in `benchmarks/results/` with hardware manifest, command line, versions.
 - Preserve existing code; inspect before editing.

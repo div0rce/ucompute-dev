@@ -118,10 +118,10 @@ class ValidatorTests(unittest.TestCase):
     def test_additive_priorities_and_cohort_counts(self):
         _, rows = self.rows()
         added = [r for r in rows if r["id"].startswith("U-")]
-        self.assertEqual([r["priority"] for r in added], ["P1", "P2", "P1", "P1"])
+        self.assertEqual([r["priority"] for r in added], ["P1", "P2", "P1", "P1", "P1"])
         code, out = self.run_validator()
         self.assertEqual(code, 0, out)
-        self.assertIn("4 added; 152 total", out)
+        self.assertIn("5 added; 153 total", out)
         md = (self.tmp / "docs/requirements/REGISTRY.md").read_text()
         self.assertIn("| Status | Original | Added | Total |", md)
 
