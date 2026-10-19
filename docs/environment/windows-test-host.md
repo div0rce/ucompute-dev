@@ -56,3 +56,29 @@ Remove-NetFirewallRule -DisplayName 'Common peer endpoint (QUIC)','Common LAN di
 What this grants: anyone holding the private key `~/.ssh/common_hp_ed25519` on the Mac can open a shell on the
 laptop as your account while it is on the same network. Nothing else is opened to the network except UDP 8193
 and 5353 on Private networks.
+
+## Driving the laptop from the Mac
+
+`scripts/windows-host.sh` wraps the SSH key and the laptop's name (`WIN_HOST`, default `jess-hp.local`):
+
+```sh
+scripts/windows-host.sh run 'common.exe --version'                  # cmd.exe command
+scripts/windows-host.sh ps  'Get-NetConnectionProfile'              # PowerShell, no quoting trouble
+scripts/windows-host.sh cp  target/x86_64-pc-windows-gnu/release/common.exe C:/Users/jessg/Common/common.exe
+scripts/windows-host.sh sync                                         # HEAD -> C:/Users/jessg/src/common
+```
+
+On a network the laptop has not seen before, Windows marks it Public, and the firewall rules above (Private
+only) block SSH and Common until the owner sets that network to Private (Settings > Network & internet > Wi-Fi
+> the network > Network profile type). eduroam drops mDNS between clients; a phone hotspot carries it.
+
+## Build tools installed on the laptop (2026-10-19, with the owner's go-ahead)
+
+Installed with `winget` over SSH: Visual Studio 2022 Build Tools 17.14 with the "Desktop development with C++"
+workload (Microsoft's license accepted on the owner's instruction; the installer asked for a restart, not yet done), Rustup (the repo's `rust-toolchain.toml` pins 1.98.0, fetched on first build), Node.js
+LTS 24 and pnpm 10.34.4. The WebView2 runtime ships with Windows 11. The desktop app builds natively there:
+`scripts/windows-host.sh sync`, then `cd apps\desktop && pnpm install --frozen-lockfile && pnpm tauri build`.
+
+Long builds over SSH: Windows ends a session's processes when the SSH connection drops (a Wi-Fi switch is
+enough), so start them detached and poll a log, for example
+`scripts/windows-host.sh ps 'Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine="cmd /c cd /d C:\Users\jessg\src\common\apps\desktop && pnpm tauri build --bundles nsis > C:\Users\jessg\build.log 2>&1"}'`.
