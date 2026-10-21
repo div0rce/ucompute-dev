@@ -25,12 +25,47 @@ Two views talk to the peer-networking API from ADR-0003; both default to the saf
   (it prefills the join form with the host and `pair_port` of the advertised pairing window). This device's own
   id (`GET /api/network` `peer_id`) is never listed there, even if mDNS reports its own advert. The code field
   ignores spaces, so a pasted `482 913` works. No QR image is drawn; the payload is shown as text.
+  - The name other devices see defaults to the daemon's `device_name` (macOS Computer Name, else hostname /
+    `COMPUTERNAME`); the field only
+    overrides it, and `pair/start` / `pair/join` send `name` only when one is set. A stored "This Mac" (the old
+    hard-coded default) counts as unset.
+  - This device shows `dial_addr`, the `ip:port` another device can be given when discovery does not work.
+  - Each paired device shows where it is: the addresses mDNS sees now ("Seen on this network"), else its pinned
+    `last_addr` ("Last known"), else "Not known"; and, while not connected, why the last dial failed (`last_error`:
+    the daemon's message and hint, e.g. no answer within the idle timeout, a firewall on UDP 8193).
+  - **Connect** (paired devices only, networking on, not connected) opens an inline form: empty retries the
+    addresses the daemon knows, an address tries that first (`POST /api/peers/{id}/connect` `{}` or `{addr}`). The
+    address is only a hint: whatever answers must present the key pinned at pairing, so another device at that
+    address is refused (`peer_unauthorized`) and nothing changes. Unpaired devices never get this action.
+  - With nothing nearby the view says why: networking off, discovery off on this computer, or a network that blocks
+    devices from finding each other (many campus and office Wi-Fi networks), with pairing by address as the way on.
+  - Paired-device state, from `GET /api/peers` only: Connected / Not responding (`connected`, `health`), Connecting
+    (this view's own dial), Unreachable (`last_error`, which outranks the sticky `health: reconnecting`),
+    Reconnecting, Offline (mDNS runs here and does not see it), else Not connected. A nearby record never makes a
+    device connected or ready. "Can run prompts from this computer" needs an open connection, one of its groups
+    allowing prompts and Privacy not local-only; otherwise the row says which of those is missing.
+  - Windows only: the pairing window listens on a random UDP port, which Windows Firewall drops without a rule.
+    With networking on and no rule, Peers (and the pairing code) shows "Allow on private networks"; the click runs
+    `netsh advfirewall firewall add rule name="Common (paired devices)" dir=in action=allow program=<common.exe next
+    to the app> protocol=UDP profile=private` through the Windows elevation prompt (Tauri commands
+    `firewall_status` and `allow_through_firewall`, `src-tauri/src/firewall.rs`). Nothing is added without that
+    prompt, and never for the Public or Domain profile. `firewall_status` also names connected networks Windows
+    treats as Public (PowerShell `Get-NetConnectionProfile`, read-only): there the rule does not apply, so the notice
+    stays, without a button, and says to set the network to Private in Windows Settings if the user trusts it. A join
+    where nothing answered shows the daemon's hint (a firewall on the other device) instead of "check the code".
+  - Connect: a `peer_unauthorized` refusal says "The device that answered did not prove it is {name}, or {name} no
+    longer trusts this computer. Nothing was trusted or saved." The daemon reports an alert sent before the device
+    showed its pinned key as that, never as `peer_revoked`.
 - **Privacy** (`#/privacy`, F-10-10): local only / trusted devices / public (disabled, "coming later"). Leaving
   local-only shows the disclosure returned by `GET /api/privacy` and requires the acknowledge checkbox before
   `PUT /api/privacy {mode, acknowledged}`. The current mode is the pill under the app name on every screen.
 - **Run on**: Chat and Home show a device selector only when the mode is not local-only; a chat request then
   carries `"target": "peer:<id>"` and the reply footer says "Ran on <device>". In local-only mode the field is
-  never sent, so the wire shape of a local request is unchanged.
+  never sent, so the wire shape of a local request is unchanged. A run on a paired device needs no model loaded
+  here: the chat offers every model `GET /api/models` lists (the ids this daemon can name for a remote run; no
+  route lists a peer's models) and the peer loads it on demand. When the peer does not have it, its
+  `model_not_downloaded` arrives inside the stream; the client turns any in-stream error object into the typed
+  error, and the chat says "<device> does not have <model>" instead of saving an empty reply.
 - **Diagnostics** shows the audit tail (`GET /api/audit`, last 100 events, displayed most recent first: ids,
   sizes, reasons, never prompts) and "Copy diagnostics" copies the daemon's redacted bundle from
   `GET /api/diagnostics` when that endpoint exists, falling back to status + hardware when the daemon answers
@@ -38,8 +73,10 @@ Two views talk to the peer-networking API from ADR-0003; both default to the saf
 
 The fake daemon in `src/test/mocks.ts` serves every one of these endpoints with the response shapes of
 `crates/common-api/src/mesh.rs` (a peer is a stored `PeerRecord` plus `short_label`, `connected` and `groups`;
-a discovered device has `id`, `addr`, `pairing`, `pair_port`, `proto`, `trusted`, `seen_utc` and no label), so
-the flows are tested end to end in jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`). Everything
+a discovered device has `id`, `addr`, `addrs`, `pairing`, `pair_port`, `proto`, `trusted`, `seen_utc` and no label;
+`/api/peers/{id}/connect` dials hint, discovered, pinned against `answersAt` and `impostors`), so
+the flows are tested end to end in jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`,
+`src/test/devices.test.tsx`). Everything
 here runs on one machine against a fake; no test claims two physical devices paired.
 
 ## Development loop
@@ -130,9 +167,11 @@ Daemon lifecycle:
 - At launch the shell probes `GET /health` on 127.0.0.1:8192. If nothing answers it spawns the bundled
   `common` with those arguments through `tauri-plugin-shell`. If the daemon exits before it is healthy, the
   shell says so at once (exit code 2 means it rejected its command line) instead of waiting 20 s.
-- Quit (Cmd+Q, closing the window, or SIGTERM/SIGINT/SIGHUP to the app) runs `RunEvent::Exit`: the shell sends
-  the daemon SIGTERM, which unloads the model and stops the llama.cpp engine, and waits up to 10 s before
-  killing it. (A plain kill used to leave the engine running orphaned.)
+- Quit (Cmd+Q, closing the window, or SIGTERM/SIGINT/SIGHUP to the app) runs `RunEvent::Exit`: the shell asks
+  the daemon to stop (SIGTERM on macOS and Linux; `POST /api/shutdown` on Windows, which has no SIGTERM), so it
+  unloads the model, stops the llama.cpp engine and sends the mDNS goodbye, and waits up to 10 s before killing
+  it. (A plain kill used to leave the engine running orphaned, and on Windows left the device listed as nearby
+  on other computers for about two minutes.)
 - If the app dies without running that (force quit, crash), `--exit-with-parent` makes the daemon notice
   within about a second and shut down the same way.
 

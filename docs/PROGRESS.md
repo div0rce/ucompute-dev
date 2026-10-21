@@ -2,6 +2,17 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-21 — Claude Code — discovery/reconnection fixes, desktop defects, Windows firewall consent step (unit + SINGLE-HOST)
+
+- Implemented (not yet physically verified): the discovery and reconnection fixes, the six desktop defects from docs/evidence/desktop-two-machine-2026-10-19.md, the Windows Firewall consent step, clearer connection states. Details and commands: docs/VERIFICATION.md (2026-10-21 entry).
+- Verified on one Mac: fmt and clippy clean (also for the Windows target), 407 Rust tests passed plus the fixed CLI test, desktop 111/111; one load-sensitive latency test (F-06-04 p95) fails on this loaded machine with and without the change.
+- New test host: Kyle's MacBook Pro (M2 Pro, 16 GB, macOS 15.7.9) reachable over SSH with Kyle's consent (Common project scope); Rust 1.98.0, Node 26.10.0 and pnpm installed in Kyle's home folder. Mac to Mac remote runs worked both ways with the installed apps (Qwen2.5 0.5B).
+- Limits: no status changes; F-10-05 and F-10-01 stay IMPLEMENTED_UNVERIFIED until the physical run.
+
+Next:
+    rebuild the macOS app (apps/desktop: pnpm tauri build) and the Windows NSIS installer on the laptop; install on both Macs and the laptop
+    python3 -I tests/distributed/two_machine/discovery_two_machine.py --a http://127.0.0.1:8192 --b <tunnelled peer API> --out <dir>
+
 ## 2026-10-19 — Claude Code — owner's economics clarification integrated (D-019, D-020, U-05; documentation and registry only)
 
 - Integrated the owner's same-day clarification of D-019 (after bfcf4a7). Model: "Use your own compute for free. Share compute to earn credits. Let trusted people use your hardware for free. Spend credits to access compensated compute. Purchase credits when you need more." Added, as §26.5 rules with U-05 checks: the binding self-compute exclusion (no credits for one's own workloads or resources under the same beneficial ownership or control; funding class own; eligibility check before crediting; signed receipts against replay; circular-flow holds; collusion simulation bound; residual risk recorded) and the binding trusted-access allowlist (authenticated, provider-scoped identities; zero debit, reward and fee; precedence over pricing; no silent paid fallback; workload-only access; no Cloud needed). Added the owner's expected-behaviour table to §26.5. Revised issuance and payment integrity (Purchase → Spend → Execute → Verify → Compensate; compensation is a transfer, never duplicated) and replaced "the platform restores every payment loss" with bounded exposure: exposure limits, funded loss reserve Z_t, risk-based holds and provider terms (§26.5, §29.4, threat model, U-05). Credit value: purchased credits are prepaid access, never valueless; F-07-07 reconciled additively (its statement holds literally in stage 0). Removed self-hosted group accounting (§26.5 Cloud rule and check, U-05 clauses and test name, WP-11 and §31 "self-hosted group run"); the deferral is recorded only with the owner's sentence. D-020: exactly the five relayed items, the owner's "blanket approval for everything" read as approval of those items only, explicit non-authorizations, website-session ownership (also stated in §29.5).

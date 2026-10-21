@@ -77,6 +77,17 @@ describe("axe accessibility scan", () => {
     await scan(container);
   }, 20000);
 
+  it("peers view with a device seen nearby, one that failed to answer and an open connect panel showing an error", async () => {
+    const away = { ...PEER, id: "ee".repeat(32), short_label: "eeee-eeee-eeee", name: "Laptop", connected: false, health: "disconnected" as const, last_addr: "172.20.10.6:8193", last_error: { addr: "172.20.10.6:8193", code: "peer_lost", message: "no answer from 172.20.10.6:8193 within 4 s", hint: "the device may be asleep or on another network, or a firewall may block UDP port 8193", at_utc: "2026-10-19T03:40:00Z" } };
+    installFakeDaemon({ network: NETWORK_ON, peers: [PEER, away], discovered: [{ ...STRANGER, id: PEER.id, trusted: true, addrs: [STRANGER.addr] }, STRANGER] });
+    window.location.hash = "#/peers";
+    const { container } = render(<App poll={false} />);
+    (await screen.findByRole("button", { name: "Connect to Laptop" })).click();
+    (await screen.findByRole("button", { name: "Connect" })).click();
+    await screen.findByText("The connection to the other device was lost.");
+    await scan(container);
+  }, 20000);
+
   it("models view with an open download confirmation and a row error", async () => {
     installFakeDaemon();
     window.location.hash = "#/models?confirm=qwen2.5-1.5b-instruct-q4_k_m";

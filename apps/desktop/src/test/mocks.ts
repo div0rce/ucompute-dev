@@ -112,9 +112,10 @@ export const SELF_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c
 export const PEER_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
 export const STRANGER_ID = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
 
-export const NETWORK: NetworkState = { enabled: false, serve_peers: false, listen_addr: null, mdns: false, peer_id: SELF_ID, short_label: shortLabel(SELF_ID), connections: 0 };
+/** `device_name` is the host's own name (mesh.rs `device_name()`); a Windows-style one keeps "This Mac" out of the tests. */
+export const NETWORK: NetworkState = { enabled: false, serve_peers: false, listen_addr: null, mdns: false, peer_id: SELF_ID, short_label: shortLabel(SELF_ID), connections: 0, device_name: "DESKTOP-7QK2M1", dial_addr: null };
 /** What the daemon reports while the endpoint is bound. */
-export const NETWORK_ON: NetworkState = { ...NETWORK, enabled: true, listen_addr: "0.0.0.0:8193", mdns: true };
+export const NETWORK_ON: NetworkState = { ...NETWORK, enabled: true, listen_addr: "0.0.0.0:8193", mdns: true, dial_addr: "192.168.1.10:8193" };
 
 export const PEER_RECORD: PeerRecord = { id: PEER_ID, name: "Studio Mac", paired_at_utc: "2026-10-14T11:59:30Z", last_seen_utc: "2026-10-14T12:00:00Z", last_addr: "192.168.1.77:8193" };
 export const PEER: Peer = { ...PEER_RECORD, short_label: shortLabel(PEER_ID), groups: ["home"], connected: true };
@@ -202,6 +203,12 @@ export interface FakeDaemon {
   pairing: { session: PairingSession | null; result: PairingStatus["result"] };
   /** When true every join answers pairing_locked. */
   pairLocked: boolean;
+  /** Where each paired device answers with its pinned key (peer id -> `ip:port`); anywhere else nothing answers. */
+  answersAt: Record<string, string>;
+  /** Addresses where some other Common device answers: a dial there is refused (wrong key), never connected. */
+  impostors: string[];
+  /** Models each paired device has (peer id -> model ids); a device without an entry has every model. */
+  peerModels: Record<string, string[]>;
   /** Redacted bundle served by /api/diagnostics; null means the endpoint does not exist (404 like the daemon). */
   diagnostics: Record<string, unknown> | null;
   /**
@@ -216,7 +223,7 @@ export interface FakeDaemon {
 
 /** Installs a fetch mock serving the daemon contract from mutable in-memory state. */
 export function installFakeDaemon(
-  overrides: Partial<Pick<FakeDaemon, "models" | "loaded" | "chat" | "network" | "peers" | "discovered" | "groups" | "privacy" | "audit" | "diagnostics">> = {},
+  overrides: Partial<Pick<FakeDaemon, "models" | "loaded" | "chat" | "network" | "peers" | "discovered" | "groups" | "privacy" | "audit" | "diagnostics" | "answersAt" | "impostors" | "peerModels">> = {},
 ): FakeDaemon {
   const fake: FakeDaemon = {
     models: structuredClone(MODELS),
@@ -230,10 +237,13 @@ export function installFakeDaemon(
     audit: structuredClone(AUDIT),
     pairing: { session: null, result: null },
     pairLocked: false,
+    answersAt: {},
+    impostors: [],
+    peerModels: {},
     diagnostics: null,
     completePairing: (peer = PEER) => {
       fake.peers.push({ ...peer, groups: [], connected: false });
-      const { short_label: _l, groups: _g, connected: _c, health: _h, ...record } = peer;
+      const { short_label: _l, groups: _g, connected: _c, health: _h, last_error: _e, ...record } = peer;
       fake.pairing.result = { peer: record };
     },
     failPairing: (code = "pairing_failed", message = "confirmation MAC mismatch") => {
@@ -242,6 +252,8 @@ export function installFakeDaemon(
     ...overrides,
     fetchMock: vi.fn(),
   };
+  // Routes mutate peers (connect, chat); never the caller's fixtures, which later tests reuse.
+  fake.peers = structuredClone(fake.peers);
   const withGroups = (p: Peer): Peer => ({ ...p, groups: fake.groups.filter((g) => g.members.includes(p.id)).map((g) => g.name) });
   const disabled = () => apiError("policy_denied", "network disabled", 403, "enable networking in Peers");
   fake.fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -292,6 +304,32 @@ export function installFakeDaemon(
       return json(fake.network);
     }
     if (path === "/api/peers" && method === "GET") return json({ peers: fake.peers.map(withGroups), discovered: fake.network.enabled ? fake.discovered : [], revocations: [] });
+    if ((m = path.match(/^\/api\/peers\/([^/]+)\/connect$/)) && method === "POST") {
+      // mesh.rs `peer_connect`: paired only, address validated, then hint -> discovered -> pinned; the device must
+      // present its pinned key, a refusal is reported over a timeout, and last_addr moves only on success.
+      if (!fake.network.enabled) return disabled();
+      const id = decodeURIComponent(m[1]);
+      const peer = fake.peers.find((p) => p.id === id);
+      if (!peer) return apiError("peer_unauthorized", `no paired device ${shortLabel(id)}`, 403, "pair it first");
+      const { addr } = JSON.parse(String(init?.body ?? "{}")) as { addr?: string };
+      if (addr !== undefined && !/^\d{1,3}(\.\d{1,3}){3}:[1-9]\d{0,4}$/.test(addr)) return apiError("invalid_request", `addr must be ip:port, got ${JSON.stringify(addr)}`, 400);
+      const seen = fake.discovered.find((x) => x.id === id);
+      const tries = [...new Set([addr, ...(seen?.addrs ?? (seen ? [seen.addr] : [])), peer.last_addr].filter((a): a is string => !!a))];
+      if (tries.length === 0) return apiError("peer_lost", `no address known for ${shortLabel(id)}`, 502, "enter its address under Peers");
+      const now = new Date().toISOString();
+      const ok = tries.find((a) => a === fake.answersAt[id]);
+      if (ok) {
+        Object.assign(peer, { connected: true, health: "connected", last_addr: ok, last_seen_utc: now, last_error: null });
+        const { short_label: _l, groups: _g, connected: _c, health: _h, last_error: _e, ...record } = peer;
+        return json(record);
+      }
+      const refused = tries.find((a) => fake.impostors.includes(a));
+      const at = refused ?? tries[tries.length - 1];
+      peer.last_error = refused
+        ? { addr: at, code: "peer_unauthorized", message: `the device at ${at} did not prove it is ${shortLabel(id)}`, hint: "nothing was trusted or saved; check the address shown on that device under Peers", at_utc: now }
+        : { addr: at, code: "peer_lost", message: `no answer from ${at} within 4 s`, hint: "the device may be asleep or on another network, or a firewall may block UDP port 8193", at_utc: now };
+      return apiError(peer.last_error.code, peer.last_error.message, refused ? 403 : 502, peer.last_error.hint ?? undefined);
+    }
     if ((m = path.match(/^\/api\/peers\/([^/]+)\/revoke$/)) && method === "POST") {
       const id = decodeURIComponent(m[1]);
       if (!fake.peers.some((p) => p.id === id)) return apiError("peer_unauthorized", "not a paired device", 404);
@@ -347,15 +385,20 @@ export function installFakeDaemon(
     if (path === "/api/audit") return json({ events: fake.audit });
     if (path === "/api/diagnostics" && fake.diagnostics) return json(fake.diagnostics);
     if (path === "/v1/chat/completions" && method === "POST") {
-      if (!fake.loaded) return apiError("model_not_downloaded", "no model loaded", 404);
-      const body = JSON.parse(String(init?.body ?? "{}")) as { target?: string };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { target?: string; model: string };
       const target = body.target ?? "local";
+      // A remote run needs nothing loaded here: the peer loads the model on demand (openai.rs `run_remote`).
+      if (!fake.loaded && target === "local") return apiError("model_not_downloaded", "no model loaded", 404);
       if (target !== "local") {
         if (fake.privacy.mode === "local_only") return apiError("policy_denied", "privacy mode is local_only", 403);
         const peer = fake.peers.find((p) => `peer:${p.id}` === target);
         if (!peer) return apiError("peer_unauthorized", "not a paired device", 403);
         // The daemon connects on demand (mesh.rs `peer_connection`); the connection then stays open.
         peer.connected = true;
+        // The peer's refusal arrives inside the opened stream, as the daemon's OpenAI error object.
+        const has = fake.peerModels[peer.id];
+        if (has && !has.includes(body.model))
+          return sse([{ error: { message: `model ${body.model} is not downloaded`, type: "invalid_request_error", code: "model_not_downloaded", param: null, hint: `common pull ${body.model}` } }]);
       }
       const n = fake.chat.chunks.length;
       const chunks: unknown[] = fake.chat.chunks.map((c, i) => ({

@@ -2120,3 +2120,394 @@ async fn peer_request_is_refused_while_local_work_holds_every_engine_slot_single
     a.stop().await;
     b.stop().await;
 }
+
+// ------------------------------------------- addresses, reconnection and shutdown (D2a, D3, D5, E1, E4, E6)
+
+/// `POST /api/peers/{id}/connect` from `srv`.
+async fn connect_peer(srv: &Server, id: &str, body: Value) -> (u16, Value) {
+    post(srv, &format!("/api/peers/{id}/connect"), body).await
+}
+
+/// `peer_rejected` lines in `srv`'s audit log.
+fn rejections(srv: &Server) -> Vec<common_observability::AuditEvent> {
+    srv.state
+        .audit
+        .tail(1000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "peer_rejected")
+        .collect()
+}
+
+/// D2a, SINGLE-HOST: a stale or spoofed hint that reaches another Common device (C) is refused by
+/// the pinned-key check, and the dial goes on to B's pinned address instead of stopping at that
+/// refusal; the refused address is never stored. A's Node is started by hand (networking stays
+/// off in A's settings), so no sync loop races this dial.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_device_at_hint_falls_through_to_pinned_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let (c, _dc) = empty_server().await;
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let c_addr: std::net::SocketAddr = listen_addr(&enable_network(&c, true).await).parse().unwrap();
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", Some(b_addr.clone()));
+    pin(&b, ida, "A", None);
+    let na = common_network::transport::Node::start(
+        NetworkConfig {
+            enabled: true,
+            ..cfg().network
+        },
+        a.state.identity.clone(),
+        a.state.peers.clone(),
+        a.state.policy(),
+        a.state.audit.clone(),
+    )
+    .await
+    .unwrap();
+
+    let conn = a.state.peer_connection_via(&na, idb, Some(c_addr)).await.unwrap();
+    assert_eq!((conn.peer_id, conn.remote_addr.to_string()), (idb, b_addr.clone()));
+    assert_eq!(
+        a.state.peers.get(&idb).unwrap().unwrap().last_addr,
+        Some(b_addr),
+        "C's address is never stored"
+    );
+    let refused = rejections(&a);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(
+        (refused[0].fields["addr"].as_str(), refused[0].fields["reason"].as_str()),
+        (Some(c_addr.to_string().as_str()), Some("peer_unauthorized"))
+    );
+    assert!(c.state.node().await.unwrap().connections().is_empty());
+    eprintln!("SINGLE-HOST D2a: a hint at another device was refused and the pinned address used");
+    na.shutdown().await;
+    for srv in [a, b, c] {
+        srv.stop().await;
+    }
+}
+
+/// D2a, SINGLE-HOST: a `certificate_revoked` alert from the hint address is what that address
+/// said, not this device's verdict (anyone can send that alert before showing a key), so the dial
+/// goes on to B's pinned address. Here the alert comes from a second endpoint holding B's key
+/// whose store revoked A. Regression: the dial stopped at the alert and never tried the pinned one.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoked_alert_at_hint_falls_through_to_pinned_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", Some(b_addr.clone()));
+    pin(&b, ida, "A", None);
+    let net = NetworkConfig {
+        enabled: true,
+        ..cfg().network
+    };
+    let start = |srv: &Server, peers| {
+        common_network::transport::Node::start(
+            net.clone(),
+            srv.state.identity.clone(),
+            peers,
+            srv.state.policy(),
+            srv.state.audit.clone(),
+        )
+    };
+    let d2 = tempfile::tempdir().unwrap();
+    let revoker = Arc::new(common_identity::PeerStore::open(&Paths::at(d2.path())).unwrap());
+    revoker.revoke(&ida, &b.state.identity).unwrap();
+    let nb2 = start(&b, revoker).await.unwrap();
+    let na = start(&a, a.state.peers.clone()).await.unwrap();
+    let alert = nb2.local_addr().unwrap();
+
+    let conn = a.state.peer_connection_via(&na, idb, Some(alert)).await.unwrap();
+    assert_eq!((conn.peer_id, conn.remote_addr.to_string()), (idb, b_addr.clone()));
+    assert_eq!(a.state.peers.get(&idb).unwrap().unwrap().last_addr, Some(b_addr));
+    let refused = rejections(&a);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(
+        (refused[0].fields["addr"].as_str(), refused[0].fields["reason"].as_str()),
+        (Some(alert.to_string().as_str()), Some("peer_revoked"))
+    );
+    eprintln!("SINGLE-HOST D2a: a revoked alert at the hint did not stop the dial to the pinned address");
+    na.shutdown().await;
+    nb2.shutdown().await;
+    a.stop().await;
+    b.stop().await;
+}
+
+/// Requirements 5 and 8, SINGLE-HOST: `POST /api/peers/{id}/connect` reaches a paired device at an
+/// address typed by hand (no mDNS, and A has no address on record for B), but an address proves
+/// nothing by itself: an id that is not paired sends no packet at all, another device at the given
+/// address is refused by the pinned-key check and nothing is stored, and the reason shows in
+/// `last_error` until a connection succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_address_reaches_a_paired_device_and_proves_nothing_by_itself_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let (c, _dc) = empty_server().await;
+    enable_network(&a, true).await;
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let c_addr = listen_addr(&enable_network(&c, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    // Neither side has an address for the other: only the dials below can connect them.
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+
+    // Not paired here: refused before anything is sent (a socket at that address hears nothing).
+    let trap = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let stranger = DeviceIdentity::generate().unwrap().id;
+    let (status, v) = connect_peer(
+        &a,
+        &stranger.to_hex(),
+        json!({ "addr": trap.local_addr().unwrap().to_string() }),
+    )
+    .await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str(), v["error"]["hint"].as_str()),
+        (403, Some("peer_unauthorized"), Some("pair it first")),
+        "{v}"
+    );
+    let mut buf = [0u8; 64];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), trap.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "a packet left for a device that is not paired"
+    );
+    for bad in ["nope", "127.0.0.1", "127.0.0.1:0", "0.0.0.0:8193", "224.0.0.251:5353"] {
+        let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": bad })).await;
+        assert_eq!(
+            (status, v["error"]["code"].as_str()),
+            (400, Some("invalid_request")),
+            "{bad}: {v}"
+        );
+    }
+
+    // Another Common device at the typed address: its key is not B's, so nothing connects or is stored.
+    let (status, v) = connect_peer(&a, &idb.short_label(), json!({ "addr": c_addr })).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("peer_unauthorized")),
+        "{v}"
+    );
+    assert_eq!(a.state.peers.get(&idb).unwrap().unwrap().last_addr, None);
+    assert_no_remote_request(&a).await;
+    let peers = get(&a, "/api/peers").await;
+    let err = &peers["peers"][0]["last_error"];
+    assert_eq!(
+        (err["addr"].as_str(), err["code"].as_str()),
+        (Some(c_addr.as_str()), Some("peer_unauthorized")),
+        "{peers}"
+    );
+    assert!(err["at_utc"].is_string() && err["message"].is_string(), "{err}");
+
+    // B at its own address: connected, and only now is that address stored.
+    let (status, rec) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{rec}");
+    assert_eq!(
+        (rec["id"].as_str(), rec["last_addr"].as_str()),
+        (Some(idb.to_hex().as_str()), Some(b_addr.as_str()))
+    );
+    let peers = get(&a, "/api/peers").await;
+    assert_eq!(peers["peers"][0]["connected"], true, "{peers}");
+    assert!(
+        peers["peers"][0]["last_error"].is_null(),
+        "cleared by the connection: {peers}"
+    );
+    let (status, rec) = connect_peer(&a, &idb.to_hex(), json!({})).await;
+    assert_eq!(status, 200, "already connected: {rec}");
+    // B has no pinned port for A, so A's inbound connection teaches it no address.
+    assert_eq!(b.state.peers.get(&ida).unwrap().unwrap().last_addr, None);
+
+    let (status, _) = put(&a, "/api/network", json!({ "enabled": false })).await;
+    assert_eq!(status, 200);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({})).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("policy_denied")),
+        "{v}"
+    );
+    eprintln!("SINGLE-HOST requirements 5/8: manual address connects only the pinned key");
+    for srv in [a, b, c] {
+        srv.stop().await;
+    }
+}
+
+/// D3b, SINGLE-HOST: B has A on record at an address that no longer answers (127.0.0.2 with A's
+/// port: "A moved"). When A connects in, B stores A's authenticated source IP with the pinned
+/// port, so B can dial A again after A's IP changed on a network that drops mDNS.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_connection_updates_a_stale_pinned_address_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let a_addr: std::net::SocketAddr = listen_addr(&enable_network(&a, true).await).parse().unwrap();
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    let stale = std::net::SocketAddr::new([127, 0, 0, 2].into(), a_addr.port());
+    pin(&b, ida, "A", Some(stale.to_string()));
+    pin(&a, idb, "B", Some(b_addr));
+    let rec = wait_for("B learns A's address from A's connection", || async {
+        b.state
+            .peers
+            .get(&ida)
+            .unwrap()
+            .filter(|r| r.last_addr == Some(a_addr.to_string()))
+    })
+    .await;
+    assert!(rec.last_seen_utc.is_some(), "{rec:?}");
+    eprintln!("SINGLE-HOST D3b: {stale} replaced by {a_addr} from A's authenticated connection");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// D5/E4, SINGLE-HOST: a pinned device whose address never answers (a UDP socket that only counts
+/// what arrives). The sync loop keeps dialling with backoff but audits the failure once, not per
+/// attempt; GET /api/peers says why (`last_error`: the address, `peer_lost`, "no answer", a hint);
+/// a user's connect is not held back by the backoff and fails within the idle timeout (502).
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_paired_device_is_audited_once_and_says_why_single_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = cfg();
+    config.network.idle_timeout_ms = 1000;
+    config.network.keep_alive_ms = 250;
+    let a = Server::start(app(config, dir.path().to_path_buf(), HardwareReport::default())).await;
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = silent.local_addr().unwrap();
+    // One dial = one QUIC connection = one destination connection id in its Initial packets
+    // (long header: flags, version (4 bytes), DCID length, DCID).
+    let dcids = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<Vec<u8>>::new()));
+    let seen = dcids.clone();
+    let counter = tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((n, _)) = silent.recv_from(&mut buf).await {
+            let l = usize::from(*buf.get(5).unwrap_or(&0));
+            if n > 6 + l && buf[0] & 0x80 != 0 {
+                seen.lock().unwrap().insert(buf[6..6 + l].to_vec());
+            }
+        }
+    });
+    let dials = || dcids.lock().unwrap().len();
+    let x = DeviceIdentity::generate().unwrap().id;
+    pin(&a, x, "X", Some(silent_addr.to_string()));
+    enable_network(&a, true).await;
+    wait_for("two dials by the sync loop", || async { (dials() >= 2).then_some(()) }).await;
+    // The second dial fails too: a handshake waits at least three initial probe timeouts (~3 s).
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+
+    let peers = get(&a, "/api/peers").await;
+    let err = &peers["peers"][0]["last_error"];
+    assert_eq!(
+        (err["addr"].as_str(), err["code"].as_str()),
+        (Some(silent_addr.to_string().as_str()), Some("peer_lost")),
+        "{peers}"
+    );
+    assert!(err["message"].as_str().unwrap().contains("no answer"), "{err}");
+    let port = format!("UDP port {}", silent_addr.port());
+    assert!(err["hint"].as_str().unwrap().contains(&port), "{err}");
+    assert_eq!(rejections(&a).len(), 1, "one line per state change, {} dials", dials());
+
+    let before = dials();
+    let t0 = Instant::now();
+    let (status, v) = connect_peer(&a, &x.to_hex(), json!({})).await;
+    eprintln!(
+        "SINGLE-HOST D5: {} sync-loop dials, one audit line; a manual connect answered {status} in {:?}",
+        before,
+        t0.elapsed()
+    );
+    assert_eq!((status, v["error"]["code"].as_str()), (502, Some("peer_lost")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("no answer"), "{v}");
+    assert!(v["error"]["hint"].is_string(), "{v}");
+    // The handler's own dial (only it answers this 502), one and at once: a handshake gives up
+    // after the idle timeout but never before three initial probe timeouts (RFC 9000 10.1), about
+    // 3 s. A dial count cannot tell it from the sync loop's redial; that the connect clears the
+    // backoff is mesh::tests::connect_clears_the_backoff_so_the_sync_loop_dials_at_once_single_host.
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    assert_eq!(rejections(&a).len(), 1);
+    counter.abort();
+    a.stop().await;
+}
+
+/// E1, SINGLE-HOST: without a name (or with a blank one) both sides of a pairing are named after
+/// their host (`device_name`, also in GET /api/network), never a fixed string.
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_without_a_name_uses_the_host_name_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let host = common_api::mesh::device_name();
+    let net = get(&a, "/api/network").await;
+    assert_eq!(net["device_name"], host.as_str());
+    assert!(net["dial_addr"].is_null(), "{net}");
+    let net = enable_network(&a, true).await;
+    assert_eq!(net["dial_addr"], net["listen_addr"], "bound to one address: that one");
+    enable_network(&b, true).await;
+    let (status, start) = post(&b, "/api/pair/start", json!({ "name": "  " })).await;
+    assert_eq!(status, 200, "{start}");
+    let (status, rec) = post(
+        &a,
+        "/api/pair/join",
+        json!({ "addr": start["pair_addr"], "code": start["code"] }),
+    )
+    .await;
+    assert_eq!((status, rec["name"].as_str()), (200, Some(host.as_str())), "{rec}");
+    let status = wait_for("B pairing result", || async {
+        let v = get(&b, "/api/pair/status").await;
+        (v["active"] == false).then_some(v)
+    })
+    .await;
+    assert_eq!(status["result"]["peer"]["name"], host.as_str(), "{status}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// E6, SINGLE-HOST: `POST /api/shutdown` stops the daemon the way SIGTERM does, well inside the
+/// 5 s drain grace (a cancelled token alone used to end serving only when that grace ran out),
+/// closing the peer endpoint so a connected device sees a close, not a timeout. A cross-origin
+/// page cannot do it.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_route_stops_serving_and_closes_the_peer_endpoint_single_host() {
+    let (mut a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let a_addr = listen_addr(&enable_network(&a, true).await);
+    enable_network(&b, true).await;
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", Some(a_addr));
+    let nb = b.state.node().await.unwrap();
+    wait_for("B connected to A", || async {
+        nb.connections().iter().any(|c| c.peer_id == ida).then_some(())
+    })
+    .await;
+
+    let r = client()
+        .post(a.url("/api/shutdown"))
+        .header("origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(a.finished(Duration::from_millis(300)).await.is_none(), "still serving");
+
+    let t0 = Instant::now();
+    let r = client().post(a.url("/api/shutdown")).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "status": "shutting_down" }));
+    let served = a
+        .finished(Duration::from_secs(3))
+        .await
+        .expect("serve_on returned well inside the 5 s grace");
+    assert!(served.is_ok(), "{served:?}");
+    let stopped = t0.elapsed();
+    assert!(a.state.net.lock().await.node.is_none(), "peer endpoint closed");
+    wait_for("B sees A's connection closed", || async {
+        nb.connections().iter().all(|c| c.peer_id != ida).then_some(())
+    })
+    .await;
+    let closed = t0.elapsed();
+    eprintln!("SINGLE-HOST E6: POST /api/shutdown -> daemon stopped in {stopped:?}, B saw the close at {closed:?}");
+    assert!(
+        closed < Duration::from_secs(3),
+        "a close, not B's 4 s idle timeout: {closed:?}"
+    );
+    a.stop().await;
+    b.stop().await;
+}

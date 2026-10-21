@@ -32,6 +32,29 @@ export async function discoverDaemon(): Promise<DaemonInfo> {
   return { base_url: "http://127.0.0.1:8192", spawned: false };
 }
 
+/** Windows Firewall state for the bundled daemon (src-tauri `firewall.rs`). */
+export interface FirewallStatus {
+  supported: boolean;
+  /** An enabled inbound allow rule for UDP on the Private profile names the bundled daemon. */
+  allowed: boolean;
+  rule_program: string | null;
+  /** Connected networks Windows treats as Public, where that rule does not apply. Absent from an older app shell. */
+  public_networks?: string[];
+}
+
+/** Unsupported outside the desktop app and on systems other than Windows. */
+export async function firewallStatus(): Promise<FirewallStatus> {
+  if (!inTauri()) return { supported: false, allowed: false, rule_program: null, public_networks: [] };
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<FirewallStatus>("firewall_status");
+}
+
+/** Adds the rule through the Windows elevation prompt; rejects with "cancelled" when the user declines it there. */
+export async function allowThroughFirewall(): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("allow_through_firewall");
+}
+
 /** One poll: /api/status (implies health). Updates the daemon store. */
 export async function refreshStatus(): Promise<void> {
   try {

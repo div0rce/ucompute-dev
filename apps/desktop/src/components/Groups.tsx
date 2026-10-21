@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, shortLabel, type Group, type Peer } from "../api/client";
+import { plural } from "../format";
 
 /**
  * Household groups (ADR-0003 D7): which paired devices may run inference for each other. The daemon's
@@ -75,7 +76,7 @@ export function Groups({ groups, peers, onChange, onError }: { groups: Group[]; 
               </label>
             </div>
             <span id={`group-${g.name}-help`} className="visually-hidden">
-              Group {g.name} with {g.members.length} devices.
+              Group {g.name} with {plural(g.members.length, "device")}.
             </span>
           </fieldset>
         );

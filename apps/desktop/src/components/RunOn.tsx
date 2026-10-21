@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { api, shortLabel, type Peer, type Target } from "../api/client";
 import { privacy, runTarget } from "../state/stores";
 
-/** Returns the display name for a target: "this Mac" or the paired device's name. */
+/** Returns the display name for a target: "this computer" or the paired device's name. */
 export function targetName(target: Target | undefined, peers: Peer[]): string {
-  if (!target || target === "local") return "this Mac";
+  if (!target || target === "local") return "this computer";
   const id = target.slice("peer:".length);
   const p = peers.find((x) => x.id === id);
   return p?.name || p?.short_label || shortLabel(id);
@@ -46,7 +46,7 @@ export function RunOn({ onPeers }: { onPeers?: (peers: Peer[]) => void } = {}) {
     <label className="run-on">
       <span className="small muted">Run on</span>
       <select value={target} onFocus={load} onChange={(e) => runTarget.set(e.target.value as Target)}>
-        <option value="local">This Mac</option>
+        <option value="local">This computer</option>
         {peers.map((p) => (
           <option key={p.id} value={`peer:${p.id}`}>
             {p.name || p.short_label}

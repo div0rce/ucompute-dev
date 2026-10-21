@@ -116,6 +116,10 @@ export interface NetworkState {
   peer_id: string;
   short_label: string;
   connections: number;
+  /** This computer's name (hostname); the name other devices see unless the user set one. Older daemons omit it. */
+  device_name?: string;
+  /** `ip:port` other devices should dial to reach this one by address; null while networking is off. */
+  dial_addr?: string | null;
 }
 
 /** A pinned device as the daemon stores it (`common_identity::PeerRecord`). */
@@ -128,6 +132,15 @@ export interface PeerRecord {
   last_addr: string | null;
 }
 
+/** The most recent failed dial to a paired device since its last successful connection. */
+export interface DialError {
+  addr: string;
+  code: string;
+  message: string;
+  hint?: string | null;
+  at_utc: string;
+}
+
 export type PeerHealth = "connected" | "unhealthy" | "reconnecting" | "disconnected";
 
 /** A pinned device as `GET /api/peers` lists it: the record plus live state. */
@@ -137,13 +150,17 @@ export interface Peer extends PeerRecord {
   connected: boolean;
   /** Heartbeat health; not emitted by every daemon version, so readers fall back to `connected`. */
   health?: PeerHealth;
+  /** Why the last dial failed; null or absent while connected or before any failure. */
+  last_error?: DialError | null;
 }
 
 /** Seen through mDNS but not pinned. Never actionable except pairing. */
 export interface Discovered {
   id: string;
-  /** Workload endpoint `ip:port`. */
+  /** Workload endpoint `ip:port`, the best of `addrs`. */
   addr: string;
+  /** Every advertised address the daemon will dial, best first (`addrs[0] === addr`). Older daemons omit it. */
+  addrs?: string[];
   pairing: boolean;
   /** Port of the open pairing window on that host, when `pairing`. */
   pair_port: number | null;
@@ -360,7 +377,11 @@ export const api = {
           usage?: Usage;
           timings?: Timings;
           target?: Target;
+          error?: { code?: string; message?: string; hint?: string | null };
         };
+        // A failure after the stream opened (the peer lacks the model, the engine stopped) arrives as an
+        // OpenAI error object in the stream; it must not read as an empty reply.
+        if (chunk.error) throw new ApiError(chunk.error.code ?? "internal", chunk.error.message ?? "the stream ended with an error", chunk.error.hint ?? null);
         if (chunk.target) result.target = chunk.target;
         const choice = chunk.choices?.[0];
         const delta = choice?.delta?.content;
@@ -391,11 +412,16 @@ export const api = {
   revokePeer: async (id: string) => {
     await send(`/api/peers/${encodeURIComponent(id)}/revoke`, { method: "POST" });
   },
-  pairStart: (name: string) => json<PairingSession>("/api/pair/start", { method: "POST", body: JSON.stringify({ name }) }),
+  /** Connects to a paired device now: `addr` first when given, then the addresses the daemon knows. The device
+   *  must still present the key pinned at pairing; an address is only a hint. Resets the daemon's redial backoff. */
+  connectPeer: (id: string, addr?: string) =>
+    json<PeerRecord>(`/api/peers/${encodeURIComponent(id)}/connect`, { method: "POST", body: JSON.stringify(addr ? { addr } : {}) }),
+  /** Without a name the daemon announces this computer's own name. */
+  pairStart: (name?: string) => json<PairingSession>("/api/pair/start", { method: "POST", body: JSON.stringify(name ? { name } : {}) }),
   pairStatus: () => json<PairingStatus>("/api/pair/status"),
   /** `code` is the six digits (then `addr` is required) or a whole `common-pair:v1:...` payload. */
-  pairJoin: (body: { addr?: string; code: string; name: string }) =>
-    json<PeerRecord>("/api/pair/join", { method: "POST", body: JSON.stringify(body) }),
+  pairJoin: ({ name, ...body }: { addr?: string; code: string; name?: string }) =>
+    json<PeerRecord>("/api/pair/join", { method: "POST", body: JSON.stringify(name ? { ...body, name } : body) }),
   groups: async () => (await json<{ groups: Group[] }>("/api/groups")).groups,
   /** Inserts or replaces one group; the daemon answers with the full list. */
   putGroup: async (group: Group) => (await json<{ groups: Group[] }>("/api/groups", { method: "PUT", body: JSON.stringify(group) })).groups,

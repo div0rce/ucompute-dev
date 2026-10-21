@@ -94,6 +94,12 @@ fn random_secret() -> Result<String> {
     Ok(hex::encode(random_bytes::<16>()?))
 }
 
+/// `invalid_request` unless `pw` is a 6-digit code or a 32-hex QR secret; lets a caller refuse a
+/// malformed code before it binds a socket or sends a packet.
+pub fn check_code(pw: &str) -> Result<()> {
+    selector_for(pw).map(|_| ())
+}
+
 /// Which PAKE password the joiner's input is: the 6-digit code or the QR secret.
 fn selector_for(pw: &str) -> Result<u8> {
     if pw.len() == 6 && pw.bytes().all(|b| b.is_ascii_digit()) {
@@ -117,6 +123,15 @@ fn clean_name(name: &str) -> String {
         out.push(c);
     }
     out.trim().to_string()
+}
+
+/// The joiner's handshake got no answer at `addr`. The usual cause is a firewall on the initiator:
+/// its pairing endpoint is on a random port per window (see [`start`]), which no port rule covers.
+fn no_answer(addr: SocketAddr) -> CommonError {
+    failed(format!("nothing answered at {addr}")).with_hint(format!(
+        "a firewall on the other device may block its pairing port (UDP {}); on Windows, allow Common under Peers on that device",
+        addr.port()
+    ))
 }
 
 fn lost(e: impl std::fmt::Display) -> CommonError {
@@ -443,7 +458,7 @@ pub async fn join_with(
         .connect_with(cc, addr, "common")
         .map_err(|e| failed(format!("connect: {e}")))?;
     let conn = match tokio::time::timeout(EXCHANGE_TIMEOUT, connecting).await {
-        Err(_) => return Err(failed("pairing endpoint did not answer")),
+        Err(_) | Ok(Err(quinn::ConnectionError::TimedOut)) => return Err(no_answer(addr)),
         Ok(Ok(conn)) => conn,
         Ok(Err(e)) => {
             let e = map_conn_error(&e);

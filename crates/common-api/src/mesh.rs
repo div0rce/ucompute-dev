@@ -17,9 +17,14 @@
 //! `overloaded`, never a place in the local queue) and [`control_loop`], which offers this
 //! device's revocations to peers that shared a group with the revoked device and applies (and
 //! passes on) the peer's (ADR-0003 D7). While networking is on, [`sync_loop`] keeps a connection
-//! to every pinned device (1, 2, 4 … 30 s backoff), so a revocation reaches members that are not
-//! mid-request and offline members converge when they return. Turning networking off also closes
-//! an open pairing window.
+//! to every pinned device (1, 2, 4 … 300 s backoff, reset by a connection, a new mDNS address or
+//! `POST /api/peers/{id}/connect`), so a revocation reaches members that are not mid-request and
+//! offline members converge when they return. Turning networking off also closes an open pairing
+//! window.
+//!
+//! Addresses are only hints: every dial (mDNS, pinned, typed by the user) must end in a TLS
+//! handshake that presents the pinned key of the device asked for, so a wrong or spoofed address
+//! yields a refused handshake and is never stored.
 
 use crate::{ApiError, AppState, Json};
 use axum::extract::{Path, Query, State};
@@ -27,7 +32,7 @@ use axum::http::StatusCode;
 use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_identity::{utc_now, DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
 use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, MAX_RECORD_AGE_SECS};
-use common_network::health::{HealthTracker, PeerHealth};
+use common_network::health::PeerHealth;
 use common_network::pairing;
 use common_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
 use common_network::transport::{ControlStream, Node, PeerConnection};
@@ -57,9 +62,12 @@ send and what the model answers; Common cannot prevent that. Only \"local only\"
 Pair only devices you trust with your prompts.";
 
 const SETTINGS_FILE: &str = "config.json";
-const DEFAULT_DEVICE_NAME: &str = "Common device";
 /// How often [`sync_loop`] looks for pinned devices without a connection.
 const SYNC_TICK: Duration = Duration::from_secs(1);
+/// Longest wait between two dials to an unreachable pinned device ([`sync_backoff`]).
+const SYNC_BACKOFF_CAP: Duration = Duration::from_secs(300);
+/// `last_seen_utc` of a connected device is rewritten at most this often ([`seen_due`]).
+const LAST_SEEN_EVERY: Duration = Duration::from_secs(60);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -389,6 +397,8 @@ impl AppState {
         let s = self.settings();
         let mut net = self.net.lock().await;
         net.stop().await;
+        // A (re)started network dials every pinned device at once, as a user toggling it expects.
+        lock(&self.redial).clear();
         if !s.network_enabled {
             return Ok(());
         }
@@ -479,37 +489,49 @@ impl AppState {
         })
     }
 
-    /// An authenticated connection to `id`: the open one when there is one (the [`survivor`] of a
-    /// crossed dial, not the duplicate about to close), else a new connect to the address mDNS
-    /// sees now, then the pinned `last_addr` (see [`dial_order`]). `last_seen_utc` is refreshed,
-    /// and `last_addr` only when this dial's handshake to it is the connection returned. Typed
-    /// errors from `Node::connect`; an unreachable address falls through to the next one, a
-    /// refusal (revoked, unpinned) does not.
+    /// An authenticated connection to `id`: [`AppState::peer_connection_via`] without a hint.
     pub async fn peer_connection(self: &Arc<Self>, node: &Arc<Node>, id: PeerId) -> Result<Arc<PeerConnection>> {
+        self.peer_connection_via(node, id, None).await
+    }
+
+    /// An authenticated connection to `id`: the open one when there is one (the [`survivor`] of a
+    /// crossed dial, not the duplicate about to close), else a new connect to `hint` (an address
+    /// the user typed), the addresses mDNS sees now, then the pinned `last_addr` (see
+    /// [`dial_order`]). Each is only a hint: `Node::connect` accepts nothing but `id`'s pinned key.
+    /// `last_seen_utc` is refreshed, and `last_addr` only when this dial's handshake to it is the
+    /// connection returned. Any failure tries the next address: no answer, another device, or a
+    /// refusal at that address (one sent before the device showed its pinned key reads as another
+    /// device, never as `peer_revoked`: `Node::connect`). This store's own refusal (revoked or unpaired here) sends
+    /// nothing at any address (`Node::connect`). The error returned is the last refusal if there
+    /// was one (it says more than a later timeout), else the last failure.
+    pub async fn peer_connection_via(
+        self: &Arc<Self>,
+        node: &Arc<Node>,
+        id: PeerId,
+        hint: Option<SocketAddr>,
+    ) -> Result<Arc<PeerConnection>> {
         let open: Vec<Arc<PeerConnection>> = node.connections().into_iter().filter(|c| c.peer_id == id).collect();
         let flags: Vec<bool> = open.iter().map(|c| c.outbound).collect();
         if let Some(i) = survivor(self.identity.id < id, &flags) {
             return Ok(open[i].clone());
         }
-        let discovered = self
+        let discovered: Vec<SocketAddr> = self
             .net
             .lock()
             .await
             .discovered()
             .into_iter()
             .find(|p| p.id == id)
-            .map(|p| p.addr);
+            .map(|p| std::iter::once(p.addr).chain(p.addrs).collect())
+            .unwrap_or_default();
         let pinned = self
             .peers
             .get(&id)?
             .and_then(|p| p.last_addr)
             .and_then(|a| a.parse().ok());
-        let mut last = CommonError::new(
-            ErrorCode::PeerLost,
-            format!("no known address for device {}", id.short_label()),
-        )
-        .with_hint("check that it is awake and on the same network");
-        for addr in dial_order(discovered, pinned) {
+        let mut last: Option<CommonError> = None;
+        // ponytail: up to 4 sequential dials x idle timeout per request; parallel dials if that latency bites
+        for addr in dial_order(hint, &discovered, pinned) {
             match node.connect(addr, id).await {
                 Ok(conn) => {
                     // `connect` may hand back a connection it did not dial here (one that
@@ -519,23 +541,32 @@ impl AppState {
                     self.attach(node, conn.clone());
                     return Ok(conn);
                 }
-                Err(e) if matches!(e.code, ErrorCode::PeerLost | ErrorCode::Timeout) => last = e,
-                Err(e) => return Err(e),
+                Err(e) => last = Some(prefer_refusal(last, e)),
             }
         }
-        Err(last)
+        let e = last.unwrap_or_else(|| {
+            CommonError::new(
+                ErrorCode::PeerLost,
+                format!("no known address for device {}", id.short_label()),
+            )
+        });
+        Err(match e.hint {
+            Some(_) => e,
+            None => e.with_hint("check that it is awake and on the same network, or enter its address under Peers"),
+        })
     }
 
-    /// Record a contact with a pinned peer: `last_seen_utc` always, `last_addr` only for an address
-    /// this device dialled (an inbound source may be a short-lived client port such as
-    /// `common run --peer`). Under `peer_writes`, so it never re-pins a device unpaired meanwhile;
-    /// `PeerStore::pin` refuses a revoked one.
-    fn touch(&self, id: PeerId, dialled: Option<SocketAddr>) {
+    /// Record a contact with a pinned peer: `last_seen_utc` always, `last_addr` when `addr` is
+    /// given: an address this device dialled and authenticated, or the source IP of an
+    /// authenticated inbound connection with the pinned port ([`inbound_hint`]). Under
+    /// `peer_writes`, so it never re-pins a device unpaired meanwhile; `PeerStore::pin` refuses a
+    /// revoked one.
+    fn touch(&self, id: PeerId, addr: Option<SocketAddr>) {
         let _g = lock(&self.peer_writes);
         let Ok(Some(mut p)) = self.peers.get(&id) else {
             return;
         };
-        if let Some(a) = dialled {
+        if let Some(a) = addr {
             p.last_addr = Some(a.to_string());
         }
         p.last_seen_utc = Some(utc_now());
@@ -600,10 +631,14 @@ impl AppState {
         let s = self.settings();
         let net = self.net.lock().await;
         let node = net.node.as_ref();
+        let listen = node.and_then(|n| n.local_addr().ok());
         json!({
             "enabled": node.is_some(),
             "serve_peers": s.serve_peers,
-            "listen_addr": node.and_then(|n| n.local_addr().ok()).map(|a| a.to_string()),
+            "listen_addr": listen.map(|a| a.to_string()),
+            // null too when bound on every interface without a route: 0.0.0.0 is not dialable.
+            "dial_addr": listen.map(routable).filter(|a| !a.ip().is_unspecified()).map(|a| a.to_string()),
+            "device_name": device_name(),
             "mdns": net.mdns_active(),
             "peer_id": self.identity.id.to_hex(),
             "short_label": self.identity.id.short_label(),
@@ -627,12 +662,96 @@ fn short_label(s: &str) -> Option<String> {
     ok.then(|| s.to_ascii_lowercase())
 }
 
-/// Where to dial a peer, best first: the address in a fresh signed mDNS record (it follows DHCP
-/// and Wi-Fi changes), then the pinned `last_addr`; duplicates removed.
-fn dial_order(discovered: Option<SocketAddr>, pinned: Option<SocketAddr>) -> Vec<SocketAddr> {
-    let mut v: Vec<SocketAddr> = discovered.into_iter().chain(pinned).collect();
-    v.dedup();
+/// Where to dial a peer, best first: the address the user typed, the addresses in a fresh signed
+/// mDNS record (they follow DHCP and Wi-Fi changes), then the pinned `last_addr`; each address
+/// once, in that order.
+fn dial_order(hint: Option<SocketAddr>, discovered: &[SocketAddr], pinned: Option<SocketAddr>) -> Vec<SocketAddr> {
+    let mut v: Vec<SocketAddr> = Vec::new();
+    for a in hint.into_iter().chain(discovered.iter().copied()).chain(pinned) {
+        if !v.contains(&a) {
+            v.push(a);
+        }
+    }
     v
+}
+
+/// The error worth showing after two failed dials: a refusal (another device or key at that
+/// address, revoked, incompatible) says more than a later "no answer", so it is kept over one.
+fn prefer_refusal(last: Option<CommonError>, e: CommonError) -> CommonError {
+    let silent = |e: &CommonError| matches!(e.code, ErrorCode::PeerLost | ErrorCode::Timeout);
+    match last {
+        Some(l) if !silent(&l) && silent(&e) => l,
+        _ => e,
+    }
+}
+
+/// Where to dial a pinned device that just connected in: its authenticated source IP with the
+/// pinned port (the source port may be a short-lived `common run --peer` client). `None` without a
+/// pinned `ip:port` to take the port from.
+// ponytail: a source behind NAT stores the NAT IP, a dead hint; harmless, discovered/manual addresses are tried first
+fn inbound_hint(remote: SocketAddr, pinned: Option<&str>) -> Option<SocketAddr> {
+    let port = pinned?.parse::<SocketAddr>().ok()?.port();
+    Some(SocketAddr::new(remote.ip().to_canonical(), port))
+}
+
+/// An address typed by the user for `POST /api/peers/{id}/connect`: `ip:port` of a device, never
+/// port 0, an unspecified (0.0.0.0, ::) or a multicast address.
+fn parse_dial_addr(s: &str) -> Result<SocketAddr> {
+    let a: SocketAddr = s
+        .trim()
+        .parse()
+        .map_err(|_| CommonError::invalid("addr must be ip:port, e.g. 192.168.1.20:8193"))?;
+    let ip = a.ip().to_canonical();
+    if a.port() == 0 || ip.is_unspecified() || ip.is_multicast() {
+        return Err(CommonError::invalid(format!(
+            "{a} is not a device address (port 0, unspecified or multicast)"
+        )));
+    }
+    Ok(a)
+}
+
+/// This host's name, what a paired device shows for this one: the Computer Name from System
+/// Settings (macOS, else its Local Hostname), the hostname (other unix), `COMPUTERNAME` (Windows),
+/// else "common". The default for pairing and `GET /api/network`. Not the macOS kernel hostname:
+/// without a HostName set, DHCP or reverse DNS sets it, so it changes with the network and is often
+/// just "Mac" or a dhcp-... name.
+pub fn device_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        // ponytail: read once per process (a rename shows after a restart); scutil is a process spawn.
+        static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let scutil = |key: &str| {
+            let out = std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", key])
+                .output()
+                .ok()?;
+            let s = String::from_utf8(out.stdout).ok()?;
+            (out.status.success() && !s.trim().is_empty()).then(|| s.trim().to_string())
+        };
+        if let Some(n) = NAME.get_or_init(|| scutil("ComputerName").or_else(|| scutil("LocalHostName"))) {
+            return n.clone();
+        }
+    }
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: gethostname writes at most buf.len() bytes into a buffer we own.
+        if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            if let Ok(s) = std::str::from_utf8(&buf[..end]) {
+                if !s.trim().is_empty() {
+                    return s.trim().to_string();
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    if let Some(n) = std::env::var_os("COMPUTERNAME").and_then(|n| n.into_string().ok()) {
+        if !n.trim().is_empty() {
+            return n.trim().to_string();
+        }
+    }
+    "common".into()
 }
 
 /// Which of the open connections to one peer (their `outbound` flags, oldest first) to use: the
@@ -654,40 +773,121 @@ fn same_addr(a: SocketAddr, b: SocketAddr) -> bool {
 
 async fn accept_loop(st: Arc<AppState>, node: Arc<Node>) {
     while let Some(conn) = node.accept().await {
-        st.touch(conn.peer_id, None);
+        // The source IP is authenticated: QUIC Retry validated it and the TLS key is pinned.
+        let pinned = st.peers.get(&conn.peer_id).ok().flatten().and_then(|p| p.last_addr);
+        st.touch(conn.peer_id, inbound_hint(conn.remote_addr, pinned.as_deref()));
         st.attach(&node, conn);
     }
 }
 
+/// Wait before the next dial after `n` failed dials in a row: 1, 2, 4 … 256 s, then
+/// [`SYNC_BACKOFF_CAP`].
+fn sync_backoff(n: u32) -> Duration {
+    let cap = SYNC_BACKOFF_CAP.as_secs();
+    Duration::from_secs(1u64.checked_shl(n.saturating_sub(1)).map_or(cap, |s| s.min(cap)))
+}
+
+/// Forget the backoff of devices that are connected now (an inbound reconnect counts: an
+/// authenticated proof the device is there). A device whose mDNS addresses appeared or changed
+/// since the last tick is due now but keeps its failure count, and at most once per
+/// [`SYNC_BACKOFF_CAP`] between connections (`resets`): anyone on the LAN can send a goodbye for it
+/// and replay its signed record with another address (only the port is signed), so discovery
+/// alone must not set the dial rate. A device that left mDNS keeps its wait.
+// ponytail: rate-limited instead of proven fresh; reset only on a newer signed `ts` once
+// common-network's DiscoveredPeer exposes it.
+fn reset_backoff(
+    redial: &mut HashMap<PeerId, (u32, Instant)>,
+    resets: &mut HashMap<PeerId, Instant>,
+    connected: &HashSet<PeerId>,
+    seen_before: &HashMap<PeerId, Vec<SocketAddr>>,
+    seen_now: &HashMap<PeerId, Vec<SocketAddr>>,
+    now: Instant,
+) {
+    redial.retain(|id, _| !connected.contains(id));
+    resets.retain(|id, _| !connected.contains(id));
+    for (id, (_, next)) in redial.iter_mut() {
+        let moved = seen_now.get(id).is_some_and(|a| seen_before.get(id) != Some(a));
+        if moved
+            && resets
+                .get(id)
+                .is_none_or(|t| now.duration_since(*t) >= SYNC_BACKOFF_CAP)
+        {
+            resets.insert(*id, now);
+            *next = now;
+        }
+    }
+}
+
+/// The connected devices whose `last_seen_utc` is due a rewrite: never written by this loop or
+/// written at least [`LAST_SEEN_EVERY`] ago (an open connection means keep-alives were answered
+/// within the idle timeout). Records `now` for them and forgets devices no longer connected, so
+/// peers.json is written at most once a minute per device.
+fn seen_due(touched: &mut HashMap<PeerId, Instant>, live: &HashSet<PeerId>, now: Instant) -> Vec<PeerId> {
+    touched.retain(|id, _| live.contains(id));
+    let due: Vec<PeerId> = live
+        .iter()
+        .filter(|id| {
+            touched
+                .get(id)
+                .is_none_or(|t| now.duration_since(*t) >= LAST_SEEN_EVERY)
+        })
+        .copied()
+        .collect();
+    for id in &due {
+        touched.insert(*id, now);
+    }
+    due
+}
+
 /// ADR-0003 D7: keep a connection (and so a control loop) to every pinned device while networking
-/// is on. A device that could not be reached waits `HealthTracker::backoff_secs(failures - 1)`
-/// (1, 2, 4 … 30 s) before the next dial; due dials run concurrently.
-// ponytail: every failed dial is one `peer_rejected` audit line (written by `Node::connect`), so an
-// offline paired device costs at most two lines a minute. Dial only devices mDNS sees, or let
-// `Node::connect` skip auditing plain timeouts, if that ever bloats the audit log.
+/// is on. A device that could not be reached waits [`sync_backoff`] (1, 2, 4 … 300 s) before the
+/// next dial ([`reset_backoff`] says when it does not); due dials run concurrently. Connected
+/// devices get `last_seen_utc` refreshed once a minute ([`seen_due`]).
+// ponytail: `Node::connect` audits a failed dial once per (device, address, error code) until a
+// connection succeeds, so an offline device costs one line per state change here and, at the far
+// side, at most one inbound rejection per 300 s (capped at 20 lines a minute there). Spoofed mDNS
+// addresses (unsigned) add a line per new address, at most two dials per 300 s ([`reset_backoff`]);
+// dedupe per (device, code) in common-network if that ever crowds the audit log.
+// ponytail: join_all waits for the slowest due dial (at most 4 x idle); spawn per peer if one dead peer delays the others
 async fn sync_loop(st: Arc<AppState>, node: Arc<Node>) {
-    let mut failures: HashMap<PeerId, (u32, Instant)> = HashMap::new();
+    let mut seen_before: HashMap<PeerId, Vec<SocketAddr>> = HashMap::new();
+    let mut touched: HashMap<PeerId, Instant> = HashMap::new();
+    let mut resets: HashMap<PeerId, Instant> = HashMap::new();
     loop {
         let connected: HashSet<PeerId> = node.connections().iter().map(|c| c.peer_id).collect();
-        let now = Instant::now();
-        let due: Vec<PeerId> = st
-            .peers
-            .list()
-            .unwrap_or_default()
+        let seen_now: HashMap<PeerId, Vec<SocketAddr>> = st
+            .net
+            .lock()
+            .await
+            .discovered()
             .into_iter()
-            .map(|p| p.id)
-            .filter(|id| !connected.contains(id) && failures.get(id).is_none_or(|(_, next)| *next <= now))
+            .map(|p| (p.id, p.addrs))
             .collect();
+        let now = Instant::now();
+        let due: Vec<PeerId> = {
+            let mut redial = lock(&st.redial);
+            reset_backoff(&mut redial, &mut resets, &connected, &seen_before, &seen_now, now);
+            st.peers
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.id)
+                .filter(|id| !connected.contains(id) && redial.get(id).is_none_or(|(_, next)| *next <= now))
+                .collect()
+        };
+        seen_before = seen_now;
+        for id in seen_due(&mut touched, &connected, now) {
+            st.touch(id, None);
+        }
         let results = futures_util::future::join_all(due.iter().map(|id| st.peer_connection(&node, *id))).await;
-        for (id, r) in due.into_iter().zip(results) {
-            match r {
-                Ok(_) => {
-                    failures.remove(&id);
-                }
-                Err(_) => {
-                    let n = failures.get(&id).map_or(0, |(n, _)| *n) + 1;
-                    let wait = Duration::from_secs(HealthTracker::backoff_secs(n - 1));
-                    failures.insert(id, (n, Instant::now() + wait));
+        {
+            let mut redial = lock(&st.redial);
+            for (id, r) in due.into_iter().zip(results) {
+                if r.is_ok() {
+                    redial.remove(&id);
+                } else {
+                    let n = redial.get(&id).map_or(0, |(n, _)| *n) + 1;
+                    redial.insert(id, (n, Instant::now() + sync_backoff(n)));
                 }
             }
         }
@@ -1021,11 +1221,13 @@ pub async fn network_put(
     Ok(axum::Json(st.network_status().await))
 }
 
-/// Pinned peers (with `connected`, `health` and their groups), peers mDNS currently sees (never
-/// this device; `trusted` only when pinned here, never a trust decision by itself) and the
-/// revocations this store holds. `health` is `Node::health` (F-02-05): `connected`, `unhealthy`,
-/// `reconnecting` or `disconnected`; `disconnected` too while networking is off or before the
-/// first connection to that device.
+/// Pinned peers (with `connected`, `health`, `last_error` and their groups), peers mDNS currently
+/// sees (never this device; `addrs` best first; `trusted` only when pinned here, never a trust
+/// decision by itself) and the revocations this store holds. `health` is `Node::health`
+/// (F-02-05): `connected`, `unhealthy`, `reconnecting` or `disconnected`; `disconnected` too while
+/// networking is off or before the first connection to that device. `last_error` is
+/// `Node::dial_failure`: the latest failed dial to it (address, code, message, hint, time) since
+/// its last connection, `null` when there is none or networking is off.
 pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
     let (node, discovered) = {
         let net = st.net.lock().await;
@@ -1055,6 +1257,7 @@ pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<a
             v["short_label"] = json!(p.id.short_label());
             v["connected"] = json!(connected.contains(&p.id));
             v["health"] = json!(health(&p.id));
+            v["last_error"] = json!(node.as_ref().and_then(|n| n.dial_failure(&p.id)));
             v["groups"] = json!(names);
             v
         })
@@ -1064,6 +1267,41 @@ pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<a
         "discovered": discovered,
         "revocations": st.peers.revocations_since(0)?,
     })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct ConnectBody {
+    /// `ip:port` where the device can be reached now, tried before its mDNS and pinned addresses.
+    #[serde(default)]
+    pub addr: Option<String>,
+}
+
+/// Connect to a paired device now, optionally at an address the user typed (networks that drop
+/// mDNS, a device whose IP changed). Nothing is sent for an id that is not paired here. The address
+/// is only a hint: the handshake must present the device's pinned key, else `peer_unauthorized`
+/// and nothing is stored; `last_addr` changes only after a handshake at that address returned the
+/// connection. Clears the device's redial backoff. Returns its record once connected.
+pub async fn peer_connect(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ConnectBody>,
+) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
+    let id = st.resolve_peer(&id)?;
+    let not_paired = || {
+        CommonError::new(
+            ErrorCode::PeerUnauthorized,
+            format!("no paired device {}", id.short_label()),
+        )
+        .with_hint("pair it first")
+    };
+    if st.peers.get(&id)?.is_none() {
+        return Err(not_paired().into());
+    }
+    let hint = body.addr.as_deref().map(parse_dial_addr).transpose()?;
+    let node = st.node().await?;
+    lock(&st.redial).remove(&id);
+    st.peer_connection_via(&node, id, hint).await?;
+    Ok(axum::Json(st.peers.get(&id)?.ok_or_else(not_paired)?))
 }
 
 /// Unpin without revoking (the device may pair again) and close its connections.
@@ -1114,6 +1352,7 @@ pub async fn peer_revoke(
 
 #[derive(Deserialize, Default)]
 pub struct PairStartBody {
+    /// This device's name as the other side will see it; empty or absent: [`device_name`].
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -1126,7 +1365,7 @@ pub async fn pair_start(
     State(st): State<Arc<AppState>>,
     Json(body): Json<PairStartBody>,
 ) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let name = body.name.unwrap_or_else(|| DEFAULT_DEVICE_NAME.into());
+    let name = body.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(device_name);
     let node = st.node().await?;
     let mut slot = st.pairing.lock().await;
     if slot.as_ref().is_some_and(Pairing::active) {
@@ -1236,6 +1475,7 @@ pub struct PairJoinBody {
     pub addr: Option<String>,
     /// The 6-digit code, or the whole `common-pair:v1:...` QR payload.
     pub code: String,
+    /// This device's name as the other side will see it; empty or absent: [`device_name`].
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -1246,7 +1486,7 @@ pub async fn pair_join(
     State(st): State<Arc<AppState>>,
     Json(body): Json<PairJoinBody>,
 ) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
-    let name = body.name.unwrap_or_else(|| DEFAULT_DEVICE_NAME.into());
+    let name = body.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(device_name);
     let node = st.node().await?;
     let given: Option<SocketAddr> = match body.addr.as_deref() {
         Some(a) => Some(a.parse().map_err(|_| CommonError::invalid("addr must be ip:port"))?),
@@ -1538,14 +1778,323 @@ mod tests {
         assert_eq!(revocation_from_msg(bad_id).unwrap_err().code, ErrorCode::InvalidRequest);
     }
 
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// D2/D3: the address the user typed, then every mDNS address, then the pinned one; each once
+    /// even when not adjacent (the old `dedup` kept a repeat that was not next to its twin).
     #[test]
-    fn dial_order_prefers_the_fresh_mdns_address() {
-        let (a, b): (SocketAddr, SocketAddr) = ("192.168.1.20:8193".parse().unwrap(), "10.0.0.5:8193".parse().unwrap());
-        assert_eq!(dial_order(Some(a), Some(b)), vec![a, b]);
-        assert_eq!(dial_order(Some(a), Some(a)), vec![a]);
-        assert_eq!(dial_order(None, Some(b)), vec![b]);
-        assert_eq!(dial_order(Some(a), None), vec![a]);
-        assert!(dial_order(None, None).is_empty());
+    fn dial_order_puts_the_manual_hint_first_and_dedupes() {
+        let (h, d1, d2, p) = (
+            sa("172.20.10.6:8193"),
+            sa("10.0.0.9:8193"),
+            sa("172.20.10.9:8193"),
+            sa("192.168.1.20:8193"),
+        );
+        assert_eq!(dial_order(Some(h), &[d1, d2], Some(p)), vec![h, d1, d2, p]);
+        assert_eq!(
+            dial_order(None, &[d1, d2], Some(d1)),
+            vec![d1, d2],
+            "pinned = first mDNS"
+        );
+        assert_eq!(dial_order(Some(p), &[d1], Some(p)), vec![p, d1], "hint = pinned");
+        assert_eq!(dial_order(Some(d2), &[d1, d2], None), vec![d2, d1]);
+        assert_eq!(dial_order(None, &[], Some(p)), vec![p]);
+        assert_eq!(dial_order(Some(h), &[], None), vec![h]);
+        assert!(dial_order(None, &[], None).is_empty());
+    }
+
+    /// D2a/D5: after several failed dials the error shown is a refusal when there was one.
+    #[test]
+    fn prefer_refusal_over_timeout() {
+        let e = |c: ErrorCode| CommonError::new(c, c.as_str());
+        let refused = e(ErrorCode::PeerUnauthorized);
+        assert_eq!(prefer_refusal(None, e(ErrorCode::PeerLost)).code, ErrorCode::PeerLost);
+        assert_eq!(
+            prefer_refusal(Some(refused.clone()), e(ErrorCode::PeerLost)).code,
+            ErrorCode::PeerUnauthorized
+        );
+        assert_eq!(
+            prefer_refusal(Some(refused.clone()), e(ErrorCode::Timeout)).code,
+            ErrorCode::PeerUnauthorized
+        );
+        assert_eq!(
+            prefer_refusal(Some(e(ErrorCode::PeerLost)), refused.clone()).code,
+            ErrorCode::PeerUnauthorized
+        );
+        assert_eq!(
+            prefer_refusal(Some(refused), e(ErrorCode::ProtocolIncompatible)).code,
+            ErrorCode::ProtocolIncompatible,
+            "of two refusals, the later"
+        );
+        assert_eq!(
+            prefer_refusal(Some(e(ErrorCode::Timeout)), e(ErrorCode::PeerLost)).code,
+            ErrorCode::PeerLost
+        );
+    }
+
+    /// D3b: an authenticated inbound connection teaches the device's new IP, never its source port
+    /// (a `common run --peer` client's port is ephemeral).
+    #[test]
+    fn inbound_hint_keeps_the_pinned_port() {
+        let from = sa("[::ffff:172.20.10.6]:53211");
+        assert_eq!(
+            inbound_hint(from, Some("172.20.10.2:8193")),
+            Some(sa("172.20.10.6:8193"))
+        );
+        assert_eq!(
+            inbound_hint(sa("10.0.0.9:1"), Some("[fd00::5]:9000")),
+            Some(sa("10.0.0.9:9000"))
+        );
+        assert_eq!(inbound_hint(from, None), None);
+        assert_eq!(inbound_hint(from, Some("garbage")), None);
+        assert_eq!(inbound_hint(from, Some("172.20.10.2")), None, "no port to keep");
+    }
+
+    #[test]
+    fn manual_addresses_must_name_a_device() {
+        assert_eq!(parse_dial_addr(" 172.20.10.6:8193 ").unwrap(), sa("172.20.10.6:8193"));
+        assert_eq!(parse_dial_addr("[fd00::5]:8193").unwrap(), sa("[fd00::5]:8193"));
+        for bad in [
+            "",
+            "172.20.10.6",
+            "host.local:8193",
+            "172.20.10.6:0",
+            "0.0.0.0:8193",
+            "[::]:8193",
+            "[::ffff:0.0.0.0]:8193",
+            "224.0.0.251:5353",
+            "[ff02::fb]:5353",
+        ] {
+            assert_eq!(
+                parse_dial_addr(bad).unwrap_err().code,
+                ErrorCode::InvalidRequest,
+                "{bad}"
+            );
+        }
+    }
+
+    /// E4: 1, 2, 4 … 256 s, then 300 s for good (the old cap was 30 s plus the 4 s timeout: a
+    /// dial and an audit line every ~35 s forever).
+    #[test]
+    fn sync_backoff_is_exponential_and_capped() {
+        let secs: Vec<u64> = (1..=11).map(|n| sync_backoff(n).as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+        assert_eq!(sync_backoff(0), Duration::from_secs(1));
+        assert_eq!(sync_backoff(64), SYNC_BACKOFF_CAP);
+        assert_eq!(sync_backoff(u32::MAX), SYNC_BACKOFF_CAP);
+    }
+
+    /// E4: a connection (either direction) clears a device's backoff. A new or changed mDNS
+    /// address makes it due now but keeps its failure count; leaving mDNS changes nothing, and
+    /// other devices keep theirs.
+    #[test]
+    fn backoff_resets_on_connection_or_discovery_change() {
+        let id = |b: u8| PeerId([b; 32]);
+        let (connected, appeared, moved, same, left, quiet) = (id(1), id(2), id(3), id(4), id(5), id(6));
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(300);
+        let mut redial: HashMap<PeerId, (u32, Instant)> = [connected, appeared, moved, same, left, quiet]
+            .into_iter()
+            .map(|p| (p, (9, later)))
+            .collect();
+        let before: HashMap<PeerId, Vec<SocketAddr>> = [
+            (moved, vec![sa("10.0.0.2:8193")]),
+            (same, vec![sa("10.0.0.3:8193")]),
+            (left, vec![sa("10.0.0.4:8193")]),
+        ]
+        .into();
+        let now: HashMap<PeerId, Vec<SocketAddr>> = [
+            (appeared, vec![sa("10.0.0.1:8193")]),
+            (moved, vec![sa("172.20.10.6:8193"), sa("10.0.0.2:8193")]),
+            (same, vec![sa("10.0.0.3:8193")]),
+        ]
+        .into();
+        reset_backoff(&mut redial, &mut HashMap::new(), &[connected].into(), &before, &now, t0);
+        let mut kept: Vec<PeerId> = redial.keys().copied().collect();
+        kept.sort();
+        assert_eq!(kept, vec![appeared, moved, same, left, quiet]);
+        let mut due: Vec<PeerId> = redial
+            .iter()
+            .filter(|(_, (_, next))| *next <= t0)
+            .map(|(id, _)| *id)
+            .collect();
+        due.sort();
+        assert_eq!(due, vec![appeared, moved]);
+        assert!(redial.values().all(|(n, _)| *n == 9), "failure counts kept: {redial:?}");
+    }
+
+    /// E4 against a LAN attacker: anyone can send an mDNS goodbye for a device and replay its
+    /// signed record with another address (only the port is signed), so it leaves and comes back
+    /// in discovery as often as the attacker likes. Ten minutes of 1 s ticks with every dial
+    /// failing: at most two dials per SYNC_BACKOFF_CAP (its backoff, one discovery reset), where
+    /// clearing the backoff on every reappearance dialled every other tick.
+    #[test]
+    fn spoofed_discovery_churn_does_not_set_the_dial_rate() {
+        let x = PeerId([9; 32]);
+        let t0 = Instant::now();
+        let mut redial: HashMap<PeerId, (u32, Instant)> = [(x, (9, t0 + SYNC_BACKOFF_CAP))].into();
+        let (mut resets, mut before) = (HashMap::new(), HashMap::new());
+        let mut dials = Vec::new();
+        for s in 0..600u64 {
+            let now = t0 + Duration::from_secs(s);
+            let seen: HashMap<PeerId, Vec<SocketAddr>> = if s % 2 == 0 {
+                [(
+                    x,
+                    vec![SocketAddr::from(([10, 0, (s / 256) as u8, (s % 256) as u8], 8193))],
+                )]
+                .into()
+            } else {
+                HashMap::new()
+            };
+            reset_backoff(&mut redial, &mut resets, &HashSet::new(), &before, &seen, now);
+            if redial.get(&x).is_none_or(|(_, next)| *next <= now) {
+                dials.push(s);
+                let n = redial.get(&x).map_or(0, |(n, _)| *n) + 1;
+                redial.insert(x, (n, now + sync_backoff(n)));
+            }
+            before = seen;
+        }
+        assert!(dials.len() <= 4, "{} dials: {dials:?}", dials.len());
+        // A real connection proves the device is there: the next reappearance may reset again.
+        reset_backoff(
+            &mut redial,
+            &mut resets,
+            &[x].into(),
+            &before,
+            &before,
+            t0 + Duration::from_secs(601),
+        );
+        assert!(redial.is_empty() && resets.is_empty());
+    }
+
+    /// E5: a connected device's `last_seen_utc` is due at once, then not again for a minute;
+    /// a device that disconnects is forgotten and is due at once when it is back.
+    #[test]
+    fn last_seen_refresh_is_bounded() {
+        let (a, b) = (PeerId([1; 32]), PeerId([2; 32]));
+        let mut touched = HashMap::new();
+        let t0 = Instant::now();
+        let mut due = seen_due(&mut touched, &[a, b].into(), t0);
+        due.sort();
+        assert_eq!(due, vec![a, b]);
+        for s in [1, 30, 59] {
+            assert!(
+                seen_due(&mut touched, &[a, b].into(), t0 + Duration::from_secs(s)).is_empty(),
+                "{s} s"
+            );
+        }
+        assert_eq!(
+            seen_due(&mut touched, &[a].into(), t0 + Duration::from_secs(60)),
+            vec![a]
+        );
+        assert!(!touched.contains_key(&b), "b disconnected: forgotten");
+        assert_eq!(
+            seen_due(&mut touched, &[a, b].into(), t0 + Duration::from_secs(61)),
+            vec![b]
+        );
+        assert!(seen_due(&mut touched, &HashSet::new(), t0 + Duration::from_secs(500)).is_empty());
+        assert!(touched.is_empty());
+    }
+
+    /// E4: turning networking off and on (or any settings change that restarts it) clears the
+    /// redial backoff, as the old per-loop map did, so the new sync loop dials every device now.
+    #[tokio::test]
+    async fn network_restart_clears_the_redial_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        paths.ensure_dirs().unwrap();
+        let backend = common_runtime::backend_by_name("llama.cpp", dir.path().join("engine"), paths.clone()).unwrap();
+        let store = common_artifacts::Store::new(paths.clone());
+        let manager = common_runtime::manager::ModelManager::new(paths.clone(), store, backend, Default::default());
+        let catalog = common_artifacts::Catalog::builtin().unwrap();
+        let st = Arc::new(AppState::new(crate::ApiConfig::default(), paths, catalog, Arc::new(manager)).unwrap());
+        let later = Instant::now() + SYNC_BACKOFF_CAP;
+        lock(&st.redial).insert(PeerId([7; 32]), (9, later));
+        st.apply_network().await.unwrap();
+        assert!(lock(&st.redial).is_empty());
+    }
+
+    /// E4, SINGLE-HOST (loopback, no mDNS): `POST /api/peers/{id}/connect` clears the device's
+    /// backoff, so the sync loop dials its pinned address on its next tick while the handler is
+    /// still waiting on the typed address (a handshake gives up after ~3 s, RFC 9000 10.1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_clears_the_backoff_so_the_sync_loop_dials_at_once_single_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        paths.ensure_dirs().unwrap();
+        let backend = common_runtime::backend_by_name("llama.cpp", dir.path().join("engine"), paths.clone()).unwrap();
+        let store = common_artifacts::Store::new(paths.clone());
+        let manager = common_runtime::manager::ModelManager::new(paths.clone(), store, backend, Default::default());
+        let catalog = common_artifacts::Catalog::builtin().unwrap();
+        let config = crate::ApiConfig {
+            network: NetworkConfig {
+                listen_port: 0,
+                bind_addr: "127.0.0.1".into(),
+                mdns: false,
+                idle_timeout_ms: 1000,
+                ..NetworkConfig::default()
+            },
+            ..Default::default()
+        };
+        let st = Arc::new(AppState::new(config, paths, catalog, Arc::new(manager)).unwrap());
+        st.update_settings(|s| Settings {
+            network_enabled: true,
+            ..s
+        })
+        .unwrap();
+        st.apply_network().await.unwrap();
+        let pinned = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let typed = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let x = DeviceIdentity::generate().unwrap().id;
+        lock(&st.redial).insert(x, (9, Instant::now() + SYNC_BACKOFF_CAP));
+        st.peers
+            .pin(PeerRecord {
+                id: x,
+                name: "X".into(),
+                paired_at_utc: utc_now(),
+                last_seen_utc: None,
+                last_addr: Some(pinned.local_addr().unwrap().to_string()),
+            })
+            .unwrap();
+        let (mut b1, mut b2) = ([0u8; 2048], [0u8; 2048]);
+        let held = tokio::time::timeout(Duration::from_millis(1500), pinned.recv_from(&mut b1)).await;
+        assert!(held.is_err(), "the backoff holds the sync loop back");
+
+        let body = ConnectBody {
+            addr: Some(typed.local_addr().unwrap().to_string()),
+        };
+        let handler = tokio::spawn(peer_connect(State(st.clone()), Path(x.to_hex()), Json(body)));
+        let wait = Duration::from_secs(2);
+        let (t, p) = tokio::join!(
+            tokio::time::timeout(wait, typed.recv_from(&mut b1)),
+            tokio::time::timeout(wait, pinned.recv_from(&mut b2))
+        );
+        assert!(t.is_ok(), "the handler dials the typed address");
+        assert!(p.is_ok(), "the sync loop dials the pinned address on its next tick");
+        assert!(handler.await.unwrap().is_err(), "nothing answers at either address");
+        st.stop_network().await;
+    }
+
+    #[test]
+    fn device_name_is_nonempty() {
+        let n = device_name();
+        assert!(!n.trim().is_empty() && n == n.trim(), "{n:?}");
+    }
+
+    /// E1 on macOS: the name the user set in System Settings, not the network-dependent hostname.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_name_on_macos_is_the_computer_name() {
+        let out = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .unwrap();
+        let set = String::from_utf8(out.stdout).unwrap();
+        if out.status.success() && !set.trim().is_empty() {
+            assert_eq!(device_name(), set.trim());
+        }
     }
 
     #[test]

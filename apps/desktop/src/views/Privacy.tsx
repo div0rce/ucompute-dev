@@ -62,7 +62,7 @@ export function Privacy() {
           <div className="glance" role="status">
             <span className={`dot ${mode === "local_only" ? "ok" : ""}`} aria-hidden="true" />
             <span>
-              Current mode: {MODE_LABEL[mode]}. {mode === "local_only" ? "Nothing leaves this Mac." : "Requests may run on a paired device when you pick one."}
+              Current mode: {MODE_LABEL[mode]}. {mode === "local_only" ? "Nothing leaves this computer." : "Requests may run on a paired device when you pick one."}
             </span>
           </div>
 
@@ -76,7 +76,7 @@ export function Privacy() {
                   <input type="radio" name="privacy" value="local_only" checked={selected === "local_only"} onChange={() => { setPick("local_only"); setSaved(""); }} />
                   <span>
                     <strong>Local only</strong>
-                    <span className="small muted">Everything runs on this Mac. The network is never used for prompts or replies.</span>
+                    <span className="small muted">Everything runs on this computer. The network is never used for prompts or replies.</span>
                   </span>
                 </label>
                 <label className="mode">

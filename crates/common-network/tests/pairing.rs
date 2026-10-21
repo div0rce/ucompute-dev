@@ -392,3 +392,24 @@ async fn qr_expected_peer_mismatch_pins_nothing_single_host() {
     );
     eprintln!("SINGLE-HOST: QR peer mismatch refused in the TLS handshake; nothing pinned, revocation intact");
 }
+
+/// The Windows firewall case (2026-10-19): the initiator's pairing port drops every packet. A
+/// bound UDP socket that never reads stands in for it, so no ICMP either. The joiner must name
+/// the address and point at the firewall, not at the code. SINGLE-HOST: loopback. (Here, not in
+/// `src/`: `invariants::no_plaintext_mode_exists` keeps raw socket types out of the crate.)
+#[tokio::test]
+async fn silent_pairing_endpoint_points_at_the_firewall_single_host() {
+    let b = Peer::new();
+    let nb = b.start().await;
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    let e = pairing::join(nb, addr, "123456", "joiner").await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::PairingFailed, "{e}");
+    assert!(e.message.contains(&format!("nothing answered at {addr}")), "{e}");
+    let hint = e.hint.expect("a hint");
+    assert!(
+        hint.contains("firewall") && hint.contains(&format!("UDP {}", addr.port())) && hint.contains("Peers"),
+        "{hint}"
+    );
+    assert!(b.peers.list().unwrap().is_empty(), "nothing pinned");
+}

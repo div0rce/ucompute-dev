@@ -117,6 +117,77 @@ async fn revoked_key_rejected() {
     assert_eq!(e.code, ErrorCode::PeerRevoked);
 }
 
+/// A server Initial packet that closes the connection with TLS alert `alert`, answering the
+/// client Initial `client`. Initial keys come from the client's public destination connection id
+/// (RFC 9001 5.2), so anything that sees the dial can send this before showing any key.
+fn forged_initial_close(client: &[u8], alert: u8) -> Vec<u8> {
+    use rustls::quic::{Keys, Version};
+    let dcid_len = usize::from(client[5]);
+    let client_dcid = &client[6..6 + dcid_len];
+    let scid_len = usize::from(client[6 + dcid_len]);
+    let client_scid = &client[7 + dcid_len..7 + dcid_len + scid_len];
+    let suite = rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256
+        .tls13()
+        .unwrap();
+    let keys = Keys::initial(
+        Version::V1,
+        suite,
+        suite.quic.unwrap(),
+        client_dcid,
+        rustls::Side::Server,
+    );
+    // CONNECTION_CLOSE (0x1c), error 0x100 + alert as a 2-byte varint, frame type 0, no reason; PADDING.
+    let mut payload = vec![0x1c, 0x41, alert, 0, 0];
+    payload.resize(20, 0);
+    let mut p = vec![0xc0, 0, 0, 0, 1, scid_len as u8]; // Initial, 1-byte packet number, QUIC v1
+    p.extend_from_slice(client_scid);
+    p.extend_from_slice(&[8, 1, 2, 3, 4, 5, 6, 7, 8, 0]); // our id, no token
+    let len = 1 + payload.len() + 16;
+    p.extend_from_slice(&[0x40 | (len >> 8) as u8, len as u8, 0]); // length, packet number 0
+    let pn = p.len() - 1;
+    let tag = keys.local.packet.encrypt_in_place(0, &p, &mut payload).unwrap();
+    p.extend_from_slice(&payload);
+    p.extend_from_slice(tag.as_ref());
+    let sample = p[pn + 4..pn + 20].to_vec();
+    let (head, rest) = p.split_at_mut(1);
+    keys.local
+        .header
+        .encrypt_in_place(&sample, &mut head[0], &mut rest[pn - 1..pn])
+        .unwrap();
+    p
+}
+
+/// A `certificate_revoked` alert from an address where the dialled device never showed its key
+/// is not that device's verdict: it reads as another device at that address, never as revoked
+/// (a host on a stale address could otherwise get a healthy device revoked or re-paired).
+#[tokio::test]
+async fn forged_revoked_alert_before_the_key_is_not_a_revocation() {
+    let (a, b) = pair();
+    let na = a.start().await;
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let forger = tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        let (n, from) = sock.recv_from(&mut buf).await.unwrap();
+        sock.send_to(&forged_initial_close(&buf[..n], 44), from).await.unwrap();
+    });
+    let e = timeout(Duration::from_secs(5), na.connect(addr, b.id()))
+        .await
+        .expect("the forged close ends the dial")
+        .unwrap_err();
+    forger.await.unwrap();
+    assert_eq!(e.code, ErrorCode::PeerUnauthorized, "{e}");
+    assert!(
+        e.message
+            .contains(&format!("{addr} did not prove it is {}", b.id().short_label())),
+        "{e}"
+    );
+    assert!(
+        e.hint.as_deref().unwrap_or("").contains("nothing was trusted or saved"),
+        "{e}"
+    );
+}
+
 #[tokio::test]
 async fn capabilities_exchanged_after_handshake() {
     let (a, b) = pair();
@@ -762,4 +833,98 @@ async fn busy_duplicate_is_retired_not_cut_single_host() {
             if revoke { "the revoke" } else { "its last request ended" }
         );
     }
+}
+
+/// Unreachable peers (D5): a dial to an address where nothing answers (a bound UDP socket that
+/// never reads, so no ICMP either) fails within the idle timeout with a message naming the address,
+/// a hint, and a recorded failure. SINGLE-HOST: loopback.
+#[tokio::test]
+async fn dial_to_silent_address_fails_within_idle_timeout_single_host() {
+    let (a, b) = pair();
+    let na = a.start().await;
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap();
+    let t0 = Instant::now();
+    let e = na.connect(addr, b.id()).await.unwrap_err();
+    let took = t0.elapsed();
+    assert!(
+        took >= Duration::from_millis(3500) && took <= Duration::from_secs(6),
+        "{took:?}"
+    );
+    assert_eq!(e.code, ErrorCode::PeerLost, "{e}");
+    assert!(
+        e.message.contains("no answer") && e.message.contains(&addr.to_string()),
+        "{e}"
+    );
+    assert!(e.hint.is_some(), "{e:?}");
+    let f = na.dial_failure(&b.id()).expect("failure recorded");
+    assert_eq!((f.addr, f.code), (addr, ErrorCode::PeerLost));
+    assert_eq!(f.hint, e.hint);
+    eprintln!("SINGLE-HOST dial to a silent address failed after {took:?}: {e}");
+}
+
+/// Unreachable peers and reconnection (E4): an offline paired device costs one `peer_rejected`
+/// line per state change, not one per attempt; a connection in either direction clears the
+/// recorded failure. SINGLE-HOST: a UDP relay on loopback stands in for the network.
+#[tokio::test]
+async fn dial_failures_are_audited_once_per_state_change_single_host() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let accepter = nb.clone();
+    tokio::spawn(async move { while accepter.accept().await.is_some() {} });
+    let (front, _, _, blocked, _relay) = start_relay(nb.local_addr().unwrap()).await;
+    let cfg = common_network::NetworkConfig {
+        idle_timeout_ms: 1000,
+        keep_alive_ms: 300,
+        ..Peer::config()
+    };
+    let na = Node::start(
+        cfg,
+        a.identity.clone(),
+        a.peers.clone(),
+        a.policy.clone(),
+        a.audit.clone(),
+    )
+    .await
+    .unwrap();
+    let rejected = || {
+        a.audit
+            .tail(1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "peer_rejected")
+            .collect::<Vec<_>>()
+    };
+
+    blocked.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..3 {
+        assert_eq!(na.connect(front, b.id()).await.unwrap_err().code, ErrorCode::PeerLost);
+    }
+    let lines = rejected();
+    assert_eq!(lines.len(), 1, "one line for three failed attempts");
+    assert_eq!(lines[0].fields["reason"], "peer_lost");
+    assert_eq!(lines[0].fields["direction"], "outbound");
+
+    blocked.store(false, std::sync::atomic::Ordering::SeqCst);
+    na.connect(front, b.id()).await.expect("reachable again");
+    assert!(audit_kinds(&a).contains(&"peer_connected".to_string()));
+    assert_eq!(na.dial_failure(&b.id()), None, "a connection clears the failure");
+
+    na.disconnect(&b.id(), "test").await;
+    blocked.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..2 {
+        assert!(na.connect(front, b.id()).await.is_err());
+    }
+    assert_eq!(rejected().len(), 2, "unreachable again: one more line");
+    assert!(na.dial_failure(&b.id()).is_some());
+
+    // b dials a directly: an inbound connection clears a's failure too.
+    let accepter = na.clone();
+    tokio::spawn(async move { while accepter.accept().await.is_some() {} });
+    nb.connect(na.local_addr().unwrap(), a.id())
+        .await
+        .expect("inbound to a");
+    poll_until(Duration::from_secs(2), || na.dial_failure(&b.id()).is_none())
+        .await
+        .expect("inbound connection clears the failure");
 }

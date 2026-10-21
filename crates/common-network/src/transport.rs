@@ -7,7 +7,9 @@
 //!
 //! Inbound connections from an unvalidated source address get a QUIC Retry first (a spoofed
 //! source cannot answer it), and `peer_rejected` audit lines are capped per minute, so a LAN
-//! flood costs neither TLS work per spoofed packet nor unbounded audit growth.
+//! flood costs neither TLS work per spoofed packet nor unbounded audit growth. A failed outbound
+//! dial is audited once per state change: again only after a connection to that peer succeeded,
+//! or with another error at that address ([`Node::dial_failure`] keeps the latest).
 use crate::health::{HealthTracker, PeerHealth};
 use crate::proto::{
     control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, SignedCapabilities,
@@ -15,11 +17,12 @@ use crate::proto::{
 use crate::tls::{self, Check, PeerPolicy, Verdict};
 use crate::{NetworkConfig, ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 use common_core::{CommonError, ErrorCode, Result};
-use common_identity::{DeviceIdentity, PeerId, PeerStore};
+use common_identity::{utc_now, DeviceIdentity, PeerId, PeerStore};
 use common_observability::Audit;
 use common_policy::PolicyEngine;
 use prost::Message;
 use quinn::{ConnectionError, IdleTimeout, TransportConfig, TransportErrorCode, VarInt};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -51,6 +54,18 @@ const CAPABILITIES_CONTEXT: &[u8] = b"common/1 capabilities\0";
 // ponytail: polling, and a request the peer opens at the very instant of an idle check is still cut
 // (`peer_lost`). A GOAWAY control message telling the peer to stop using the connection closes it.
 const RETIRE_POLL: Duration = Duration::from_millis(500);
+/// Bound on remembered dial failures (see `Node::dial_failed`).
+const MAX_DIAL_FAILURES: usize = 64;
+
+/// A failed outbound dial ([`Node::dial_failure`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DialFailure {
+    pub addr: SocketAddr,
+    pub code: ErrorCode,
+    pub message: String,
+    pub hint: Option<String>,
+    pub at_utc: String,
+}
 
 /// The first bidirectional stream (opened by the connector): Hello/Capabilities, then Status and
 /// Revocation messages from later modules. Other work opens its own streams on `conn`.
@@ -149,6 +164,8 @@ pub struct Node {
     pub(crate) stop: CancellationToken,
     me: Weak<Node>,
     rejections: Mutex<RejectionLog>,
+    /// Latest failed outbound dial per (peer, address) since the peer's last connection.
+    dial_failures: Mutex<HashMap<(PeerId, SocketAddr), (DialFailure, Instant)>>,
 }
 
 /// Fixed one-minute window over inbound `peer_rejected` audit lines.
@@ -204,6 +221,35 @@ pub fn transport_config(cfg: &NetworkConfig) -> Arc<TransportConfig> {
 
 fn short(s: &str) -> String {
     s.chars().take(32).collect()
+}
+
+/// A dial whose handshake never got an answer (quinn's idle timeout during the handshake).
+fn no_answer(addr: SocketAddr, idle_timeout_ms: u64) -> CommonError {
+    CommonError::new(
+        ErrorCode::PeerLost,
+        format!("no answer from {addr} within {} s", idle_timeout_ms.div_ceil(1000)),
+    )
+    .with_hint(format!(
+        "the device may be asleep or on another network, or a firewall may block UDP port {}",
+        addr.port()
+    ))
+}
+
+/// A handshake refusal is `expected`'s verdict only once its key was `shown`: rustls checks the
+/// key right before the server's signature and a bad signature closes the dial here, so a refusal
+/// arriving after that came from the key's holder. Before it, anything at `addr` can send one (an
+/// Initial CONNECTION_CLOSE needs only the public connection id), or it showed another key: that is
+/// another device at `addr` (`peer_unauthorized`), never "revoked".
+fn unproven(e: CommonError, shown: bool, addr: SocketAddr, expected: &PeerId) -> CommonError {
+    if shown || !matches!(e.code, ErrorCode::PeerRevoked | ErrorCode::PeerUnauthorized) {
+        return e;
+    }
+    tracing::debug!(%addr, code = %e.code, message = %e.message, "refusal before the pinned key was shown");
+    CommonError::new(
+        ErrorCode::PeerUnauthorized,
+        format!("the device at {addr} did not prove it is {}", expected.short_label()),
+    )
+    .with_hint("nothing was trusted or saved; check the address shown on that device under Peers")
 }
 
 /// A quinn connection error as a typed `CommonError`. TLS alerts carry the verifier's verdict
@@ -468,6 +514,7 @@ impl Node {
             stop: CancellationToken::new(),
             me: me.clone(),
             rejections: Mutex::new(RejectionLog::new(Instant::now())),
+            dial_failures: Mutex::new(HashMap::new()),
         });
         tracing::info!(addr = %endpoint.local_addr()?, "peer endpoint listening");
         // The loop holds only a Weak: dropping the last Node closes the endpoint (Drop) and ends it.
@@ -769,6 +816,7 @@ impl Node {
             // An inbound connection is never retired here (only its initiator retires it), so it
             // is always handed to `accept`; a duplicate is closed by the peer once idle.
             Ok(((pc, _), minor)) => {
+                self.clear_dial_failures(&peer);
                 tracing::info!(peer = %peer.short_label(), addr, minor, "peer connected (inbound)");
                 self.audit(
                     "peer_connected",
@@ -789,15 +837,35 @@ impl Node {
     /// own dial resolves to the connection initiated by the lower id (see `register`). So the
     /// result may be a connection `accept` also returned; callers that attach work per
     /// connection should key it by `conn.stable_id()`.
+    ///
+    /// A failed dial is remembered ([`Node::dial_failure`]) and audited (`peer_rejected`) once per
+    /// (peer, address, code) until a connection to the peer succeeds; a refusal by `allowed` sends
+    /// nothing and records nothing.
     pub async fn connect(&self, addr: SocketAddr, expected: PeerId) -> Result<Arc<PeerConnection>> {
         allowed(&self.peers, &expected)?;
         if let Some(live) = self.live(&expected) {
             return Ok(live);
         }
+        match self.dial(addr, expected).await {
+            Ok(pc) => {
+                self.clear_dial_failures(&expected);
+                Ok(pc)
+            }
+            Err(e) => {
+                self.dial_failed(&expected, addr, &e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn dial(&self, addr: SocketAddr, expected: PeerId) -> Result<Arc<PeerConnection>> {
         // Exactly the expected key, still pinned and not revoked, checked inside the handshake.
         let store = self.peers.clone();
+        let shown = Arc::new(AtomicBool::new(false));
+        let seen = shown.clone();
         let check: Check = Arc::new(move |id| {
             if *id == expected {
+                seen.store(true, Ordering::SeqCst);
                 tls::store_verdict(&store, id)
             } else {
                 Verdict::Unpinned
@@ -805,17 +873,21 @@ impl Node {
         });
         let mut cc = tls::client_config_with(self.identity.pkcs8_der(), check, ALPN_WORKLOAD)?;
         cc.transport_config(self.transport.clone());
-        let fields = |reason: &CommonError| serde_json::json!({ "addr": addr.to_string(), "direction": "outbound", "reason": reason.code.as_str() });
         let connecting = self
             .endpoint
             .connect_with(cc, addr, "common")
             .map_err(|e| CommonError::new(ErrorCode::PeerLost, format!("connect: {e}")))?;
         let conn = match connecting.await {
             Ok(c) => c,
+            // The handshake never completed: nothing answered at `addr`.
+            Err(ConnectionError::TimedOut) => return Err(no_answer(addr, self.config.idle_timeout_ms)),
             Err(e) => {
-                let e = map_conn_error(&e);
-                self.audit("peer_rejected", Some(&expected), fields(&e));
-                return Err(e);
+                return Err(unproven(
+                    map_conn_error(&e),
+                    shown.load(Ordering::SeqCst),
+                    addr,
+                    &expected,
+                ))
             }
         };
         let peer = tls::peer_id_of(&conn)?;
@@ -823,14 +895,10 @@ impl Node {
             .finish_handshake(&conn, peer, true)
             .await
             .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor, true)?, minor)));
-        let (pc, minor) = match registered {
-            Ok(((pc, true), minor)) => (pc, minor),
+        let (pc, minor) = match registered? {
+            ((pc, true), minor) => (pc, minor),
             // Retired as a duplicate of the connection returned instead.
-            Ok(((pc, false), _)) => return Ok(pc),
-            Err(e) => {
-                self.audit("peer_rejected", Some(&peer), fields(&e));
-                return Err(e);
-            }
+            ((pc, false), _) => return Ok(pc),
         };
         tracing::info!(peer = %peer.short_label(), %addr, minor, "peer connected (outbound)");
         self.audit(
@@ -839,6 +907,49 @@ impl Node {
             serde_json::json!({ "addr": addr.to_string(), "direction": "outbound", "minor": minor }),
         );
         Ok(pc)
+    }
+
+    /// Remembers a failed outbound dial; writes the `peer_rejected` line only when this (peer,
+    /// address) had no failure with the same code since the peer's last connection.
+    fn dial_failed(&self, peer: &PeerId, addr: SocketAddr, e: &CommonError) {
+        let failure = DialFailure {
+            addr,
+            code: e.code,
+            message: e.message.clone(),
+            hint: e.hint.clone(),
+            at_utc: utc_now(),
+        };
+        let repeat = {
+            let mut g = lock(&self.dial_failures);
+            // ponytail: cleared above 64 entries; per-peer LRU if many manual addresses ever matter
+            if g.len() >= MAX_DIAL_FAILURES && !g.contains_key(&(*peer, addr)) {
+                g.clear();
+            }
+            g.insert((*peer, addr), (failure, Instant::now()))
+                .is_some_and(|(old, _)| old.code == e.code)
+        };
+        tracing::debug!(peer = %peer.short_label(), %addr, code = %e.code, repeat, "dial failed");
+        if !repeat {
+            self.audit(
+                "peer_rejected",
+                Some(peer),
+                serde_json::json!({ "addr": addr.to_string(), "direction": "outbound", "reason": e.code.as_str() }),
+            );
+        }
+    }
+
+    fn clear_dial_failures(&self, peer: &PeerId) {
+        lock(&self.dial_failures).retain(|(p, _), _| p != peer);
+    }
+
+    /// The most recent failed outbound dial to `peer` since its last successful connection in
+    /// either direction; `None` if there was none.
+    pub fn dial_failure(&self, peer: &PeerId) -> Option<DialFailure> {
+        lock(&self.dial_failures)
+            .iter()
+            .filter(|((p, _), _)| p == peer)
+            .max_by_key(|(_, (_, at))| *at)
+            .map(|(_, (f, _))| f.clone())
     }
 
     /// Next inbound authenticated connection (after Hello/Capabilities). None when the endpoint closed.
@@ -996,6 +1107,15 @@ mod tests {
             assert_eq!(close_code(&CommonError::new(ec, "")), code);
             assert_eq!(map_conn_error(&app(code)).code, ec);
         }
+    }
+
+    #[test]
+    fn no_answer_error_names_address_and_hint() {
+        let e = no_answer("10.0.0.9:8193".parse().unwrap(), 4000);
+        assert_eq!(e.code, ErrorCode::PeerLost);
+        assert!(e.message.contains("no answer from 10.0.0.9:8193 within 4 s"), "{e}");
+        assert!(e.hint.as_deref().unwrap().contains("UDP port 8193"), "{e:?}");
+        assert_eq!(map_conn_error(&ConnectionError::TimedOut).code, ErrorCode::PeerLost);
     }
 
     #[test]

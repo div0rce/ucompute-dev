@@ -164,6 +164,14 @@
         "responses": { "204": { "description": "Unloaded (or nothing was loaded)" } }
       }
     },
+    "/api/shutdown": {
+      "post": {
+        "tags": ["common"],
+        "summary": "Stop the daemon gracefully",
+        "description": "The path SIGTERM takes, for callers that cannot signal the process (the desktop app on Windows): in-flight generations are cancelled, HTTP connections get up to 5 s to drain, the peer endpoint is closed (mDNS goodbye, QUIC close) and the loaded model is unloaded (engine stopped), then the process exits. No body. Same auth, origin and Host checks as every route.",
+        "responses": { "202": { "description": "Shutting down", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "shutting_down" } } } } } } }
+      }
+    },
     "/api/models/{id}": {
       "delete": {
         "tags": ["common"],
@@ -200,7 +208,7 @@
       "get": {
         "tags": ["mesh"],
         "summary": "Paired, discovered and revoked devices",
-        "description": "`peers` are pinned devices with `connected`, `health` and their groups. `discovered` are devices mDNS currently sees, never this device; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
+        "description": "`peers` are pinned devices with `connected`, `health`, `last_error` and their groups. `discovered` are devices mDNS currently sees, never this device; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
         "responses": { "200": { "description": "Peers", "content": { "application/json": { "schema": { "type": "object", "properties": { "peers": { "type": "array", "items": { "$ref": "#/components/schemas/PeerRecord" } }, "discovered": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveredPeer" } }, "revocations": { "type": "array", "items": { "$ref": "#/components/schemas/Revocation" } } } } } } } }
       }
     },
@@ -222,12 +230,22 @@
         "responses": { "200": { "description": "The signed revocation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Revocation" } } } }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
       }
     },
+    "/api/peers/{id}/connect": {
+      "post": {
+        "tags": ["mesh"],
+        "summary": "Connect to a paired device now, optionally at a given address",
+        "description": "For networks that drop mDNS and devices whose IP changed. Nothing is sent for an id that is not paired here (403 `peer_unauthorized`). Dials `addr` (when given), then the addresses mDNS sees, then the pinned `last_addr`; an open connection is returned as is. Every address is only a hint: the TLS handshake must present the device's pinned key, so another device at that address is refused (403 `peer_unauthorized`) and nothing is stored. `last_addr` changes only after a handshake at that address returned the connection. Clears the device's redial backoff. 403 `policy_denied` while networking is off; 403 `peer_revoked`; 426 `protocol_incompatible`; 502 `peer_lost` when nothing answered; 504 `timeout` for a control handshake that did not finish.",
+        "parameters": [{ "$ref": "#/components/parameters/PeerId" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "addr": { "type": "string", "description": "ip:port where the device can be reached now (not port 0, an unspecified or a multicast address)." } } } } } },
+        "responses": { "200": { "description": "Connected; the device's record", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PeerRecord" } } } }, "400": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "426": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" }, "504": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/api/pair/start": {
       "post": {
         "tags": ["mesh"],
         "summary": "Open a pairing window and show the code",
         "description": "Requires peer networking on. One window at a time (409 `overloaded` while one is open). Opens the separate accept-any pairing endpoint for `expires_at - now` seconds, advertises `pair=1` on mDNS and returns the single-use 6-digit code, `pair_addr` (the `ip:port` another device dials; the LAN address of the default route when the endpoint is bound on every interface) and the QR payload carrying that address (`common-pair:v1:<peer id>:<ip:port>:<secret>`). More than 5 wrong codes lock the window (`pairing_locked`); turning networking off closes it (`cancelled`). `GET /api/pair/status` reports the outcome.",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string", "description": "This device's name as the other side will see it (<= 64 bytes)." } } } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string", "description": "This device's name as the other side will see it (<= 64 bytes); empty or absent: this host's name (`device_name` in GET /api/network)." } } } } } },
         "responses": { "200": { "description": "Pairing window", "content": { "application/json": { "schema": { "type": "object", "properties": { "code": { "type": "string" }, "port": { "type": "integer" }, "pair_addr": { "type": "string", "description": "ip:port of the pairing endpoint as another device dials it" }, "qr_payload": { "type": "string" }, "expires_at": { "type": "integer", "description": "Unix seconds" } } } } } }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
       }
     },
@@ -243,7 +261,7 @@
         "tags": ["mesh"],
         "summary": "Join another device's pairing window",
         "description": "Connects from this device's peer endpoint (networking must be on) to `addr` (the other device's pairing endpoint `ip:port`, required with a 6-digit code) and runs the SPAKE2 exchange bound to the TLS session. `code` may instead be the whole QR payload, whose address and expected peer id are then used: any other device that answers fails the TLS handshake (`pairing_failed`, audit reason `qr_peer_mismatch`) and nothing is pinned on either side. On success both devices pin each other; a wrong code is `pairing_failed` (401), a locked window `pairing_locked` (429).",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "addr": { "type": "string" }, "code": { "type": "string" }, "name": { "type": "string" } }, "required": ["code"] } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "addr": { "type": "string" }, "code": { "type": "string" }, "name": { "type": "string", "description": "This device's name as the other side will see it; empty or absent: this host's name." } }, "required": ["code"] } } } },
         "responses": { "200": { "description": "The newly pinned device", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PeerRecord" } } } }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "429": { "$ref": "#/components/responses/Error" } }
       }
     },
@@ -404,7 +422,7 @@
       },
       "NetworkStatus": {
         "type": "object",
-        "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" }, "listen_addr": { "type": ["string", "null"], "description": "`ip:port` of the QUIC endpoint while enabled." }, "mdns": { "type": "boolean" }, "peer_id": { "type": "string", "description": "This device's 64-hex id (its Ed25519 public key)." }, "short_label": { "type": "string" }, "connections": { "type": "integer" }, "peer_quota": { "$ref": "#/components/schemas/PeerQuota" }, "peer_slots": { "type": "integer", "description": "Peer generations this device runs at once across all devices: `peer_quota.max_concurrent`, at most the engine slots (`--max-concurrent`) minus one." } }
+        "properties": { "enabled": { "type": "boolean" }, "serve_peers": { "type": "boolean" }, "listen_addr": { "type": ["string", "null"], "description": "`ip:port` of the QUIC endpoint while enabled." }, "mdns": { "type": "boolean" }, "peer_id": { "type": "string", "description": "This device's 64-hex id (its Ed25519 public key)." }, "short_label": { "type": "string" }, "connections": { "type": "integer" }, "device_name": { "type": "string", "description": "This host's name (the Computer Name on macOS, the hostname on other unix, COMPUTERNAME on Windows): the default name a paired device sees." }, "dial_addr": { "type": ["string", "null"], "description": "`ip:port` other devices should dial (the default-route address when the endpoint is bound on every interface); null while networking is off or when no route gives one." }, "peer_quota": { "$ref": "#/components/schemas/PeerQuota" }, "peer_slots": { "type": "integer", "description": "Peer generations this device runs at once across all devices: `peer_quota.max_concurrent`, at most the engine slots (`--max-concurrent`) minus one." } }
       },
       "PeerQuota": {
         "type": "object",
@@ -413,11 +431,17 @@
       },
       "PeerRecord": {
         "type": "object",
-        "properties": { "id": { "type": "string" }, "short_label": { "type": "string" }, "name": { "type": "string" }, "paired_at_utc": { "type": "string" }, "last_seen_utc": { "type": ["string", "null"] }, "last_addr": { "type": ["string", "null"] }, "connected": { "type": "boolean" }, "health": { "type": "string", "enum": ["connected", "unhealthy", "reconnecting", "disconnected"], "description": "Liveness from keep-alives (F-02-05), updated within one keep-alive interval: `unhealthy` = still open but 3 intervals without a datagram; `reconnecting` = lost, a reconnect is expected; `disconnected` = closed on purpose, networking off, or never connected since networking started." }, "groups": { "type": "array", "items": { "type": "string" } } }
+        "properties": { "id": { "type": "string" }, "short_label": { "type": "string" }, "name": { "type": "string" }, "paired_at_utc": { "type": "string" }, "last_seen_utc": { "type": ["string", "null"] }, "last_addr": { "type": ["string", "null"] }, "connected": { "type": "boolean" }, "health": { "type": "string", "enum": ["connected", "unhealthy", "reconnecting", "disconnected"], "description": "Liveness from keep-alives (F-02-05), updated within one keep-alive interval: `unhealthy` = still open but 3 intervals without a datagram; `reconnecting` = lost, a reconnect is expected; `disconnected` = closed on purpose, networking off, or never connected since networking started." }, "last_error": { "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/DialError" }], "description": "The latest failed dial to this device since its last connection (either direction); null when there is none or networking is off." }, "groups": { "type": "array", "items": { "type": "string" } } }
       },
       "DiscoveredPeer": {
         "type": "object",
-        "properties": { "id": { "type": "string" }, "addr": { "type": "string" }, "pairing": { "type": "boolean" }, "pair_port": { "type": ["integer", "null"] }, "proto": { "type": "string" }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } }
+        "properties": { "id": { "type": "string" }, "addr": { "type": "string", "description": "The best address, `addrs[0]`." }, "addrs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 2, "description": "ip:port addresses from the signed record, best first (routable before loopback and link-local, IPv4 first)." }, "pairing": { "type": "boolean" }, "pair_port": { "type": ["integer", "null"] }, "proto": { "type": "string" }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } }
+      },
+      "DialError": {
+        "type": "object",
+        "description": "A failed outbound dial.",
+        "properties": { "addr": { "type": "string" }, "code": { "type": "string", "description": "An Error code, e.g. peer_lost (nothing answered), peer_unauthorized (another device or key at that address, or it refused this one)." }, "message": { "type": "string" }, "hint": { "type": ["string", "null"] }, "at_utc": { "type": "string" } },
+        "required": ["addr", "code", "message", "at_utc"]
       },
       "Group": {
         "type": "object",

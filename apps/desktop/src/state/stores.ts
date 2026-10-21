@@ -6,10 +6,13 @@ export interface Settings {
   device: Device;
   /** Context length sent with load requests; null means the model's default. */
   n_ctx: number | null;
-  /** Name other devices see when pairing with this one. */
+  /** Name other devices see when pairing with this one; empty means the daemon's (this computer's own name). */
   device_name: string;
 }
-export const settings = createStore<Settings>({ device: "auto", n_ctx: null, device_name: "This Mac" }, "common.settings");
+export const settings = createStore<Settings>({ device: "auto", n_ctx: null, device_name: "" }, "common.settings");
+// "This Mac" was the hard-coded default before the daemon reported a name, persisted by any settings change, and
+// a Windows laptop paired under it. Nobody chose it, so it means "not set".
+if (settings.get().device_name === "This Mac") settings.set({ ...settings.get(), device_name: "" });
 
 export interface DaemonState {
   reachable: boolean | null; // null = not checked yet

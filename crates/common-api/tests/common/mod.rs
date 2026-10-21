@@ -96,6 +96,14 @@ impl Server {
         format!("http://{}{}", self.addr, path)
     }
 
+    /// Wait up to `limit` for `serve_on` to return by itself; its result, or None if still serving.
+    pub async fn finished(&mut self, limit: Duration) -> Option<Result<()>> {
+        tokio::time::timeout(limit, &mut self.task)
+            .await
+            .ok()
+            .map(|r| r.unwrap())
+    }
+
     /// Unload whatever is loaded (kills the engine), close the peer endpoint and stop serving.
     pub async fn stop(self) {
         let _ = self.state.manager.unload().await;

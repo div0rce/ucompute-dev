@@ -56,7 +56,7 @@ export function Home() {
     <section className="view" aria-labelledby="view-title">
       <div className="view-head">
         <h1 id="view-title">Home</h1>
-        <p>{localOnly ? "Run AI models on this computer. Nothing you type leaves it." : "Run AI models on this computer or on a device you paired. A prompt leaves this Mac only for the device you pick."}</p>
+        <p>{localOnly ? "Run AI models on this computer. Nothing you type leaves it." : "Run AI models on this computer or on a device you paired. A prompt leaves this computer only for the device you pick."}</p>
       </div>
 
       <div className="glance" role="status">

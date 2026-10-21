@@ -249,6 +249,16 @@ pub async fn load(
     Ok(axum::Json(model.info().clone()))
 }
 
+/// Stop the daemon the way SIGTERM does (the desktop app asks this before it would kill the
+/// process, which on Windows cannot be signalled): `serve_on` drains HTTP, closes the peer Node
+/// (mDNS goodbye, QUIC close) and unloads the model, then returns. Same auth, CORS and Host guards
+/// as every route.
+pub async fn shutdown(State(st): State<Arc<AppState>>) -> (StatusCode, axum::Json<Value>) {
+    tracing::info!("shutdown requested over the API");
+    st.shutdown.cancel();
+    (StatusCode::ACCEPTED, axum::Json(json!({"status": "shutting_down"})))
+}
+
 pub async fn unload(State(st): State<Arc<AppState>>) -> std::result::Result<StatusCode, ApiError> {
     st.manager.unload().await?;
     Ok(StatusCode::NO_CONTENT)

@@ -11,6 +11,8 @@ use tauri::{Manager, RunEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+mod firewall;
+
 /// The exact arguments the app starts the bundled daemon with, one whitespace-separated line.
 /// `crates/common-cli/tests/desktop_sidecar.rs` and `scripts/build-sidecar.mjs` read the same file and
 /// fail when the CLI they build does not accept these arguments, so the app and its bundled daemon
@@ -19,7 +21,7 @@ const DAEMON_ARGS: &str = include_str!("../daemon-args.txt");
 /// Basename of the `bundle.externalBin` entry in tauri.conf.json (`binaries/common`).
 const SIDECAR: &str = "common"; // tauri resolves sidecars by basename next to the app executable
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a quitting app waits for the daemon to stop its engine and exit after SIGTERM.
+/// How long a quitting app waits for the daemon to stop its engine and exit after it was asked to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Windows has no `--exit-with-parent` (no parent pid to poll) and no SIGTERM: put the daemon in a job
@@ -100,13 +102,25 @@ struct Daemon {
     spawned: bool,
 }
 
-/// Ask the daemon to stop (SIGTERM: it unloads the model and stops its llama.cpp engine), wait for
-/// it, and only then kill it. A plain `kill()` is SIGKILL, which left the engine running orphaned.
+/// Ask the daemon to stop, wait for it, and only then kill it. Stopping gracefully unloads the model,
+/// stops the llama.cpp engine and sends the mDNS goodbye, so other devices drop this one at once
+/// instead of listing it as nearby for minutes. A plain `kill()` (SIGKILL / TerminateProcess) did
+/// none of that and, before the job object, left the engine running orphaned.
 fn stop_daemon(child: CommandChild, exited: &AtomicBool) {
+    // Our daemon already exited (crashed, or lost the port to another daemon): whatever answers on the port now
+    // is not ours, and on unix its pid may have been reused. Ask nothing, kill nothing.
+    // ponytail: a child still starting while another daemon holds the port is not caught; a per-launch token
+    // checked by /api/shutdown (or a pid reported by /health) would close that.
+    if exited.load(Ordering::SeqCst) {
+        return;
+    }
+    // SAFETY: plain kill(2) on the pid of a child this process spawned and has not reaped.
     #[cfg(unix)]
-    {
-        // SAFETY: plain kill(2) on the pid of a child this process spawned and has not reaped.
-        unsafe { libc::kill(child.pid() as libc::pid_t, libc::SIGTERM) };
+    let asked = unsafe { libc::kill(child.pid() as libc::pid_t, libc::SIGTERM) } == 0;
+    // Windows has no SIGTERM: `POST /api/shutdown` takes the daemon down the same path.
+    #[cfg(not(unix))]
+    let asked = request_shutdown(daemon_addr());
+    if asked {
         let deadline = Instant::now() + STOP_TIMEOUT;
         while !exited.load(Ordering::SeqCst) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
@@ -115,11 +129,11 @@ fn stop_daemon(child: CommandChild, exited: &AtomicBool) {
             eprintln!("common-desktop: daemon stopped");
             return;
         }
-        eprintln!("common-desktop: daemon still running {STOP_TIMEOUT:?} after SIGTERM; killing it");
+        eprintln!("common-desktop: daemon still running {STOP_TIMEOUT:?} after the stop request; killing it");
+    } else {
+        eprintln!("common-desktop: could not ask the daemon to stop; killing it");
     }
-    // Windows has no SIGTERM to send: TerminateProcess the daemon; its job object ends the engine.
-    #[cfg(not(unix))]
-    let _ = exited;
+    // The daemon's own job object ends its engine on Windows.
     let _ = child.kill();
 }
 
@@ -129,20 +143,41 @@ struct DaemonInfo {
     spawned: bool,
 }
 
-/// GET /health over a raw TCP socket; true on a 200. No HTTP client dependency needed for one probe.
-fn health_ok(addr: SocketAddr) -> bool {
+/// One HTTP/1.1 request over a raw TCP socket; true when the answer has `status`. No HTTP client
+/// dependency needed for two loopback calls. No Origin header: the daemon's browser guards let a
+/// local non-browser client through, as they do for the CLI.
+fn http_status_is(addr: SocketAddr, request: &[u8], status: &str) -> bool {
     let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
         return false;
     };
     let _ = s.set_read_timeout(Some(Duration::from_millis(800)));
-    if s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
+    if s.write_all(request).is_err() {
         return false;
     }
     let mut buf = Vec::new();
     let _ = s.read_to_end(&mut buf); // a timeout still leaves the status line in buf
-    buf.starts_with(b"HTTP/1.1 200") || buf.starts_with(b"HTTP/1.0 200")
+    buf.starts_with(format!("HTTP/1.1 {status}").as_bytes()) || buf.starts_with(format!("HTTP/1.0 {status}").as_bytes())
+}
+
+/// GET /health; true on a 200.
+fn health_ok(addr: SocketAddr) -> bool {
+    http_status_is(
+        addr,
+        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "200",
+    )
+}
+
+/// POST /api/shutdown; true on a 202 (the daemon is shutting down). False on an older daemon
+/// without the route, which the caller then kills. Used on Windows only; built everywhere so the
+/// tests run on every platform.
+#[cfg_attr(unix, allow(dead_code))]
+fn request_shutdown(addr: SocketAddr) -> bool {
+    http_status_is(
+        addr,
+        b"POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "202",
+    )
 }
 
 /// Set by SIGTERM/SIGINT/SIGHUP. The handler only stores a flag (async-signal-safe); a thread turns
@@ -179,6 +214,23 @@ fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
         base_url: format!("http://{}", daemon_addr()),
         spawned: state.spawned,
     }
+}
+
+/// Windows Firewall state for the bundled daemon; `supported: false` elsewhere. Read-only.
+#[tauri::command]
+async fn firewall_status() -> firewall::Status {
+    tauri::async_runtime::spawn_blocking(firewall::status)
+        .await
+        .unwrap_or_default()
+}
+
+/// Adds the rule through the Windows elevation prompt (the user's click there is the consent);
+/// `Err("cancelled")` when the user declines it.
+#[tauri::command]
+async fn allow_through_firewall() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(firewall::allow)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -262,7 +314,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![daemon_info])
+        .invoke_handler(tauri::generate_handler![daemon_info, firewall_status, allow_through_firewall])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
@@ -274,4 +326,53 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// A one-shot loopback server answering `status`; returns its address and the request it got.
+    fn answer(status: &'static str) -> (SocketAddr, std::thread::JoinHandle<String>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 512];
+            while !req.ends_with(b"\r\n\r\n") {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+            }
+            s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
+                .unwrap();
+            String::from_utf8(req).unwrap()
+        });
+        (addr, t)
+    }
+
+    /// The Windows quit path: POST /api/shutdown to the loopback daemon; only a 202 counts as
+    /// stopping, anything else (an older daemon's 404, nothing listening) makes the caller kill it.
+    #[test]
+    fn request_shutdown_posts_and_accepts_only_202() {
+        let (addr, req) = answer("202 Accepted");
+        assert!(request_shutdown(addr));
+        let req = req.join().unwrap();
+        assert!(
+            req.starts_with("POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\n"),
+            "{req:?}"
+        );
+        assert!(!req.contains("Origin:"), "{req:?}");
+
+        let (addr, req) = answer("404 Not Found");
+        assert!(!request_shutdown(addr));
+        req.join().unwrap();
+
+        let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        assert!(!request_shutdown(free), "nothing listening");
+    }
 }

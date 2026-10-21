@@ -83,6 +83,37 @@ describe("api.chat target", () => {
   });
 });
 
+describe("api.chat stream errors", () => {
+  it("an error object inside the stream rejects with its typed code instead of an empty reply", async () => {
+    // What openai.rs `stream_events` sends when the peer refuses after the stream opened.
+    vi.stubGlobal("fetch", vi.fn(async () => sse([{ error: { message: "model x is not downloaded", type: "invalid_request_error", code: "model_not_downloaded", param: null, hint: "common pull x" } }])));
+    const err = await api.chat({ model: "x", messages: [], target: `peer:${"ab".repeat(32)}` }, () => undefined).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect([err.code, err.message, err.hint]).toEqual(["model_not_downloaded", "model x is not downloaded", "common pull x"]);
+  });
+});
+
+describe("peer connect and pairing bodies", () => {
+  const bodyOf = (fetchMock: { mock: { calls: unknown[][] } }) => JSON.parse(String((fetchMock.mock.calls.at(-1)![1] as RequestInit).body));
+  it("connectPeer posts {} or {addr}; pairing sends a name only when one is set", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response("{}", { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.connectPeer("ab".repeat(32));
+    expect(String(fetchMock.mock.calls.at(-1)![0])).toMatch(new RegExp(`/api/peers/${"ab".repeat(32)}/connect$`));
+    expect(bodyOf(fetchMock)).toEqual({});
+    await api.connectPeer("ab".repeat(32), "10.0.0.9:8193");
+    expect(bodyOf(fetchMock)).toEqual({ addr: "10.0.0.9:8193" });
+    await api.pairStart();
+    expect(bodyOf(fetchMock)).toEqual({});
+    await api.pairStart("Kitchen PC");
+    expect(bodyOf(fetchMock)).toEqual({ name: "Kitchen PC" });
+    await api.pairJoin({ addr: "10.0.0.9:51234", code: "123456" });
+    expect(bodyOf(fetchMock)).toEqual({ addr: "10.0.0.9:51234", code: "123456" });
+    await api.pairJoin({ code: "123456", name: "Kitchen PC" });
+    expect(bodyOf(fetchMock)).toEqual({ code: "123456", name: "Kitchen PC" });
+  });
+});
+
 describe("api.pull", () => {
   it("reports progress until done", async () => {
     installFakeDaemon();

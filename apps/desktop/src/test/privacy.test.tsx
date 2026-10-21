@@ -112,7 +112,7 @@ describe("Run on selector", () => {
     window.location.hash = "#/chat";
     render(<App poll={false} />);
     const sel = await screen.findByRole("combobox", { name: "Run on" });
-    expect(within(sel).getAllByRole("option").map((o) => o.textContent)).toEqual(["This Mac"]);
+    expect(within(sel).getAllByRole("option").map((o) => o.textContent)).toEqual(["This computer"]);
 
     // Paired from the Peers view (or the other device) while the chat was open: the daemon reports connected: false.
     fake.completePairing();

@@ -28,7 +28,7 @@ describe("Peers view", () => {
   it("starts with networking off and explains it; pairing is unavailable until it is on", async () => {
     const fake = installFakeDaemon();
     render(<Peers pollMs={20} />);
-    const sw = await screen.findByRole("switch", { name: /Let this Mac talk to paired devices/ });
+    const sw = await screen.findByRole("switch", { name: /Let this computer talk to paired devices/ });
     expect(sw).toHaveProperty("checked", false);
     expect(screen.getByText(/Off by default\. When on, Common listens/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Pair this device" })).toHaveProperty("disabled", true);
@@ -42,7 +42,7 @@ describe("Peers view", () => {
     const fake = installFakeDaemon();
     render(<Peers pollMs={20} />);
 
-    await user.click(await screen.findByRole("switch", { name: /Let this Mac talk/ }));
+    await user.click(await screen.findByRole("switch", { name: /Let this computer talk/ }));
     expect(fake.network.enabled).toBe(true);
     const pair = await screen.findByRole("button", { name: "Pair this device" });
     await waitFor(() => expect(pair).toHaveProperty("disabled", false));
@@ -62,8 +62,8 @@ describe("Peers view", () => {
     await screen.findByText("Paired with Studio Mac.");
     expect(screen.queryByRole("group", { name: "Pairing code" })).toBeNull();
     await screen.findByText("Studio Mac", { selector: ".model-name" });
-    // Pairing opens no workload connection; the daemon connects when a request first targets the device.
-    expect(screen.getByText("Not connected")).toBeTruthy();
+    // Pairing opens no workload connection; the fake does not announce the device on this network either.
+    expect(screen.getByText("Offline")).toBeTruthy();
   });
 
   it("a window the other device fails closes with the daemon's typed error", async () => {
@@ -121,7 +121,8 @@ describe("Peers view", () => {
     await user.click(join);
     await screen.findByText("Paired with Studio Mac.");
     const body = JSON.parse(String((calls(fake, "POST", "/api/pair/join")[0][1] as RequestInit).body));
-    expect(body).toEqual({ code: QR_PAYLOAD, name: "This Mac" });
+    // No name set: the daemon announces this computer's own name, so none is sent.
+    expect(body).toEqual({ code: QR_PAYLOAD });
   });
 
   it("lists strangers separately with Pair as the only action, which prefills the join form", async () => {
@@ -158,7 +159,7 @@ describe("Peers view", () => {
     await user.click(screen.getByRole("button", { name: "Join" }));
     await screen.findByText("Paired with Studio Mac.");
     const body = JSON.parse(String((calls(fake, "POST", "/api/pair/join")[0][1] as RequestInit).body));
-    expect(body).toEqual({ addr: PAIR_ADDR, code: JOIN_CODE, name: "This Mac" });
+    expect(body).toEqual({ addr: PAIR_ADDR, code: JOIN_CODE });
   });
 
   it("an older daemon without pair_addr still shows the port", async () => {
@@ -184,8 +185,8 @@ describe("Peers view", () => {
       peers: [
         peer(1, { health: "connected" }),
         peer(2, { health: "unhealthy" }),
-        peer(3, { health: "reconnecting", connected: true }),
-        peer(4, { health: "disconnected" }),
+        peer(3, { health: "reconnecting", connected: false }),
+        peer(4, { health: "disconnected", connected: false }),
         peer(5, { connected: false }),
       ],
     });
@@ -194,8 +195,9 @@ describe("Peers view", () => {
     expect(await health("Device 1")).toBe("Connected");
     expect(await health("Device 2")).toBe("Not responding");
     expect(await health("Device 3")).toBe("Reconnecting");
-    expect(await health("Device 4")).toBe("Not connected");
-    expect(await health("Device 5")).toBe("Not connected");
+    // Not connected and not announcing itself on this network.
+    expect(await health("Device 4")).toBe("Offline");
+    expect(await health("Device 5")).toBe("Offline");
   });
 
   it("never lists this device among nearby devices, even when the daemon reports its own advert", async () => {
@@ -213,7 +215,7 @@ describe("Peers view", () => {
     render(<Peers pollMs={20} />);
     // Without heartbeat health the daemon's `connected` decides the column.
     expect(await screen.findByText("Connected")).toBeTruthy();
-    expect(screen.getByText("Not connected")).toBeTruthy();
+    expect(screen.getByText("Offline")).toBeTruthy();
 
     await user.click(await screen.findByRole("button", { name: "Revoke Studio Mac" }));
     expect(fake.peers).toHaveLength(2);
@@ -228,6 +230,8 @@ describe("Peers view", () => {
     const c2 = await screen.findByRole("group", { name: "Confirm removing Old laptop" });
     await user.click(within(c2).getByRole("button", { name: "Cancel" }));
     expect(screen.getByText("Old laptop", { selector: ".model-name" })).toBeTruthy();
+    // Focus returns to the button that opened the confirmation.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove Old laptop" })));
     expect(fake.peers).toHaveLength(1);
   });
 
@@ -261,7 +265,7 @@ describe("Peers view", () => {
     render(<App poll={false} />);
     await screen.findByRole("heading", { level: 1, name: "Peers" });
 
-    const sw = await screen.findByRole("switch", { name: /Let this Mac talk/ });
+    const sw = await screen.findByRole("switch", { name: /Let this computer talk/ });
     await tabTo(sw);
     await user.keyboard(" ");
     await waitFor(() => expect(fake.network.enabled).toBe(true));

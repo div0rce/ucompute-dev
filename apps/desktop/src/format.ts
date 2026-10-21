@@ -19,12 +19,15 @@ export function humanDuration(seconds: number): string {
   return `${h} h ${m} min`;
 }
 
-/** Fit sentence for a model row: "Fits on this Mac" or "Needs X GB, you have Y GB". */
+/** Fit sentence for a model row: "Fits on this computer" or "Needs X GB, you have Y GB". */
 export function fitText(fit: { verdict: "fits"; headroom_bytes: number } | { verdict: "too_large"; needed_bytes: number; available_bytes: number; reason: string }): string {
   return fit.verdict === "fits"
-    ? `Fits on this Mac (${humanBytes(fit.headroom_bytes)} to spare)`
+    ? `Fits on this computer (${humanBytes(fit.headroom_bytes)} to spare)`
     : `Needs ${humanBytes(fit.needed_bytes)}, you have ${humanBytes(fit.available_bytes)}`;
 }
 
 export const num = (n: number | null | undefined, digits = 0) =>
   n == null || !Number.isFinite(n) ? "—" : n.toLocaleString(undefined, { maximumFractionDigits: digits });
+
+/** "1 device", "2 devices", "1,024 tokens". `many` for irregular plurals. */
+export const plural = (n: number, one: string, many = `${one}s`) => `${num(n)} ${n === 1 ? one : many}`;

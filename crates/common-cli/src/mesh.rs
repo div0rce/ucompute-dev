@@ -489,29 +489,8 @@ async fn save_group(m: &Mesh, g: &Group) -> Result<()> {
     }
 }
 
-/// This host's name, what a paired device shows for us.
-pub fn device_name() -> String {
-    #[cfg(unix)]
-    {
-        let mut buf = [0u8; 256];
-        // SAFETY: gethostname writes at most buf.len() bytes into a buffer we own.
-        if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            if let Ok(s) = std::str::from_utf8(&buf[..end]) {
-                if !s.trim().is_empty() {
-                    return s.trim().to_string();
-                }
-            }
-        }
-    }
-    #[cfg(windows)]
-    if let Some(n) = std::env::var_os("COMPUTERNAME").and_then(|n| n.into_string().ok()) {
-        if !n.trim().is_empty() {
-            return n.trim().to_string();
-        }
-    }
-    "common".into()
-}
+/// This host's name, what a paired device shows for us (one definition, shared with the daemon).
+pub use common_api::mesh::device_name;
 
 /// The address a LAN peer should use for `addr` when it was bound on every interface: the IP of
 /// the default route. UDP `connect` sends nothing; it only asks the kernel which source it would
@@ -834,6 +813,7 @@ async fn join(
         let code = code.ok_or_else(|| CommonError::invalid("the 6-digit code is required with ip:port"))?;
         (None, addr, code.to_string())
     };
+    pairing::check_code(&pw)?; // before the node binds its port
     let node = m.node(net.config(), false).await?;
     let name = name.unwrap_or_else(device_name);
     // A QR payload names the device: any other key fails the TLS handshake, before SPAKE2 and

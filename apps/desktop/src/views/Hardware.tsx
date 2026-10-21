@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Hardware as Hw } from "../api/client";
 import { explain, type MappedError } from "../api/errors";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { humanBytes } from "../format";
+import { humanBytes, plural } from "../format";
 
 /** Raw value first (what `common hardware --json` prints), human form second. */
 const bytes = (n: number) => `${n.toLocaleString()} bytes (${humanBytes(n)})`;
@@ -35,7 +35,7 @@ export function Hardware() {
               </dd>
               <dt>Processor</dt>
               <dd>
-                {hw.cpu.model}, {hw.cpu.physical_cores} cores ({hw.cpu.logical_cores} threads), {hw.cpu.arch}
+                {hw.cpu.model}, {plural(hw.cpu.physical_cores, "core")} ({plural(hw.cpu.logical_cores, "thread")}), {hw.cpu.arch}
               </dd>
               <dt>Memory</dt>
               <dd>

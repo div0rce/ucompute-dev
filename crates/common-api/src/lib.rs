@@ -144,6 +144,9 @@ pub struct AppState {
     /// `quinn::Connection::stable_id`s that already have a serving task and a control loop: a
     /// connection `Node::connect` returns may be one `Node::accept` handed out too.
     attached: Mutex<std::collections::HashSet<usize>>,
+    /// `mesh::sync_loop`'s redial backoff per pinned device: (failed dials in a row, next dial).
+    /// `POST /api/peers/{id}/connect` clears an entry, so a user's retry is never held back.
+    pub(crate) redial: Mutex<HashMap<common_identity::PeerId, (u32, Instant)>>,
     /// The `peer_quota` in force (from `config.json` at start; a change applies at the next start).
     pub peer_quota: mesh::PeerQuota,
     /// How peers share this device (F-06-04): those quotas, `load_options()` and the admission
@@ -196,6 +199,7 @@ impl AppState {
             revocations: tokio::sync::broadcast::channel(64).0,
             fanout: Mutex::new(mesh::RevocationFanout::default()),
             attached: Mutex::new(std::collections::HashSet::new()),
+            redial: Mutex::new(HashMap::new()),
             peer_quota,
             peer_serve,
             meta_cache: Mutex::new(HashMap::new()),
@@ -273,6 +277,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/privacy"),
     ("PUT", "/api/privacy"),
     ("GET", "/api/audit"),
+    ("POST", "/api/peers/{id}/connect"),
+    ("POST", "/api/shutdown"),
 ];
 
 /// Build the axum router (exposed for in-process tests).
@@ -310,6 +316,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             ("GET", "/api/privacy") => get(mesh::privacy_get),
             ("PUT", "/api/privacy") => put(mesh::privacy_put),
             ("GET", "/api/audit") => get(mesh::audit_get),
+            ("POST", "/api/peers/{id}/connect") => post(mesh::peer_connect),
+            ("POST", "/api/shutdown") => post(admin::shutdown),
             other => unreachable!("route {other:?} is in ROUTES but has no handler"),
         };
         r = r.route(path, handler);
@@ -351,9 +359,10 @@ pub async fn serve(
 
 /// Serve on an already-bound listener (tests bind `127.0.0.1:0` themselves). The peer Node is
 /// started first when the persisted setting says so (a failure is logged, the API still serves,
-/// `GET /api/network` shows `enabled: false`). When `shutdown` resolves: in-flight generations
-/// are cancelled, connections get `SHUTDOWN_GRACE` to drain, then the Node is closed and the
-/// loaded model is unloaded (engine process stopped) and this returns.
+/// `GET /api/network` shows `enabled: false`). When `shutdown` resolves or `state.shutdown` is
+/// cancelled (`POST /api/shutdown`): in-flight generations are cancelled, connections get
+/// `SHUTDOWN_GRACE` to drain, then the Node is closed (mDNS goodbye, QUIC close) and the loaded
+/// model is unloaded (engine process stopped) and this returns.
 pub async fn serve_on(
     state: Arc<AppState>,
     listener: tokio::net::TcpListener,
@@ -370,8 +379,13 @@ pub async fn serve_on(
         });
     }
     let root = state.shutdown.clone();
+    // Either way in: the caller's future (signals) or the token (`POST /api/shutdown`); without
+    // the token arm a cancelled token would end serving only after the grace sleep below.
     let signal = async move {
-        shutdown.await;
+        tokio::select! {
+            () = shutdown => {}
+            () = root.cancelled() => {}
+        }
         root.cancel();
     };
     let server = axum::serve(listener, router(state.clone())).with_graceful_shutdown(signal);
