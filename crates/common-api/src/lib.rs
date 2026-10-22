@@ -19,6 +19,7 @@
 
 mod admin;
 pub mod admission;
+mod jobs;
 pub mod mesh;
 pub mod metrics;
 mod openai;
@@ -152,6 +153,9 @@ pub struct AppState {
     /// How peers share this device (F-06-04): those quotas, `load_options()` and the admission
     /// semaphore, one set for every peer connection.
     peer_serve: common_network::remote::ServeOptions,
+    /// `GET /api/jobs`: requests run here, sent to a paired device or served for one (in memory,
+    /// ids and numbers only). The same registry as `peer_serve.jobs`.
+    pub jobs: Arc<common_observability::jobs::Jobs>,
     /// GGUF headers by sha256 (chat-template lookup per request, fit estimates per listing).
     meta_cache: Mutex<HashMap<String, Arc<GgufMetadata>>>,
     /// Bounds concurrent downloads (`MAX_PULLS`).
@@ -180,6 +184,7 @@ impl AppState {
         let peer_quota = settings.peer_quota();
         let peer_serve = peer_quota.serve_options(load_options(&config), admission.slots(), admission.max_concurrent);
         Ok(Self {
+            jobs: peer_serve.jobs.clone(),
             store: manager.store.clone(),
             config,
             paths,
@@ -279,6 +284,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/audit"),
     ("POST", "/api/peers/{id}/connect"),
     ("POST", "/api/shutdown"),
+    ("GET", "/api/jobs"),
+    ("POST", "/api/peers/{id}/disconnect"),
 ];
 
 /// Build the axum router (exposed for in-process tests).
@@ -318,6 +325,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             ("GET", "/api/audit") => get(mesh::audit_get),
             ("POST", "/api/peers/{id}/connect") => post(mesh::peer_connect),
             ("POST", "/api/shutdown") => post(admin::shutdown),
+            ("GET", "/api/jobs") => get(jobs::jobs_get),
+            ("POST", "/api/peers/{id}/disconnect") => post(mesh::peer_disconnect),
             other => unreachable!("route {other:?} is in ROUTES but has no handler"),
         };
         r = r.route(path, handler);
@@ -550,7 +559,8 @@ async fn cors(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Resp
     );
     h.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("authorization, content-type"),
+        // `x-common-client-ref`: the desktop app's id for its own requests (`GET /api/jobs`).
+        HeaderValue::from_static("authorization, content-type, x-common-client-ref"),
     );
     resp
 }

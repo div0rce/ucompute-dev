@@ -1,0 +1,60 @@
+/* activity section styles (owner D, plan 5.1). Shared tokens and primitives live in src/ui/; base.css is frozen. */
+.activity-device {
+  margin-left: auto;
+}
+/* Seven scopes, the Device select and the filter do not fit one row below about 1250 px. The shared scope row would
+   scroll the last scopes out of sight (macOS hides the scrollbar), so this one wraps: every scope stays visible. */
+.frame-scope:has(.activity-device) {
+  height: auto;
+  min-height: var(--scope-h);
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding-block: 4px;
+}
+.frame-scope:has(.activity-device) .scope-bar {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+.activity-device select {
+  height: 24px;
+  font-size: 12px;
+  max-width: 180px;
+}
+.activity-details {
+  max-width: 900px;
+}
+.activity-raw {
+  margin-top: var(--s3);
+}
+.activity-raw pre {
+  margin: 6px 0 0;
+  padding: var(--s2);
+  max-height: 240px;
+  overflow: auto;
+  background: var(--surface-2);
+  border-radius: var(--r-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.error-codes-scroll {
+  max-height: 60vh;
+  overflow: auto;
+}
+.error-codes-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.error-codes-table th,
+.error-codes-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 4px var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+.error-codes-table th {
+  color: var(--muted);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}

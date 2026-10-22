@@ -2,6 +2,18 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-22 — Claude Code — Desktop UI 2.0 implemented (unit + SINGLE-HOST); capability snapshot draft; publication readiness
+
+- Implemented: Desktop UI 2.0 per docs/design/desktop-ui-2-plan.md (control-center layout, seven sections, status bar, design system) and backend additions E0-E5 (peer details, engine state, jobs registry without prompt text, peer_lost audit, disconnect hold). Evidence: docs/evidence/desktop-ui2-2026-10-22.md.
+- Verified on one Mac: desktop 420/420, Rust 431 passed with 2 load-sensitive signal-timing failures (pass alone), fmt/clippy clean; 29 confirmed review findings and 16 Devices gaps fixed with tests.
+- Also: docs/capabilities/snapshot-2026-10-22.md (draft for the website), docs/release/public-source-readiness-2026-10-22.md (not ready to publish: owner authorization and personal-data redaction), partial physical Mac-to-Mac evidence (docs/evidence/mesh-physical-2026-10-21.md).
+- No ledger status changed.
+
+Next:
+    rebuild the packaged apps from this commit (macOS on Kyle's Mac or here after freeing disk; Windows NSIS on the laptop)
+    repeat the invalid Mac-to-Mac checks with Kyle's Mac awake; Windows runs when the laptop is on the same network
+    plan §5.5 steps 3-7 (real-browser axe with contrast, keyboard-only, VoiceOver/NVDA, packaged apps, physical checks)
+
 ## 2026-10-21 — Claude Code — discovery/reconnection fixes, desktop defects, Windows firewall consent step (unit + SINGLE-HOST)
 
 - Implemented (not yet physically verified): the discovery and reconnection fixes, the six desktop defects from docs/evidence/desktop-two-machine-2026-10-19.md, the Windows Firewall consent step, clearer connection states. Details and commands: docs/VERIFICATION.md (2026-10-21 entry).

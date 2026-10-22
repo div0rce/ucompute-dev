@@ -1,4 +1,6 @@
-import { api, configure } from "./api/client";
+import { api, ApiError, configure } from "./api/client";
+import { explain } from "./api/errors";
+import { startPoller } from "./state/poll";
 import { daemon } from "./state/stores";
 
 export interface DaemonInfo {
@@ -55,23 +57,36 @@ export async function allowThroughFirewall(): Promise<void> {
   await invoke("allow_through_firewall");
 }
 
-/** One poll: /api/status (implies health). Updates the daemon store. */
-export async function refreshStatus(): Promise<void> {
+/**
+ * One poll of `/api/status`. A timeout or a network failure asks `GET /health` (1 s): if it answers, the service is
+ * running but busy (`responding: false`, last status kept); only when it does not is the service down
+ * (`reachable: false`, status cleared). An HTTP error means the service answered, but the kept status is not live:
+ * `statusError` marks it (the status bar says "not updated").
+ */
+export async function refreshStatus(timeoutMs = 5000): Promise<void> {
   try {
-    const status = await api.status();
-    daemon.set((d) => ({ ...d, reachable: true, version: status.version, status }));
-  } catch {
-    daemon.set((d) => ({ ...d, reachable: false, status: null }));
+    const status = await api.status({ timeoutMs });
+    daemon.set((d) => ({ ...d, reachable: true, responding: true, version: status.version, status, at: Date.now(), statusError: null }));
+  } catch (err) {
+    if (err instanceof ApiError && err.status > 0) {
+      daemon.set((d) => ({ ...d, reachable: true, responding: true, statusError: explain(err) }));
+      return;
+    }
+    const alive = await api.health({ timeoutMs: 1000 }).then(
+      () => true,
+      () => false,
+    );
+    daemon.set((d) => (alive ? { ...d, reachable: true, responding: false } : { ...d, reachable: false, responding: true, status: null, statusError: null }));
   }
 }
 
-export async function startDaemonPolling(intervalMs = 2500): Promise<() => void> {
+/** Finds the daemon, takes one status reading, then starts the poller (status every 2.5 s plus the live stores). */
+export async function startDaemonPolling(): Promise<() => void> {
   const info = await discoverDaemon();
   configure({ baseUrl: info.base_url });
   daemon.set((d) => ({ ...d, spawned: info.spawned }));
   await refreshStatus();
-  const t = setInterval(refreshStatus, intervalMs);
-  return () => clearInterval(t);
+  return startPoller();
 }
 
 /** Opens a link in the system browser (Tauri) or a new tab (browser dev mode). */

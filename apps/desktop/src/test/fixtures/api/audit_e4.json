@@ -1,0 +1,8 @@
+{
+  "events": [
+    { "ts_utc": "2026-10-22T10:30:00Z", "kind": "peer_connected", "peer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "fields": { "addr": "172.20.10.6:8193", "direction": "outbound", "minor": 1 } },
+    { "ts_utc": "2026-10-22T10:31:12Z", "kind": "peer_lost", "peer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "fields": { "reason": "timed_out", "addr": "172.20.10.6:8193", "connected_s": 72 } },
+    { "ts_utc": "2026-10-22T10:32:00Z", "kind": "peer_disconnected", "peer_id": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "fields": { "reason": "by_user", "connections": 1 } },
+    { "ts_utc": "2026-10-22T10:32:05Z", "kind": "peer_rejected", "peer_id": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "fields": { "addr": "192.168.1.77:8193", "reason": "held", "detail": "disconnected by you", "suppressed": 0 } }
+  ]
+}

@@ -26,6 +26,7 @@ use crate::transport::{map_conn_error, InFlight, PeerConnection};
 use crate::MAX_CONTROL_FRAME;
 use common_core::{CommonError, ErrorCode, Result, Timeouts};
 use common_identity::PeerId;
+use common_observability::jobs::{Finished, JobHandle, Jobs};
 use common_observability::Audit;
 use common_policy::{PolicyEngine, PrivacyMode, QuotaConfig, Quotas, WorkloadKind};
 use common_runtime::manager::{LoadOptions, ModelManager};
@@ -281,6 +282,8 @@ pub struct ServeOptions {
     /// Peer generations running at once across all peers; the rest of the engine's slots stay
     /// with local work. Exhausted → `Overloaded`.
     pub peer_slots: Arc<Semaphore>,
+    /// Where each served request is listed (`kind: served_for_peer`); the daemon's `/api/jobs`.
+    pub jobs: Arc<Jobs>,
 }
 
 impl ServeOptions {
@@ -293,6 +296,7 @@ impl ServeOptions {
             peer_slots: Arc::new(Semaphore::new(cfg.max_concurrent.max(1) as usize)),
             quotas: Arc::new(Quotas::new(cfg)),
             engine_slots: None,
+            jobs: Jobs::new(),
         }
     }
 }
@@ -451,8 +455,32 @@ fn integrity(model_id: &str, asked: &str, have: &str) -> CommonError {
     )
 }
 
-/// Quotas, integrity, load, generate, forward. `Ok((usage, outcome))` once the stream is finished;
-/// `Err` before anything was streamed (the caller sends it as the `Error` frame).
+/// Moves `job` on for one generation event: a streamed piece, the engine's final numbers, or the
+/// error that ended it. Shared by the daemon's own requests and the ones served here.
+pub fn job_event(job: &JobHandle, ev: &Result<GenerateEvent>) {
+    match ev {
+        Ok(GenerateEvent::Token { .. } | GenerateEvent::ToolCallDelta { .. }) => job.token(),
+        Ok(GenerateEvent::Done {
+            finish_reason,
+            usage,
+            timings,
+        }) => job.done(Finished {
+            finish_reason: Some(finish_reason.clone()),
+            prompt_tokens: Some(usage.prompt_tokens),
+            completion_tokens: Some(usage.completion_tokens),
+            prompt_ms: timings.prompt_ms,
+            decode_ms: timings.decode_ms,
+            decode_tokens_per_second: timings.decode_tokens_per_second,
+        }),
+        Err(e) => job.fail(e.code.as_str()),
+    }
+}
+
+/// Integrity, load, generate, forward, for a request already admitted (`_slot`, held until the
+/// end). `Ok((usage, outcome))` once the stream is finished; `Err` before anything was streamed
+/// (the caller sends it as the `Error` frame). `job` follows along: admitted, loaded, each piece,
+/// and the end (`done`, or the outcome as its code).
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     manager: &ModelManager,
     opts: &ServeOptions,
@@ -460,8 +488,9 @@ async fn execute(
     req: RemoteRequest,
     send: &mut SendStream,
     recv: RecvStream,
+    job: &JobHandle,
+    _slot: Admitted<'_>,
 ) -> Result<(Usage, &'static str)> {
-    let _slot = admit(&opts.quotas, peer)?;
     if !common_core::paths::safe_name(&req.model_id) {
         return Err(CommonError::invalid(
             "model id may only contain letters, digits, '-', '_' and '.'",
@@ -479,7 +508,11 @@ async fn execute(
     let greq = sanitize(greq)?;
     // Held until the stream ends: the engine slot this generation occupies.
     let _engine = engine_permits(opts)?;
-    let model = manager.ensure_loaded(&req.model_id, opts.load.clone()).await?;
+    job.started();
+    let model = manager
+        .ensure_loaded_for(&req.model_id, opts.load.clone(), &format!("peer:{}", peer.to_hex()))
+        .await?;
+    job.loaded(&model.info().device_actual);
     let have = &model.info().model_sha256;
     if *have != req.model_sha256 {
         return Err(integrity(&req.model_id, &req.model_sha256, have));
@@ -493,6 +526,7 @@ async fn execute(
     let mut usage = Usage::default();
     let outcome = loop {
         let Some(ev) = stream.next().await else { break "ended" };
+        job_event(job, &ev);
         match ev {
             Ok(ev) => {
                 let done = matches!(ev, GenerateEvent::Done { .. });
@@ -553,7 +587,8 @@ async fn handle_stream(
     }
     let request_id = req.request_id.clone();
     let model_id = short(&req.model_id);
-    // Policy first: nothing is parsed or loaded for a peer this device does not serve (default deny).
+    // Policy first: nothing is parsed or loaded for a peer this device does not serve (default deny),
+    // and a refused request is a `peer_rejected` line, not a job.
     let allowed = policy
         .may_serve(&peer, WorkloadKind::RemoteInference)
         .into_result()
@@ -568,7 +603,25 @@ async fn handle_stream(
         );
         return refuse(&mut send, &e).await;
     }
-    let result = execute(&manager, &opts, &peer, req, &mut send, recv).await;
+    // Quota before the row: a request over the peer's quota is refused at once and audited below
+    // (`remote_request`, outcome `overloaded`), never a job. Refusals cost the peer nothing, so as
+    // rows they could push this computer's own history out of the 256 finished jobs kept.
+    let mut job = None;
+    let result = match admit(&opts.quotas, &peer) {
+        Err(e) => Err(e),
+        Ok(slot) => {
+            let j = job.insert(opts.jobs.start(
+                request_id.clone(),
+                "served_for_peer",
+                &model_id,
+                "local".into(),
+                format!("peer:{}", peer.to_hex()),
+                None,
+            ));
+            j.set_request_id(&request_id);
+            execute(&manager, &opts, &peer, req, &mut send, recv, j, slot).await
+        }
+    };
     let (usage, outcome) = match &result {
         Ok((usage, outcome)) => (usage.clone(), *outcome),
         Err(e) => {
@@ -578,6 +631,13 @@ async fn handle_stream(
             (Usage::default(), e.code.as_str())
         }
     };
+    // Done and the engine's errors already ended the row (`job_event`); this ends the rest:
+    // `ended` (no Done) reads as done, `client_gone` and failures before the stream by their code.
+    match (outcome, &job) {
+        (_, None) => {}
+        ("ended", Some(job)) => job.done(Finished::default()),
+        (other, Some(job)) => job.fail(other),
+    }
     tracing::info!(peer = %peer.short_label(), request_id, outcome, "remote request finished");
     record(
         &audit,

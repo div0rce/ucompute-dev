@@ -545,3 +545,173 @@ async fn openai_js_client_smoke() {
     assert!(stdout.contains("ALL CHECKS PASSED"));
     srv.stop().await;
 }
+
+/// E2 on the real engine: `/api/status` answers within its 1 s budget throughout a real load
+/// (hash check, engine start) and shows it as `loading` with the model id, then `ready`, loaded
+/// for this computer.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_state_shows_a_real_load_in_progress_on_fixture() {
+    let Some(srv) = fixture_server(ApiConfig::default()).await else {
+        return;
+    };
+    let c = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let load = tokio::spawn({
+        let url = srv.url(&format!("/api/models/{MODEL_ID}/load"));
+        async move { client().post(url).json(&json!({})).send().await.unwrap().status() }
+    });
+    let mut loading = None;
+    while !load.is_finished() {
+        let v: Value = c
+            .get(srv.url("/api/status"))
+            .send()
+            .await
+            .expect("status within 1 s")
+            .json()
+            .await
+            .unwrap();
+        if v["engine"]["state"] == "loading" {
+            loading = Some(v);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(load.await.unwrap(), 200);
+    let loading = loading.expect("a status poll during the load saw it");
+    assert_eq!(loading["engine"]["loading_model_id"], MODEL_ID, "{loading}");
+    assert!(loading["engine"]["loading_for_ms"].is_u64(), "{loading}");
+    let v: Value = c
+        .get(srv.url("/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        v["engine"],
+        json!({"state": "ready", "loading_model_id": null, "loading_for_ms": null})
+    );
+    assert_eq!(
+        (v["loaded"]["model_id"].as_str(), v["loaded"]["loaded_for"].as_str()),
+        (Some(MODEL_ID), Some("local"))
+    );
+    assert_eq!(v["loaded"]["in_flight"], 0);
+    assert!(
+        v["loaded"]["loaded_at_utc"].is_string() && !v["loaded"]["device_actual"].as_str().unwrap().is_empty(),
+        "{v}"
+    );
+    srv.stop().await;
+}
+
+/// E3 on the real engine: a streaming chat is one active row (running, this computer) whose
+/// `completion_tokens` rises while it streams; once done it is in `recent` with the engine's
+/// usage, timings and device, and the registry never holds the prompt or the reply.
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_list_a_real_streaming_chat_with_live_tokens_on_fixture() {
+    let Some(srv) = fixture_server(ApiConfig::default()).await else {
+        return;
+    };
+    let r = client()
+        .post(srv.url(&format!("/api/models/{MODEL_ID}/load")))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let canary = "ZEBRA_CANARY_REAL_9182";
+    let poller = tokio::spawn({
+        let url = srv.url("/api/jobs");
+        async move {
+            let mut seen: Vec<(String, String, u64)> = vec![];
+            let t0 = Instant::now();
+            loop {
+                let v: Value = client().get(&url).send().await.unwrap().json().await.unwrap();
+                let mine = |list: &str| {
+                    v[list]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|j| j["client_ref"] == "real-ref")
+                        .cloned()
+                };
+                if let Some(j) = mine("active") {
+                    let n = j["completion_tokens"].as_u64().unwrap_or(0);
+                    seen.push((
+                        j["state"].as_str().unwrap().into(),
+                        j["target"].as_str().unwrap().into(),
+                        n,
+                    ));
+                }
+                if let Some(done) = mine("recent") {
+                    return (seen, done, v.to_string());
+                }
+                assert!(
+                    t0.elapsed() < Duration::from_secs(30),
+                    "the chat never finished: {seen:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    });
+    let body = json!({"model": MODEL_ID, "messages": [{"role": "user", "content": format!("{canary} Tell me a story.")}], "max_tokens": 100, "temperature": 0, "stream": true, "stream_options": {"include_usage": true}});
+    let r = client()
+        .post(srv.url("/v1/chat/completions"))
+        .header("x-common-client-ref", "real-ref")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let chunks: Vec<Value> = sse_data(&r.text().await.unwrap())
+        .iter()
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    let usage = chunks
+        .iter()
+        .find_map(|v| v.get("usage").cloned())
+        .expect("usage chunk");
+    let reply: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    let (seen, done, jobs_text) = poller.await.unwrap();
+
+    let running: Vec<u64> = seen
+        .iter()
+        .filter(|(state, target, _)| state == "running" && target == "local")
+        .map(|(_, _, n)| *n)
+        .collect();
+    assert!(
+        running.windows(2).all(|w| w[0] <= w[1]),
+        "the live count never goes back: {seen:?}"
+    );
+    let distinct: std::collections::BTreeSet<u64> = running.iter().copied().collect();
+    assert!(
+        distinct.len() >= 2,
+        "completion_tokens rose across polls while running: {seen:?}"
+    );
+    eprintln!("live completion_tokens seen while streaming: {distinct:?}");
+
+    assert_eq!(
+        (done["state"].as_str(), done["kind"].as_str()),
+        (Some("done"), Some("chat")),
+        "{done}"
+    );
+    assert_eq!(done["completion_tokens"], usage["completion_tokens"], "{done}");
+    assert_eq!(done["prompt_tokens"], usage["prompt_tokens"], "{done}");
+    assert_eq!(done["id"], chunks[0]["id"], "the job id is the response id");
+    assert!(
+        done["ttft_ms"].is_u64() && done["decode_tokens_per_second"].as_f64().unwrap() > 0.0,
+        "{done}"
+    );
+    assert!(!done["device_actual"].as_str().unwrap().is_empty(), "{done}");
+    assert!(reply.len() > 20, "{reply}");
+    assert!(
+        !jobs_text.contains(canary) && !jobs_text.contains("Tell me a story") && !jobs_text.contains(&reply[..20]),
+        "{jobs_text}"
+    );
+    srv.stop().await;
+}

@@ -15,6 +15,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use common_core::{CommonError, ErrorCode, Result};
 use common_identity::PeerId;
+use common_observability::jobs::{Finished, JobHandle};
 use common_policy::{ExecutionTarget, PrivacyMode, WorkloadKind};
 use common_runtime::manager::LoadOptions;
 use common_runtime::{ChatMessage, GenerateEvent, GenerateRequest, GenerateStream, PromptInput, Timings, Usage};
@@ -512,6 +513,10 @@ enum Input {
     Chat(Vec<ChatMessage>),
 }
 
+/// A generation under way: the stream, its cancel token, and the admission permit of a local run.
+type Started = (GenerateStream, CancellationToken, Option<OwnedSemaphorePermit>);
+
+#[allow(clippy::too_many_arguments)]
 async fn run(
     st: Arc<AppState>,
     fmt: Format,
@@ -520,6 +525,7 @@ async fn run(
     sampling: &Sampling,
     tools: Option<Value>,
     target: Target,
+    client_ref: Option<String>,
 ) -> std::result::Result<Response, ApiError> {
     // I-05: the routing decision comes first, before admission, any load or any network activity.
     // Local is always allowed; a peer needs trusted_group privacy, networking on and a pinned,
@@ -534,11 +540,49 @@ async fn run(
         .into_result()?;
     // Untrusted schema is checked before admission: a grammar bomb never takes a slot or a load.
     json_schema_of(sampling.response_format.as_ref())?;
-    if let Target::Peer(id) = target {
-        return run_remote(st, fmt, model_id, input, sampling, tools, id, privacy).await;
+    // Listed from here on (E3), so a request waiting for a slot or a load shows with its client_ref.
+    let kind = match fmt.kind {
+        Kind::Chat => "chat",
+        Kind::Text => "completion",
+    };
+    let job = st.jobs.start(
+        fmt.id.clone(),
+        kind,
+        model_id,
+        target.label(),
+        "local".into(),
+        client_ref,
+    );
+    let started = match target {
+        Target::Peer(id) => start_remote(&st, model_id, input, sampling, tools, id, privacy, &job).await,
+        Target::Local => start_local(&st, model_id, input, sampling, tools, &job).await,
+    };
+    let (gen, cancel, permit) = started.inspect_err(|e| job.fail(e.error.code.as_str()))?;
+    let gen = crate::jobs::track(gen, job);
+    if sampling.stream {
+        return Ok(sse_response(st, fmt, gen, cancel, permit));
     }
-    let permit = admit(&st).await?;
+    let collected = collect(gen).await?;
+    if permit.is_some() {
+        st.metrics.record_done(&collected.usage, &collected.timings);
+    }
+    drop(permit);
+    Ok(axum::Json(fmt.final_json(&collected)).into_response())
+}
+
+/// Admission, the model, then the generation on this device.
+async fn start_local(
+    st: &Arc<AppState>,
+    model_id: &str,
+    input: Input,
+    sampling: &Sampling,
+    tools: Option<Value>,
+    job: &JobHandle,
+) -> std::result::Result<Started, ApiError> {
+    let permit = admit(st).await?;
+    job.started();
     let model = st.manager.ensure_loaded(model_id, st.load_options()).await?;
+    job.loaded(&model.info().device_actual);
     let input = match input {
         Input::Raw(p) => PromptInput::Raw(p),
         Input::Chat(msgs) => {
@@ -554,29 +598,23 @@ async fn run(
     // Child of the server's shutdown token: Ctrl-C ends this generation too (see `serve_on`).
     let cancel = st.shutdown.child_token();
     let gen = model.generate(req, cancel.clone()).await?;
-    if sampling.stream {
-        return Ok(sse_response(st, fmt, gen, cancel, Some(permit)));
-    }
-    let collected = collect(gen).await?;
-    st.metrics.record_done(&collected.usage, &collected.timings);
-    drop(permit);
-    Ok(axum::Json(fmt.final_json(&collected)).into_response())
+    Ok((gen, cancel, Some(permit)))
 }
 
 /// Mode B: the whole request on `peer` over the authenticated transport, streamed back exactly
 /// like a local run. Called only after `evaluate` allowed it; `generate_remote` re-checks the
 /// privacy string before opening a stream. The prompt travels inside TLS only and is never logged.
 #[allow(clippy::too_many_arguments)]
-async fn run_remote(
-    st: Arc<AppState>,
-    fmt: Format,
+async fn start_remote(
+    st: &Arc<AppState>,
     model_id: &str,
     input: Input,
     sampling: &Sampling,
     tools: Option<Value>,
     peer: PeerId,
     privacy: PrivacyMode,
-) -> std::result::Result<Response, ApiError> {
+    job: &JobHandle,
+) -> std::result::Result<Started, ApiError> {
     if !common_core::paths::safe_name(model_id) {
         return Err(CommonError::invalid("model id may only contain letters, digits, '-', '_' and '.'").into());
     }
@@ -601,18 +639,22 @@ async fn run_remote(
         .unwrap_or("local_only")
         .to_string();
     // Audited here before the request frame leaves, and again with the outcome (F-06-10).
-    let gen =
-        crate::mesh::generate_remote_audited(st.audit.clone(), conn, model_id, &sha, req, &privacy, cancel.clone())
-            .await?;
+    let (request_id, gen) = crate::mesh::generate_remote_audited_with_id(
+        st.audit.clone(),
+        conn,
+        model_id,
+        &sha,
+        req,
+        &privacy,
+        cancel.clone(),
+    )
+    .await?;
+    job.sent(&request_id);
     st.metrics
         .remote_requests
         .with_label_values(&[&peer.short_label()])
         .inc();
-    if sampling.stream {
-        return Ok(sse_response(st, fmt, gen, cancel, None));
-    }
-    let collected = collect(gen).await?;
-    Ok(axum::Json(fmt.final_json(&collected)).into_response())
+    Ok((gen, cancel, None))
 }
 
 pub async fn chat(
@@ -639,6 +681,7 @@ pub async fn chat(
         &req.sampling,
         req.tools,
         target,
+        crate::jobs::client_ref(&headers),
     )
     .await
 }
@@ -656,7 +699,18 @@ pub async fn completions(
         _ => return Err(CommonError::invalid("prompt must be a string or a single-element array of strings").into()),
     };
     let fmt = Format::new(Kind::Text, &model_id, req.sampling.include_usage(), &target);
-    run(st, fmt, &model_id, Input::Raw(prompt), &req.sampling, None, target).await
+    let client_ref = crate::jobs::client_ref(&headers);
+    run(
+        st,
+        fmt,
+        &model_id,
+        Input::Raw(prompt),
+        &req.sampling,
+        None,
+        target,
+        client_ref,
+    )
+    .await
 }
 
 pub async fn embeddings(
@@ -678,20 +732,44 @@ pub async fn embeddings(
         Some("base64") => true,
         Some(other) => return Err(CommonError::invalid(format!("unsupported encoding_format {other:?}")).into()),
     };
-    let _permit = admit(&st).await?;
+    let id = format!("embd-{}", uuid::Uuid::new_v4());
+    let job = st
+        .jobs
+        .start(id, "embeddings", &model_id, "local".into(), "local".into(), None);
+    let r = embed(&st, &model_id, &inputs, base64, &job).await;
+    match &r {
+        Ok(v) => job.done(Finished {
+            prompt_tokens: v["usage"]["prompt_tokens"].as_u64().map(|n| n as u32),
+            ..Default::default()
+        }),
+        Err(e) => job.fail(e.error.code.as_str()),
+    }
+    r
+}
+
+async fn embed(
+    st: &Arc<AppState>,
+    model_id: &str,
+    inputs: &[String],
+    base64: bool,
+    job: &JobHandle,
+) -> std::result::Result<axum::Json<Value>, ApiError> {
+    let _permit = admit(st).await?;
+    job.started();
     let model = st
         .manager
         .ensure_loaded(
-            &model_id,
+            model_id,
             LoadOptions {
                 embeddings: true,
                 ..st.load_options()
             },
         )
         .await?;
-    let vectors = model.embed(&inputs).await?;
+    job.loaded(&model.info().device_actual);
+    let vectors = model.embed(inputs).await?;
     let mut prompt_tokens = 0u32;
-    for s in &inputs {
+    for s in inputs {
         prompt_tokens += model.tokenize(s).await?.len() as u32;
     }
     st.metrics.prompt_tokens.inc_by(u64::from(prompt_tokens));
@@ -741,7 +819,7 @@ fn model_object(id: &str, downloaded: bool, license: &str, bytes: u64, redistrib
 /// Every store manifest plus catalog entries not downloaded yet, in the OpenAI list shape with a
 /// `common` extension object.
 pub async fn list_models(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let loaded = st.manager.status().await.map(|i| i.model_id);
+    let loaded = st.manager.snapshot().loaded.map(|v| v.info.model_id);
     let manifests = st.store.list()?;
     let mut data: Vec<Value> = manifests
         .iter()
@@ -782,7 +860,7 @@ pub async fn get_model(
     if !common_core::paths::safe_name(&id) {
         return Err(CommonError::invalid("model id may only contain letters, digits, '-', '_' and '.'").into());
     }
-    let loaded = st.manager.status().await.is_some_and(|i| i.model_id == id);
+    let loaded = st.manager.snapshot().loaded.is_some_and(|v| v.info.model_id == id);
     if let Some(m) = st.store.get(&id)? {
         return Ok(axum::Json(model_object(
             &m.id,

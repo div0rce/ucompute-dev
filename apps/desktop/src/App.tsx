@@ -1,130 +1,78 @@
-import { useEffect } from "react";
-import { api } from "./api/client";
+import { useEffect, useRef } from "react";
 import { startDaemonPolling } from "./daemon";
-import { href, useRoute, type Route } from "./router";
-import { daemon, privacy } from "./state/stores";
-import { Chat } from "./views/Chat";
-import { Diagnostics } from "./views/Diagnostics";
-import { Hardware } from "./views/Hardware";
-import { Home } from "./views/Home";
-import { Models } from "./views/Models";
-import { Peers } from "./views/Peers";
-import { Performance } from "./views/Performance";
-import { MODE_LABEL, Privacy } from "./views/Privacy";
-import { Settings } from "./views/Settings";
-import { Later } from "./components/Later";
+import { useLocation } from "./router";
+import { Announcer } from "./shell/announcer";
+import { startWatchers } from "./shell/attention";
+import { installCopyHandler } from "./shell/copy";
+import { installMenu } from "./shell/menu";
+import { Rail } from "./shell/Rail";
+import { SECTION_COMPONENTS } from "./shell/sections";
+import { installShortcuts } from "./shell/shortcuts";
+import { ShortcutsSheet } from "./shell/ShortcutsSheet";
+import { StatusBar } from "./shell/StatusBar";
+import { neededKeys, refreshMany } from "./state/live";
+import { ALWAYS } from "./state/poll";
+import { daemon } from "./state/stores";
+import { applyTheme, ui } from "./state/ui";
 
-const NAV: { group: string; items: { route: Route; label: string; later?: string }[] }[] = [
-  {
-    group: "Run",
-    items: [
-      { route: "home", label: "Home" },
-      { route: "models", label: "Models" },
-      { route: "chat", label: "Chat" },
-    ],
-  },
-  {
-    group: "This computer",
-    items: [
-      { route: "hardware", label: "Hardware" },
-      { route: "performance", label: "Performance" },
-      { route: "diagnostics", label: "Diagnostics" },
-    ],
-  },
-  {
-    group: "Devices and network",
-    items: [
-      { route: "peers", label: "Peers" },
-      { route: "cluster", label: "Cluster", later: "M3" },
-      { route: "jobs", label: "Jobs", later: "M3" },
-      { route: "contributions", label: "Contributions", later: "M7" },
-      { route: "privacy", label: "Privacy" },
-    ],
-  },
-  { group: "", items: [{ route: "settings", label: "Settings" }] },
-];
-
-function View({ route }: { route: Route }) {
-  switch (route) {
-    case "home":
-      return <Home />;
-    case "models":
-      return <Models />;
-    case "chat":
-      return <Chat />;
-    case "hardware":
-      return <Hardware />;
-    case "performance":
-      return <Performance />;
-    case "settings":
-      return <Settings />;
-    case "diagnostics":
-      return <Diagnostics />;
-    case "peers":
-      return <Peers />;
-    case "cluster":
-      return <Later title="Cluster" milestone="milestone M3" what="See paired devices as one pool and run models larger than any single device." />;
-    case "jobs":
-      return <Later title="Jobs" milestone="milestone M3" what="Watch requests move through the pool: where each one runs, how long it takes, what it cost." />;
-    case "contributions":
-      return <Later title="Contributions" milestone="milestone M7" what="Lend spare compute to others on your terms, with caps for CPU, GPU, battery and hours." />;
-    case "privacy":
-      return <Privacy />;
-  }
-}
-
+/**
+ * The shell: rail, the current section, status bar (plan §1.1). `poll={false}` (tests) skips daemon discovery and the
+ * poller; the always-on stores are still read once whenever the service becomes reachable.
+ */
 export default function App({ poll = true }: { poll?: boolean }) {
-  const route = useRoute();
-  const d = daemon.use();
-  const p = privacy.use();
+  const { section } = useLocation();
+  const reachable = daemon.use().reachable;
+  const theme = ui.use().theme;
+  const main = useRef<HTMLElement>(null);
 
-  // The mode in the header must be the daemon's, never a cached guess: fetch it whenever the service comes back.
+  // What the status bar and rail show must be the daemon's, never a cached guess: read it whenever the service is back,
+  // with whatever the mounted section needs (it fetched nothing before the service's address was known).
   useEffect(() => {
-    if (!d.reachable) return;
-    api.privacy().then(privacy.set, () => undefined);
-  }, [d.reachable]);
+    if (reachable) void refreshMany([...new Set([...ALWAYS, ...neededKeys()])]);
+  }, [reachable]);
 
   useEffect(() => {
     if (!poll) return;
     let stop: (() => void) | undefined;
-    startDaemonPolling().then((s) => (stop = s));
-    return () => stop?.();
+    let gone = false;
+    startDaemonPolling().then((s) => (gone ? s() : (stop = s)));
+    return () => {
+      gone = true;
+      stop?.();
+    };
   }, [poll]);
 
+  useEffect(() => {
+    const offs = [installShortcuts(), installCopyHandler(), startWatchers()];
+    void installMenu();
+    return () => offs.forEach((off) => off());
+  }, []);
+
+  useEffect(() => {
+    void applyTheme(theme);
+  }, [theme]);
+
+  const Section = SECTION_COMPONENTS[section];
   return (
-    <div className="app">
-      <a className="skip" href="#main">
+    <div className="shell">
+      <a
+        className="skip"
+        href="#main"
+        onClick={(e) => {
+          // The hash is the router's: focus the main area instead of navigating.
+          e.preventDefault();
+          main.current?.focus();
+        }}
+      >
         Skip to content
       </a>
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true" />
-          Common
-        </div>
-        <a className={`mode-pill${p && p.mode !== "local_only" ? " away" : ""}`} href={href("privacy")} aria-label={`Privacy mode: ${p ? MODE_LABEL[p.mode] : "unknown"}`}>
-          {p ? MODE_LABEL[p.mode] : "Privacy mode unknown"}
-        </a>
-        <nav className="nav" aria-label="Main">
-          {NAV.map((g) => (
-            <div key={g.group || "settings"}>
-              {g.group && <div className="nav-group">{g.group}</div>}
-              {g.items.map((it) => (
-                <a key={it.route} href={href(it.route)} aria-current={route === it.route ? "page" : undefined}>
-                  {it.label}
-                  {it.later && <span className="later">{it.later}</span>}
-                </a>
-              ))}
-            </div>
-          ))}
-        </nav>
-        <div className="sidebar-foot">
-          <span className={`dot ${d.reachable ? "ok" : d.reachable === false ? "bad" : ""}`} aria-hidden="true" />
-          {d.reachable ? `Service running ${d.version ?? ""}` : d.reachable === false ? "Service not running" : "Connecting"}
-        </div>
-      </aside>
-      <main id="main" tabIndex={-1}>
-        <View route={route} />
+      <Rail current={section} />
+      <main id="main" ref={main} tabIndex={-1} className="shell-main">
+        <Section />
       </main>
+      <StatusBar />
+      <Announcer />
+      <ShortcutsSheet />
     </div>
   );
 }

@@ -7,8 +7,10 @@ use common_core::{CommonError, ErrorCode, Paths, Result, Timeouts};
 use common_hardware::HardwareReport;
 use common_models::FitVerdict;
 use futures_util::StreamExt;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -19,13 +21,61 @@ pub struct ModelManager {
     pub hardware: HardwareReport,
     /// ponytail: one loaded model at a time (8 GB dev machine). Upgrade: LRU map keyed by id.
     pub loaded: Mutex<Option<Slot>>,
+    /// What status endpoints show without waiting on `loaded`, which a load holds for its whole
+    /// hash check and engine start ([`ModelManager::snapshot`]).
+    view: std::sync::Mutex<EngineView>,
 }
 
-/// What is loaded and the options it was loaded with (needed to judge "compatible opts").
+/// What is loaded, the options it was loaded with (needed to judge "compatible opts"), and who
+/// caused the load and when.
 pub struct Slot {
     pub model_id: String,
     pub opts: LoadOptions,
     pub model: Arc<dyn LoadedModel>,
+    /// `"local"`, or `"peer:<hex>"` when a paired device's request loaded it.
+    pub loaded_for: String,
+    pub loaded_at_utc: String,
+}
+
+/// The engine as status endpoints show it ([`ModelManager::snapshot`]).
+#[derive(Debug, Clone, Default)]
+pub struct EngineView {
+    /// The loaded model as of the last moment the slot was free.
+    pub loaded: Option<LoadedView>,
+    /// The model id a load in progress is for, and when it started.
+    pub loading: Option<(String, Instant)>,
+}
+
+/// `LoadedModelInfo` plus what only the manager knows.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadedView {
+    #[serde(flatten)]
+    pub info: LoadedModelInfo,
+    /// Streams and calls using the model.
+    pub in_flight: usize,
+    pub loaded_for: String,
+    pub loaded_at_utc: String,
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Marks a load in progress in the view until dropped, so a cancelled load (the caller's future
+/// dropped) never leaves "loading" behind.
+struct LoadingMark<'a>(&'a std::sync::Mutex<EngineView>);
+
+impl<'a> LoadingMark<'a> {
+    fn new(view: &'a std::sync::Mutex<EngineView>, model_id: &str) -> Self {
+        lock(view).loading = Some((model_id.to_string(), Instant::now()));
+        Self(view)
+    }
+}
+
+impl Drop for LoadingMark<'_> {
+    fn drop(&mut self) {
+        lock(self.0).loading = None;
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,7 +100,20 @@ impl ModelManager {
             backend,
             hardware,
             loaded: Mutex::new(None),
+            view: std::sync::Mutex::new(EngineView::default()),
         }
+    }
+
+    /// The engine now, without waiting: the slot when it is free (it is the truth), else the view
+    /// recorded the last time it was, plus any load in progress. Never blocks on a load.
+    // ponytail: while a load or a request's brief check holds the slot, `in_flight` is the count
+    // last seen with the slot free.
+    pub fn snapshot(&self) -> EngineView {
+        let mut v = lock(&self.view);
+        if let Ok(slot) = self.loaded.try_lock() {
+            v.loaded = slot.as_ref().map(view_of);
+        }
+        v.clone()
     }
 
     /// Return the loaded model for `model_id`, loading it first if needed. Errors:
@@ -59,6 +122,17 @@ impl ModelManager {
     /// reason), ContextTooLong, BackendFailed, Overloaded (the loaded model is still in use and
     /// would have to be replaced).
     pub async fn ensure_loaded(&self, model_id: &str, opts: LoadOptions) -> Result<Arc<dyn LoadedModel>> {
+        self.ensure_loaded_for(model_id, opts, "local").await
+    }
+
+    /// [`ModelManager::ensure_loaded`], recording `loaded_for` (`"local"` or `"peer:<hex>"`) when
+    /// this call is the one that loads.
+    pub async fn ensure_loaded_for(
+        &self,
+        model_id: &str,
+        opts: LoadOptions,
+        loaded_for: &str,
+    ) -> Result<Arc<dyn LoadedModel>> {
         if !common_core::paths::safe_name(model_id) {
             return Err(CommonError::invalid(
                 "model id may only contain letters, digits, '-', '_' and '.'",
@@ -74,6 +148,7 @@ impl ModelManager {
             // ensure_loaded and generate) or a live stream/call never has its engine killed.
             refuse_if_busy(s, Arc::strong_count(&s.model) > 1)?;
         }
+        let _loading = LoadingMark::new(&self.view, model_id);
         let (path, sha256) = self.resolve(model_id)?;
         // F-05-01: the bytes handed to the engine are the bytes the manifest promised. Hashing a
         // 1 GB blob takes ~1 s on an M2, well under the engine load time, off the async threads.
@@ -84,14 +159,20 @@ impl ModelManager {
             .map_err(|e| CommonError::internal(format!("hash task failed: {e}")))??;
         let (req, context_note) = self.plan(model_id, path, sha256, &opts)?;
         if let Some(prev) = slot.take() {
+            lock(&self.view).loaded = None;
             prev.model.unload().await?;
         }
         let model: Arc<dyn LoadedModel> = Arc::new(Managed::new(self.backend.load(req).await?, context_note));
-        *slot = Some(Slot {
+        let s = Slot {
             model_id: model_id.into(),
             opts,
             model: model.clone(),
-        });
+            loaded_for: loaded_for.into(),
+            loaded_at_utc: common_artifacts::store::utc_now(),
+        };
+        // Before `_loading` drops: the view never shows idle between the load and its result.
+        lock(&self.view).loaded = Some(view_of(&s));
+        *slot = Some(s);
         Ok(model)
     }
 
@@ -103,6 +184,9 @@ impl ModelManager {
             refuse_if_busy(s, false)?;
         }
         if let Some(prev) = slot.take() {
+            // As the swap path does: a load that takes the slot before any snapshot saw it free must
+            // not report this model as loaded.
+            lock(&self.view).loaded = None;
             prev.model.unload().await?;
         }
         Ok(())
@@ -186,6 +270,15 @@ impl ModelManager {
         } else {
             DevicePreference::Cpu
         }
+    }
+}
+
+fn view_of(s: &Slot) -> LoadedView {
+    LoadedView {
+        info: s.model.info().clone(),
+        in_flight: s.model.in_flight(),
+        loaded_for: s.loaded_for.clone(),
+        loaded_at_utc: s.loaded_at_utc.clone(),
     }
 }
 
@@ -484,16 +577,94 @@ mod tests {
         ))
     }
 
+    fn slot(id: &str, model: Arc<dyn LoadedModel>) -> Slot {
+        Slot {
+            model_id: id.into(),
+            opts: LoadOptions::default(),
+            model,
+            loaded_for: "local".into(),
+            loaded_at_utc: "2026-10-22T00:00:00Z".into(),
+        }
+    }
+
+    /// E2: status reads never wait on the slot. A held slot (a load, a request's check) leaves the
+    /// last view; a load in progress is marked and the mark goes when the load ends however it ends.
+    #[tokio::test]
+    async fn snapshot_never_waits_and_marks_a_load_in_progress() {
+        let m = manager(HardwareReport::default());
+        let e = m.snapshot();
+        assert!(e.loaded.is_none() && e.loading.is_none());
+        *m.loaded.lock().await = Some(Slot {
+            loaded_for: "peer:ab".into(),
+            ..slot("a", managed(None))
+        });
+        let model = m.ensure_loaded("a", LoadOptions::default()).await.unwrap();
+        let stream = model
+            .generate(GenerateRequest::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        let v = m.snapshot().loaded.unwrap();
+        assert_eq!(
+            (v.info.model_id.as_str(), v.loaded_for.as_str(), v.in_flight),
+            ("a", "peer:ab", 1)
+        );
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["model_id"], "a", "info fields are flattened: {json}");
+        assert_eq!(json["loaded_for"], "peer:ab");
+
+        let held = m.loaded.lock().await;
+        {
+            let _mark = LoadingMark::new(&m.view, "b");
+            let e = m.snapshot();
+            assert_eq!(e.loading.as_ref().map(|(id, _)| id.as_str()), Some("b"));
+            assert_eq!(
+                e.loaded.unwrap().info.model_id,
+                "a",
+                "the last view while the slot is held"
+            );
+        }
+        assert!(m.snapshot().loading.is_none(), "the mark goes with the load");
+        drop(held);
+
+        // A load that fails clears its mark too.
+        drop(stream);
+        drop(model);
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("tiny.gguf");
+        std::fs::write(&f, b"GGUF not really a model").unwrap();
+        m.store.import(&f, Some("tiny"), None).unwrap();
+        let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::ModelFileInvalid, "{e}");
+        let e = m.snapshot();
+        assert!(e.loading.is_none());
+        assert_eq!(
+            e.loaded.unwrap().info.model_id,
+            "a",
+            "a swap that fails before loading keeps the old model"
+        );
+    }
+
+    /// An unload empties the view at once: a load that holds the slot before any snapshot saw it
+    /// free never reports the unloaded model as loaded.
+    #[tokio::test]
+    async fn unload_clears_the_view_before_the_next_load_holds_the_slot() {
+        let m = manager(HardwareReport::default());
+        *m.loaded.lock().await = Some(slot("a", managed(None)));
+        assert_eq!(m.snapshot().loaded.unwrap().info.model_id, "a");
+        m.unload().await.unwrap();
+        let _next_load = m.loaded.lock().await;
+        assert!(
+            m.snapshot().loaded.is_none(),
+            "the slot is held: the view is all a status read sees"
+        );
+    }
+
     /// F-08-08 / F-01-08: the planner's note reaches `info()`, and a model with work in flight is
     /// neither replaced nor unloaded.
     #[tokio::test]
     async fn busy_model_is_never_replaced_or_unloaded() {
         let m = manager(HardwareReport::default());
-        *m.loaded.lock().await = Some(Slot {
-            model_id: "a".into(),
-            opts: LoadOptions::default(),
-            model: managed(Some("capped to 128")),
-        });
+        *m.loaded.lock().await = Some(slot("a", managed(Some("capped to 128"))));
         assert_eq!(m.status().await.unwrap().context_note.as_deref(), Some("capped to 128"));
         let model = m.ensure_loaded("a", LoadOptions::default()).await.unwrap();
         assert_eq!(model.in_flight(), 0);
@@ -543,11 +714,7 @@ mod tests {
             "an explicit unload ignores a merely held handle"
         );
 
-        *m.loaded.lock().await = Some(Slot {
-            model_id: "a".into(),
-            opts: LoadOptions::default(),
-            model: managed(None),
-        });
+        *m.loaded.lock().await = Some(slot("a", managed(None)));
         assert_eq!(
             m.ensure_loaded("b", LoadOptions::default()).await.err().unwrap().code,
             ErrorCode::ModelNotFound,

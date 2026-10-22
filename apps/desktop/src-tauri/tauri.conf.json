@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Common",
+        "title": "UCompute",
         "width": 1100,
         "height": 720,
         "minWidth": 720,

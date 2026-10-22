@@ -7,7 +7,7 @@ use common_api::{serve_on, ApiConfig, AppState};
 use common_artifacts::Store;
 use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_hardware::HardwareReport;
-use common_runtime::manager::{ModelManager, Slot};
+use common_runtime::manager::{LoadOptions, ModelManager, Slot};
 use common_runtime::*;
 use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
@@ -115,11 +115,18 @@ impl Server {
 /// Put a model straight into the manager's single slot (no store, no engine), loaded with the
 /// options the API pins (`AppState::load_options`), so a request finds it compatible.
 pub async fn seed_slot(state: &AppState, model_id: &str, model: Arc<dyn LoadedModel>) {
-    *state.manager.loaded.lock().await = Some(Slot {
+    *state.manager.loaded.lock().await = Some(slot(model_id, state.load_options(), model));
+}
+
+/// A slot as a local load fills it.
+pub fn slot(model_id: &str, opts: LoadOptions, model: Arc<dyn LoadedModel>) -> Slot {
+    Slot {
         model_id: model_id.into(),
-        opts: state.load_options(),
+        opts,
         model,
-    });
+        loaded_for: "local".into(),
+        loaded_at_utc: common_identity::utc_now(),
+    }
 }
 
 /// reqwest without proxies, so HTTP_PROXY in the environment cannot divert loopback traffic.

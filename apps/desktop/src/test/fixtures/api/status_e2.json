@@ -1,0 +1,26 @@
+{
+  "version": "0.1.0",
+  "uptime_seconds": 125,
+  "loaded": {
+    "model_id": "qwen2.5-1.5b-instruct-q4_k_m",
+    "model_sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+    "backend_name": "llama.cpp",
+    "backend_version": "b11609",
+    "device_requested": "auto",
+    "device_actual": "Metal0 (Apple M2)",
+    "offloaded_layers": 29,
+    "total_layers": 29,
+    "n_ctx": 4096,
+    "threads": 4,
+    "parallel_slots": 4,
+    "fallback_reason": null,
+    "context_note": null,
+    "load_ms": 1234.5,
+    "pid": 4242,
+    "in_flight": 1,
+    "loaded_for": "local",
+    "loaded_at_utc": "2026-10-22T10:32:00Z"
+  },
+  "queue": { "inflight": 1, "queued": 0, "max_concurrent": 4, "max_queue": 32 },
+  "engine": { "state": "ready", "loading_model_id": null, "loading_for_ms": null }
+}

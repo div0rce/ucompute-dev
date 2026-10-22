@@ -15,12 +15,20 @@ export const settings = createStore<Settings>({ device: "auto", n_ctx: null, dev
 if (settings.get().device_name === "This Mac") settings.set({ ...settings.get(), device_name: "" });
 
 export interface DaemonState {
-  reachable: boolean | null; // null = not checked yet
+  /** null = not checked yet; false only when `/api/status` failed and `GET /health` did not answer either. */
+  reachable: boolean | null;
   version: string | null;
+  /** Last good `/api/status`; kept while the service is busy, cleared when it is down. */
   status: Status | null;
   spawned: boolean;
+  /** false while the service is reachable but a status poll timed out (busy, likely loading). Absent = not known false. */
+  responding?: boolean;
+  /** When `status` was fetched (epoch ms). */
+  at?: number | null;
+  /** The last `/api/status` answered with an HTTP error: the service runs, but `status` is the last good one, not live. */
+  statusError?: MappedError | null;
 }
-export const daemon = createStore<DaemonState>({ reachable: null, version: null, status: null, spawned: false });
+export const daemon = createStore<DaemonState>({ reachable: null, version: null, status: null, spawned: false, responding: true, at: null });
 
 export interface StoredMessage {
   role: "user" | "assistant";
@@ -33,19 +41,15 @@ export interface StoredMessage {
   target?: Target;
   /** Display name of the device for a peer target, captured at send time. */
   ran_on?: string;
+  /** The `X-Common-Client-Ref` this app sent with the request (matches `Job.client_ref`). */
+  client_ref?: string;
+  /** The response id (`chatcmpl-…`), which is the E3 job id. */
+  job_id?: string;
+  /** Where a local reply ran (`device_actual`): the E3 row by client ref, else the loaded model at completion. */
+  device_actual?: string | null;
+  finish_reason?: string | null;
 }
 export const chatHistory = createStore<{ messages: StoredMessage[] }>({ messages: [] }, "common.chat");
-
-export interface Run {
-  at: number;
-  model: string;
-  completion_tokens: number | null;
-  ttft_ms: number | null;
-  decode_tps: number | null;
-  stopped: boolean;
-}
-/** Session-only; cleared when the app closes. */
-export const runs = createStore<Run[]>([]);
 
 export const lastError = createStore<MappedError | null>(null);
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, parseMetrics, sseData, UNREACHABLE } from "./client";
-import { apiError, installFakeDaemon, PEER, sse } from "../test/mocks";
+import { api, ApiError, parseMetrics, SLOW, sseData, UNREACHABLE } from "./client";
+import { apiError, hang, installFakeDaemon, JOBS, LOADED, NETWORK_ON, PEER, PEERS_E1, PEERS_E5, sse } from "../test/mocks";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -121,5 +121,99 @@ describe("api.pull", () => {
     await api.pull("stories15M-q4_0", (e) => seen.push(e.downloaded_bytes));
     expect(seen.length).toBe(4);
     expect(seen[3]).toBe(19077344);
+  });
+  it("an error event inside the stream rejects with its code; a stream that ends without done rejects too", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sse([{ downloaded_bytes: 1, total_bytes: 9, network_bytes: 1, resumed_from: 0, done: false }, { error: { message: "checksum mismatch", code: "download_failed", hint: null } }])));
+    const seen: number[] = [];
+    const err = await api.pull("x", (e) => seen.push(e.downloaded_bytes)).catch((e) => e);
+    expect([err instanceof ApiError, err.code, err.message]).toEqual([true, "download_failed", "checksum mismatch"]);
+    expect(seen).toEqual([1]);
+    vi.stubGlobal("fetch", vi.fn(async () => sse([{ downloaded_bytes: 1, total_bytes: 9, network_bytes: 1, resumed_from: 0, done: false }])));
+    expect((await api.pull("x", () => undefined).catch((e) => e)).code).toBe("download_failed");
+  });
+});
+
+describe("timeouts (busy service)", () => {
+  it("a read with timeoutMs that gets no answer throws slow, not unreachable", async () => {
+    const f = vi.fn((_: unknown, init?: RequestInit) => hang(init));
+    vi.stubGlobal("fetch", f);
+    const t0 = performance.now();
+    const err = await api.status({ timeoutMs: 50 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe(SLOW);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    // The request itself was aborted, so a blocked service gets no pile-up of open requests.
+    expect((f.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
+  });
+  it("actions carry no timeout", async () => {
+    const { fetchMock } = installFakeDaemon();
+    await api.disconnectPeer(PEER.id).catch(() => undefined);
+    await api.connectPeer(PEER.id).catch(() => undefined);
+    for (const [, init] of fetchMock.mock.calls) expect((init as RequestInit).signal ?? null).toBeNull();
+  });
+  it("a caller's abort still passes through as AbortError", async () => {
+    vi.stubGlobal("fetch", vi.fn((_: unknown, init?: RequestInit) => hang(init)));
+    const ac = new AbortController();
+    const p = api.pull("x", () => undefined, ac.signal).catch((e) => e);
+    ac.abort();
+    expect(((await p) as Error).name).toBe("AbortError");
+  });
+});
+
+describe("new routes and fields (E1–E5)", () => {
+  it("jobs: the registry, or unsupported on a service without the route", async () => {
+    const fake = installFakeDaemon({ jobs: JOBS });
+    expect(await api.jobs()).toEqual(JOBS);
+    fake.jobs = "unsupported";
+    expect(await api.jobs()).toBe("unsupported");
+  });
+  it("a jobs error other than 404 still throws", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => apiError("internal", "boom", 500)));
+    expect((await api.jobs().catch((e) => e)).code).toBe("internal");
+  });
+  it("peers carries revocations (empty when an older service omits them) and the E1/E5 fields", async () => {
+    installFakeDaemon({ peers: PEERS_E1.peers, revocations: PEERS_E1.revocations, network: NETWORK_ON });
+    const m = await api.peers();
+    expect(m.revocations).toEqual(PEERS_E1.revocations);
+    expect(m.peers[0].capabilities?.hardware?.cpu.logical_cores).toBe(10);
+    expect(m.peers[0].connection?.id).toBe(7);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ peers: [], discovered: [] }))));
+    expect((await api.peers()).revocations).toEqual([]);
+  });
+  it("disconnect posts to the E5 route and holds the device; connect releases it", async () => {
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [{ ...PEERS_E5.peers[0], connected: true, health: "connected", held: false }], answersAt: { [PEER.id]: "192.168.1.77:8193" } });
+    await api.disconnectPeer(PEER.id);
+    expect(fake.fetchMock.mock.calls.at(-1)![0]).toMatch(new RegExp(`/api/peers/${PEER.id}/disconnect$`));
+    expect(fake.peers[0]).toMatchObject({ connected: false, held: true });
+    await api.connectPeer(PEER.id);
+    expect(fake.peers[0]).toMatchObject({ connected: true, held: false });
+  });
+  it("disconnect on a service without E5 is a 404, never faked with DELETE", async () => {
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER] });
+    expect((await api.disconnectPeer(PEER.id).catch((e) => e)).status).toBe(404);
+    expect(fake.fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === "DELETE")).toBe(false);
+  });
+  it("audit passes n", async () => {
+    const { fetchMock } = installFakeDaemon();
+    await api.audit(1000);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/api\/audit\?n=1000$/);
+  });
+  it("ready reads a 503 answer instead of throwing", async () => {
+    const fake = installFakeDaemon();
+    fake.loading = { model_id: "m", since: Date.now() };
+    expect(await api.ready()).toEqual({ status: "not_ready", reason: "a model is loading" });
+  });
+  it("chat sends X-Common-Client-Ref only when given and captures the response id", async () => {
+    const fake = installFakeDaemon();
+    fake.loaded = LOADED;
+    const r1 = await api.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }, () => undefined, undefined, { clientRef: "ref-1" });
+    const r2 = await api.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }, () => undefined);
+    const [h1, h2] = fake.fetchMock.mock.calls.map(([, init]) => (init as RequestInit).headers as Record<string, string>);
+    expect(h1["X-Common-Client-Ref"]).toBe("ref-1");
+    expect(h2["X-Common-Client-Ref"]).toBeUndefined();
+    expect(r1.id).toMatch(/^chatcmpl-/);
+    expect(r2.id).not.toBe(r1.id);
+    // The fake registry recorded the ref on the job, as E3 does (recent rows newest first).
+    expect(fake.jobs !== "unsupported" && fake.jobs.recent.map((j) => j.client_ref)).toEqual([null, "ref-1"]);
   });
 });

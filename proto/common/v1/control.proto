@@ -2,6 +2,11 @@
 // The Rust structs in crates/common-network/src/proto.rs mirror this file by hand (no protoc at
 // build time); `proto::tests::control_proto_mirrors_proto_rs` fails when a message name or field
 // tag differs. One field per line: that test parses this file line by line.
+//
+// QUIC application close codes (wire-visible; crates/common-network/src/transport.rs CLOSE_*):
+// 0 ok, 0x5245 'RE' revoked, 0x5541 'UA' unauthorized, 0x5056 'PV' protocol, 0x4654 'FT' frame too
+// large, 0x4844 'HD' held: the closing device's user disconnected the peer and refuses it until they
+// connect it again (read as `peer_held`; builds without it read `peer_lost`).
 syntax = "proto3";
 package common.v1;
 

@@ -245,7 +245,8 @@ async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outco
 
 /// Mode B: the whole request runs on one paired device. Order (I-05): privacy, then the policy
 /// engine for this peer, then the model hash from the local store or catalog (the peer verifies
-/// integrity against it; nothing is downloaded), then a client-only endpoint on an ephemeral port.
+/// integrity against it; nothing is downloaded), then the running daemon's hold on that device
+/// (E5, `Mesh::held_by_daemon`), then a client-only endpoint on an ephemeral port.
 async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManifest, PathBuf, Outcome)> {
     let started = Instant::now();
     let mesh = Mesh::open()?;
@@ -264,6 +265,7 @@ async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManif
         )
         .into_result()?;
     let sha = model_sha256(&mesh.paths, &a.model)?;
+    let held = mesh.held_by_daemon(&rec.id).await?;
     let addr = mesh.peer_addr(&rec).await?;
     let node = mesh
         .node(
@@ -276,6 +278,10 @@ async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManif
             false,
         )
         .await?;
+    // E5: the daemon's hold, enforced by this Node's transport (`connect` refuses a held peer).
+    if held {
+        node.hold(&rec.id);
+    }
     let result = async {
         let conn = node.connect(addr, rec.id).await?;
         let engine = conn

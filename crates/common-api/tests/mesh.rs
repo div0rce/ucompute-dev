@@ -2511,3 +2511,512 @@ async fn shutdown_route_stops_serving_and_closes_the_peer_endpoint_single_host()
     a.stop().await;
     b.stop().await;
 }
+
+/// `id`'s entry in a `GET /api/peers` body.
+fn peer_entry(v: &Value, id: PeerId) -> Value {
+    v["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == id.to_hex())
+        .cloned()
+        .unwrap_or_else(|| panic!("{} not in {v}", id.short_label()))
+}
+
+/// `kind` audit events about `peer` in `srv`'s log.
+fn audit_about(srv: &Server, kind: &str, peer: PeerId) -> Vec<common_observability::AuditEvent> {
+    srv.state
+        .audit
+        .tail(1000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == kind && e.peer_id.as_deref() == Some(peer.to_hex().as_str()))
+        .collect()
+}
+
+async fn wait_connected(srv: &Server, id: PeerId, want: bool) {
+    wait_for("connection state", || async {
+        (peer_entry(&get(srv, "/api/peers").await, id)["connected"] == want).then_some(())
+    })
+    .await;
+}
+
+/// **SINGLE-HOST** E1 + E2 + E3: A (nothing downloaded) and B (real engine, fixture model), pinned
+/// to each other with no address, so only A's explicit connect links them. A sees what B signed at
+/// the handshake (hardware, engines, the fixture model resolved to its id) and the live connection
+/// (stable id, traffic); a paired device that never connected shows nulls, not stale values. One
+/// remote completion: B's engine is loaded for A, both devices list the request as a job with the
+/// same `request_id` (sender: target peer; server: served_for_peer), and neither holds any text.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_details_engine_origin_and_jobs_on_both_devices_single_host() {
+    let Some(home) = fixture_home() else {
+        return;
+    };
+    let _engine = ENGINE_TESTS.lock().await;
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Server::start(app(cfg(), da.path().to_path_buf(), HardwareReport::default())).await;
+    let b = Server::start(serving_app(&home, db.path(), serving_cfg())).await;
+    enable_network(&a, false).await;
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    let ghost = DeviceIdentity::generate().unwrap().id;
+    pin(&a, ghost, "Ghost", None);
+    put_group(&a, "home", &[idb], true, false).await;
+    put_group(&b, "home", &[ida], true, false).await;
+    let (status, _) = put(
+        &a,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    wait_connected(&b, ida, true).await;
+
+    let pb = peer_entry(&get(&a, "/api/peers").await, idb);
+    let caps = &pb["capabilities"];
+    assert!(caps["hardware"]["cpu"]["logical_cores"].as_u64().unwrap() > 0, "{caps}");
+    let probe = common_hardware::probe().unwrap();
+    assert_eq!(
+        caps["hardware"]["memory"]["total_bytes"], probe.memory.total_bytes,
+        "static fields as B probed them"
+    );
+    assert!(!caps["engines"].as_array().unwrap().is_empty(), "{caps}");
+    assert_eq!(caps["common_version"], common_core::VERSION);
+    assert!(
+        caps["issued_at_utc"].is_string() && caps["protocol_minor"].is_u64() && caps["free_memory_bytes"].is_u64(),
+        "{caps}"
+    );
+    assert!(
+        caps["models"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({ "sha256": MODEL_SHA, "id": MODEL_ID })),
+        "B caches the fixture: {caps}"
+    );
+    let conn = pb["connection"].clone();
+    assert_eq!(
+        (conn["direction"].as_str(), conn["remote_addr"].as_str()),
+        (Some("outbound"), Some(b_addr.as_str())),
+        "{conn}"
+    );
+    assert!(
+        conn["opened_at_utc"].is_string() && conn["rtt_ms"].is_number(),
+        "{conn}"
+    );
+    assert_eq!(pb["held"], false);
+    let again = peer_entry(&get(&a, "/api/peers").await, idb);
+    assert_eq!(
+        again["connection"]["id"], conn["id"],
+        "the same connection keeps its id"
+    );
+    let pa = peer_entry(&get(&b, "/api/peers").await, ida);
+    assert_eq!(pa["connection"]["direction"], "inbound", "B was dialled: {pa}");
+    assert_eq!(
+        pa["capabilities"]["models"],
+        json!([]),
+        "A has nothing downloaded: {pa}"
+    );
+    let g = peer_entry(&get(&a, "/api/peers").await, ghost);
+    assert_eq!(
+        (&g["connected"], &g["capabilities"], &g["connection"], &g["held"]),
+        (&json!(false), &Value::Null, &Value::Null, &json!(false)),
+        "{g}"
+    );
+
+    let r = client()
+        .post(a.url("/v1/completions"))
+        .header("x-common-client-ref", "remote-ref")
+        .json(&json!({ "model": MODEL_ID, "prompt": PROMPT, "max_tokens": 16, "temperature": 0, "target": format!("peer:{}", idb.to_hex()) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["usage"]["completion_tokens"], 16, "{v}");
+    let after = peer_entry(&get(&a, "/api/peers").await, idb)["connection"].clone();
+    assert_eq!(after["id"], conn["id"]);
+    for k in ["rx_bytes", "tx_bytes"] {
+        assert!(
+            after[k].as_u64().unwrap() > conn[k].as_u64().unwrap(),
+            "{k}: {conn} -> {after}"
+        );
+    }
+
+    let st = get(&b, "/api/status").await;
+    assert_eq!(st["engine"]["state"], "ready", "{st}");
+    assert_eq!(
+        st["loaded"]["loaded_for"],
+        format!("peer:{}", ida.to_hex()),
+        "B loaded the model for A: {st}"
+    );
+    assert_eq!(get(&a, "/api/status").await["loaded"], Value::Null, "A loaded nothing");
+
+    let ja = get(&a, "/api/jobs").await;
+    let sent = ja["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["client_ref"] == "remote-ref")
+        .cloned()
+        .unwrap_or_else(|| panic!("{ja}"));
+    assert_eq!(
+        (
+            sent["target"].clone(),
+            sent["origin"].as_str(),
+            sent["kind"].as_str(),
+            sent["state"].as_str()
+        ),
+        (
+            json!(format!("peer:{}", idb.to_hex())),
+            Some("local"),
+            Some("completion"),
+            Some("done")
+        ),
+        "{sent}"
+    );
+    assert_eq!(sent["completion_tokens"], 16);
+    assert!(
+        sent["device_actual"].is_null(),
+        "GPU/CPU of a remote run is not reported: {sent}"
+    );
+    let request_id = sent["request_id"].as_str().expect("request_id").to_string();
+    let jb = get(&b, "/api/jobs").await;
+    let served = jb["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "served_for_peer")
+        .cloned()
+        .unwrap_or_else(|| panic!("{jb}"));
+    assert_eq!(
+        (served["id"].as_str(), served["request_id"].as_str()),
+        (Some(request_id.as_str()), Some(request_id.as_str()))
+    );
+    assert_eq!(
+        (
+            served["origin"].clone(),
+            served["target"].as_str(),
+            served["state"].as_str()
+        ),
+        (json!(format!("peer:{}", ida.to_hex())), Some("local"), Some("done")),
+        "{served}"
+    );
+    assert_eq!(served["completion_tokens"], 16);
+    assert!(
+        served["load_ms"].is_u64() && !served["device_actual"].as_str().unwrap().is_empty(),
+        "{served}"
+    );
+    assert!(
+        audit_about(&b, "remote_request", ida)
+            .iter()
+            .any(|e| e.fields["request_id"] == request_id.as_str()),
+        "the job joins B's audit entry"
+    );
+    // What the app's Jobs and Activity read, on both devices: never the prompt or the reply.
+    for srv in [&a, &b] {
+        for path in ["/api/jobs", "/api/audit?n=1000", "/api/peers"] {
+            let text = client().get(srv.url(path)).send().await.unwrap().text().await.unwrap();
+            assert!(
+                !text.contains(PROMPT) && !text.contains("rabbit") && !text.contains("Benny"),
+                "{path}: {text}"
+            );
+        }
+    }
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST** E4: a connection this device did not close is audited `peer_lost` once (B's
+/// networking going off, for A); closes this device makes are not (B's own stop, A turning its
+/// networking off, A revoking B). Both are pinned with no address, so no sync loop redials.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_losses_this_device_did_not_cause_are_peer_lost_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    enable_network(&a, false).await;
+    let b_addr = listen_addr(&enable_network(&b, false).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    wait_connected(&b, ida, true).await;
+
+    let t0 = Instant::now();
+    let (status, _) = put(&b, "/api/network", json!({ "enabled": false })).await;
+    assert_eq!(status, 200);
+    wait_for("A audits the loss", || async {
+        (!audit_about(&a, "peer_lost", idb).is_empty()).then_some(())
+    })
+    .await;
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let lost = audit_about(&a, "peer_lost", idb);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(
+        (lost[0].fields["reason"].as_str(), lost[0].fields["addr"].as_str()),
+        (Some("closed_by_peer"), Some(b_addr.as_str()))
+    );
+    assert!(lost[0].fields["connected_s"].is_u64(), "{lost:?}");
+    assert!(
+        audit_about(&b, "peer_lost", ida).is_empty(),
+        "B closed it: not a loss for B"
+    );
+
+    // A turns its own networking off: a loss for B, not for A.
+    let b_addr = listen_addr(&enable_network(&b, false).await);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    wait_connected(&b, ida, true).await;
+    let (status, _) = put(&a, "/api/network", json!({ "enabled": false })).await;
+    assert_eq!(status, 200);
+    wait_for("B audits the loss", || async {
+        (!audit_about(&b, "peer_lost", ida).is_empty()).then_some(())
+    })
+    .await;
+
+    // A revokes B: `peer_disconnected` (revoked), still no `peer_lost` on A.
+    enable_network(&a, false).await;
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    wait_connected(&b, ida, true).await;
+    let (status, _) = post(&a, &format!("/api/peers/{}/revoke", idb.to_hex()), json!({})).await;
+    assert_eq!(status, 200);
+    let na = a.state.node().await.unwrap();
+    wait_for("A closed B", || async { na.connections().is_empty().then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        audit_about(&a, "peer_lost", idb).len(),
+        1,
+        "no loss recorded for closes A made"
+    );
+    assert!(audit_about(&a, "peer_disconnected", idb)
+        .iter()
+        .any(|e| e.fields["reason"] == "revoked"));
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST** E5: A disconnects B. A shows it held at once and refuses B both ways: B's
+/// dials are closed with `CLOSE_HELD` (B reads `peer_held`, never connected in between; A audits
+/// one `peer_rejected` reason `held` however often B tries), and A's own request to B is refused
+/// by the hold before anything is sent. Connect on A ends the hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnect_holds_a_device_both_ways_until_connect_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let a_addr = listen_addr(&enable_network(&a, true).await);
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    // A may send prompts to B, so what refuses A's request below is the hold, not the policy.
+    put_group(&a, "home", &[idb], true, false).await;
+    put_group(&b, "home", &[ida], true, false).await;
+    let (status, _) = put(
+        &a,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    wait_connected(&b, ida, true).await;
+    assert_eq!(peer_entry(&get(&a, "/api/peers").await, idb)["held"], false);
+    let b_connects_before = audit_about(&b, "peer_connected", ida).len();
+
+    let t0 = Instant::now();
+    let (status, rec) = post(&a, &format!("/api/peers/{}/disconnect", idb.short_label()), json!({})).await;
+    assert_eq!(
+        (status, rec["id"].as_str()),
+        (200, Some(idb.to_hex().as_str())),
+        "{rec}"
+    );
+    let pb = peer_entry(&get(&a, "/api/peers").await, idb);
+    assert_eq!((&pb["connected"], &pb["held"]), (&json!(false), &json!(true)), "{pb}");
+    assert!(t0.elapsed() < Duration::from_secs(1));
+    assert!(audit_about(&a, "peer_disconnected", idb)
+        .iter()
+        .any(|e| e.fields["reason"] == "by_user"));
+    wait_connected(&b, ida, false).await;
+
+    // B tries to come back (its sync loop has no address for A; these are its redials).
+    let watch = tokio::spawn({
+        let url = b.url("/api/peers");
+        async move {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(3) {
+                let v: Value = client().get(&url).send().await.unwrap().json().await.unwrap();
+                assert_eq!(
+                    peer_entry(&v, ida)["connected"],
+                    false,
+                    "B connected to a device that holds it: {v}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    });
+    for _ in 0..3 {
+        let (status, v) = connect_peer(&b, &ida.to_hex(), json!({ "addr": a_addr })).await;
+        assert_eq!((status, v["error"]["code"].as_str()), (403, Some("peer_held")), "{v}");
+    }
+    watch.await.unwrap();
+    let pa = peer_entry(&get(&b, "/api/peers").await, ida);
+    assert_eq!(pa["last_error"]["code"], "peer_held", "{pa}");
+    assert_eq!(
+        audit_about(&b, "peer_connected", ida).len(),
+        b_connects_before,
+        "B never got in"
+    );
+    let held: Vec<_> = audit_about(&a, "peer_rejected", idb)
+        .into_iter()
+        .filter(|e| e.fields["reason"] == "held")
+        .collect();
+    assert_eq!(held.len(), 1, "one line per hold: {held:?}");
+
+    // A's own request to B: refused by the hold, nothing sent.
+    let (status, v) = post(
+        &a,
+        "/v1/chat/completions",
+        chat_body(MODEL_ID, 4, json!({ "target": format!("peer:{}", idb.to_hex()) })),
+    )
+    .await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("policy_denied")),
+        "{v}"
+    );
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("disconnected by you"),
+        "{v}"
+    );
+    let na = a.state.node().await.unwrap();
+    assert!(na.connections().is_empty());
+    assert!(audit_about(&a, "remote_request", idb).is_empty(), "nothing left A");
+
+    // Connect ends the hold.
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    let pb = peer_entry(&get(&a, "/api/peers").await, idb);
+    assert_eq!((&pb["connected"], &pb["held"]), (&json!(true), &json!(false)), "{pb}");
+    wait_connected(&b, ida, true).await;
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST** E5: a hold belongs to the pairing it was set on. A disconnects B, removes it and
+/// pairs it again (pins it): the new pairing is not held, so Connect is not needed to undo a hold
+/// the user can no longer see, and A's sync loop and B's dials are admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn unpairing_ends_a_hold_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    enable_network(&a, true).await;
+    let b_addr = listen_addr(&enable_network(&b, true).await);
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    let (status, _) = post(&a, &format!("/api/peers/{}/disconnect", idb.to_hex()), json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(peer_entry(&get(&a, "/api/peers").await, idb)["held"], true);
+    let r = client()
+        .delete(a.url(&format!("/api/peers/{}", idb.to_hex())))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    pin(&a, idb, "B", None);
+    assert_eq!(peer_entry(&get(&a, "/api/peers").await, idb)["held"], false);
+    let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
+    assert_eq!(status, 200, "{v}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// The peer list never depends on the model store: an unreadable manifest only costs peer model
+/// ids (catalog or null), never `/api/peers`, which Devices, Chat and pairing all read.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_manifest_does_not_fail_the_peer_list() {
+    let (a, _da) = empty_server().await;
+    let dir = a.state.paths.model_manifests();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("broken.json"), b"{ not json").unwrap();
+    assert!(a.state.store.list().is_err(), "the store itself refuses it");
+    pin(&a, common_identity::DeviceIdentity::generate().unwrap().id, "B", None);
+    let v = get(&a, "/api/peers").await;
+    assert_eq!(v["peers"].as_array().unwrap().len(), 1, "{v}");
+    a.stop().await;
+}
+
+/// A request to a paired device stays `queued` (not started, no request id) while this device is
+/// still reaching it: it takes no slot or load here, so the desktop reads such a row (a `peer:`
+/// target) as "Connecting to the device", never "Waiting for a slot" or "Loading model".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_to_a_device_being_dialled_is_queued_single_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = cfg();
+    config.network.idle_timeout_ms = 1000;
+    let a = Server::start(app(config, dir.path().to_path_buf(), HardwareReport::default())).await;
+    // Nothing answers there: a handshake waits about three initial probe timeouts (~3 s).
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let x = DeviceIdentity::generate().unwrap().id;
+    pin(&a, x, "X", Some(silent.local_addr().unwrap().to_string()));
+    enable_network(&a, false).await;
+    let (status, v) = put(
+        &a,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    put_group(&a, "home", &[x], true, false).await;
+    let req = tokio::spawn(
+        client()
+            .post(a.url("/v1/chat/completions"))
+            .json(&chat_body(
+                MODEL_ID,
+                4,
+                json!({ "target": format!("peer:{}", x.to_hex()) }),
+            ))
+            .send(),
+    );
+    let job = wait_for("the request's row", || async {
+        get(&a, "/api/jobs").await["active"]
+            .as_array()
+            .unwrap()
+            .first()
+            .cloned()
+    })
+    .await;
+    assert_eq!(
+        (
+            job["state"].as_str(),
+            job["target"].clone(),
+            &job["started_at_utc"],
+            &job["request_id"]
+        ),
+        (
+            Some("queued"),
+            json!(format!("peer:{}", x.to_hex())),
+            &Value::Null,
+            &Value::Null
+        ),
+        "{job}"
+    );
+    let r = req.await.unwrap().unwrap();
+    assert_eq!(r.status(), 502, "nothing answered: peer_lost");
+    let recent = get(&a, "/api/jobs").await["recent"][0].clone();
+    assert_eq!(
+        (recent["state"].as_str(), recent["error_code"].as_str()),
+        (Some("error"), Some("peer_lost")),
+        "{recent}"
+    );
+    a.stop().await;
+}

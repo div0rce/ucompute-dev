@@ -72,8 +72,23 @@ fn after_close(reason: &ConnectionError) -> PeerHealth {
     }
 }
 
+/// Why a connection this device did not close went away, for the `peer_lost` audit line; `None`
+/// when this device closed it (networking off, shutdown, revoke, unpair, a hold: `LocallyClosed`).
+// ponytail: a local QUIC protocol-violation close (`TransportError`) and the other rare quinn
+// errors are not recorded; map them here if they ever show up in the field.
+fn lost_reason(reason: &ConnectionError) -> Option<&'static str> {
+    match reason {
+        ConnectionError::TimedOut => Some("timed_out"),
+        ConnectionError::Reset => Some("reset"),
+        ConnectionError::ApplicationClosed(_) | ConnectionError::ConnectionClosed(_) => Some("closed_by_peer"),
+        _ => None,
+    }
+}
+
 /// Samples `pc` every `every` until it closes; drives the node's tracker for its peer. Holds only a
-/// `Weak` node so it never keeps a dropped node alive.
+/// `Weak` node so it never keeps a dropped node alive. A loss this device did not cause, of the
+/// peer's last live connection, is audited `peer_lost` (`reason`, `addr`, `connected_s`); a retired
+/// duplicate's close is not a loss.
 pub(crate) async fn watch(node: Weak<Node>, pc: Arc<PeerConnection>, every: Duration) {
     let peer = pc.peer_id;
     let mut last = pc.conn.stats().udp_rx.datagrams;
@@ -100,6 +115,13 @@ pub(crate) async fn watch(node: Weak<Node>, pc: Arc<PeerConnection>, every: Dura
     // Another live connection to the same peer keeps it Connected.
     if node.connections().iter().any(|c| c.peer_id == peer) {
         return;
+    }
+    if let Some(why) = lost_reason(&reason).filter(|_| !pc.is_retired()) {
+        node.audit(
+            "peer_lost",
+            Some(&peer),
+            serde_json::json!({ "reason": why, "addr": pc.remote_addr.to_string(), "connected_s": pc.connected_s() }),
+        );
     }
     let state = after_close(&reason);
     node.update_health(&peer, |t| match state {
@@ -211,6 +233,22 @@ mod tests {
             reason: Default::default(),
         });
         assert_eq!(after_close(&revoked), PeerHealth::Disconnected);
+    }
+
+    #[test]
+    fn only_losses_this_device_did_not_cause_are_peer_lost() {
+        assert_eq!(lost_reason(&ConnectionError::TimedOut), Some("timed_out"));
+        assert_eq!(lost_reason(&ConnectionError::Reset), Some("reset"));
+        let held = ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+            error_code: quinn::VarInt::from_u32(crate::transport::CLOSE_HELD),
+            reason: Default::default(),
+        });
+        assert_eq!(lost_reason(&held), Some("closed_by_peer"));
+        assert_eq!(
+            lost_reason(&ConnectionError::LocallyClosed),
+            None,
+            "stop, revoke, unpair, hold"
+        );
     }
 
     #[test]

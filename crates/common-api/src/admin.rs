@@ -77,11 +77,22 @@ pub async fn hardware() -> std::result::Result<axum::Json<common_hardware::Hardw
     Ok(axum::Json(report))
 }
 
+/// Never waits on a load (E2): the engine is read from `ModelManager::snapshot`.
 pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
+    let e = st.manager.snapshot();
+    let state = match (&e.loading, &e.loaded) {
+        (Some(_), _) => "loading",
+        (None, Some(_)) => "ready",
+        (None, None) => "idle",
+    };
+    let (loading_id, loading_ms) = e
+        .loading
+        .map_or((None, None), |(id, t)| (Some(id), Some(t.elapsed().as_millis() as u64)));
     axum::Json(json!({
         "version": common_core::VERSION,
         "uptime_seconds": st.started.elapsed().as_secs(),
-        "loaded": st.manager.status().await,
+        "engine": { "state": state, "loading_model_id": loading_id, "loading_for_ms": loading_ms },
+        "loaded": e.loaded,
         "queue": {
             "inflight": st.admission.inflight(),
             "queued": st.admission.queued(),
@@ -94,7 +105,7 @@ pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
 /// Store manifests plus catalog entries not downloaded yet, each with a fit estimate for this
 /// device (GGUF-based when the blob is present, file-size-only otherwise).
 pub async fn models(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let loaded = st.manager.status().await.map(|i| i.model_id);
+    let loaded = st.manager.snapshot().loaded.map(|v| v.info.model_id);
     let list = tokio::task::spawn_blocking(move || model_list(&st, loaded.as_deref()))
         .await
         .map_err(|e| CommonError::internal(format!("listing task failed: {e}")))??;

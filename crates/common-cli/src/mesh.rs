@@ -302,6 +302,22 @@ impl Mesh {
         )
         .with_hint("make sure it runs `common serve --network` on this LAN, or pair it again"))
     }
+
+    /// E5: whether this home's running daemon holds `id` (Disconnect, until Connect or a restart).
+    /// The hold lives in the daemon's `Node`; a process dialling with its own Node takes it over
+    /// with `Node::hold` so the transport refuses the dial as the daemon's would. No daemon, no
+    /// hold (it ends with the service); a daemon that cannot list its peers fails the caller
+    /// rather than let it dial a device the user disconnected.
+    pub async fn held_by_daemon(&self, id: &PeerId) -> Result<bool> {
+        let Some(d) = Daemon::find(&self.paths).await? else {
+            return Ok(false);
+        };
+        let v = d.call(Method::GET, "/api/peers", None).await?;
+        let hex = id.to_hex();
+        Ok(v["peers"]
+            .as_array()
+            .is_some_and(|ps| ps.iter().any(|p| p["id"] == hex.as_str() && p["held"] == true)))
+    }
 }
 
 /// A peer id, short label or hex prefix as lowercase hex without dashes; anything else is invalid.

@@ -1,0 +1,102 @@
+/* Dashboard (owner A, plan §2.1): one scrolling column of dense blocks, each a 12 px caption over a table. */
+.dash {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s2) var(--s3) var(--s5);
+}
+.dash-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: none;
+}
+.dash-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-height: 28px;
+}
+.dash-caption h2 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.dash-caption h2 a {
+  color: inherit;
+  text-decoration: none;
+}
+.dash-caption h2 a:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+/* Tables take their natural height here and scroll sideways inside their own box at narrow widths. */
+.dash .grid-scroll {
+  flex: none;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+.dash-attention {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+.dash-attention > li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 28px;
+  padding: 2px var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+.dash-attention > li:last-child {
+  border-bottom: 0;
+}
+.dash-attention > li.dash-notice {
+  display: block;
+  padding: var(--s2);
+}
+.dash-attention .notice {
+  margin: 0;
+}
+.dash-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.dash-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+.dash-firstrun {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  min-height: 28px;
+  padding: 4px var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+.dash-note {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 0;
+}
+.dash-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

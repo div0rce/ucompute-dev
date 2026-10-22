@@ -1,12 +1,14 @@
 // The Windows Firewall finding (2026-10-19): pairing started on the Windows app failed because the firewall dropped
 // the pairing port. The app offers one consent step (src-tauri firewall.rs, Tauri invoke mocked here); the joiner's
 // "nothing answered" error points at that firewall instead of the code. Unit level against the fake daemon.
-import { render, screen, waitFor, within } from "@testing-library/react";
+// Migrated to the Devices section (plan §5.4). Deliberate wording change (plan §2.2 Firewall): the check cannot prove
+// a block, so the notice says no rule was found and that other devices may be unable to connect.
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderDevices, toolbar } from "../sections/devices/fixtures";
 import { daemon, privacy, settings } from "../state/stores";
-import { Peers } from "../views/Peers";
 import { apiError, installFakeDaemon, JOIN_CODE, NETWORK, NETWORK_ON } from "./mocks";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -22,6 +24,10 @@ function windowsApp(status: object = BLOCKED, allow: () => Promise<void> = async
   invoke.mockImplementation(async (cmd: string) => (cmd === "firewall_status" ? status : cmd === "allow_through_firewall" ? allow() : undefined));
 }
 const allowCalls = () => invoke.mock.calls.filter(([c]) => c === "allow_through_firewall").length;
+const openPair = async (user: ReturnType<typeof userEvent.setup>) => {
+  await user.click(await within(await screen.findByRole("toolbar", { name: "Devices actions" })).findByRole("button", { name: "Pair a device…" }));
+  return screen.findByRole("dialog", { name: "Pair a device" });
+};
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
@@ -35,13 +41,13 @@ afterEach(() => {
 });
 
 describe("Windows Firewall consent step", () => {
-  it("offers one rule when networking is on and none exists; only the click asks Windows, and success says so", async () => {
+  it("offers one rule when networking is on and none was found; only the click asks Windows, and success says so", async () => {
     const user = userEvent.setup();
     windowsApp();
     installFakeDaemon({ network: NETWORK_ON });
-    render(<Peers pollMs={1000} />);
+    renderDevices();
     const button = await screen.findByRole("button", { name: ALLOW });
-    expect(screen.getByText("Windows Firewall blocks other devices from reaching this computer, so pairing started here and incoming connections fail.")).toBeTruthy();
+    expect(screen.getByText("No Windows Firewall rule for the service was found; other devices may be unable to connect.")).toBeTruthy();
     expect(screen.getByText("Adds a rule for Common's background service only, on networks Windows treats as Private. Windows will ask you to confirm.")).toBeTruthy();
     // Never silently: reading the state is all that happened so far.
     expect(allowCalls()).toBe(0);
@@ -57,7 +63,7 @@ describe("Windows Firewall consent step", () => {
     // The rule exists: no offer, but the Public network is named with what the user can change.
     windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\Common\\common.exe", public_networks: ["eduroam"] });
     installFakeDaemon({ network: NETWORK_ON });
-    const { unmount } = render(<Peers pollMs={1000} />);
+    const { unmount } = renderDevices();
     expect(await screen.findByText(PUBLIC_NOTE)).toBeTruthy();
     expect(screen.getByText("Windows Firewall still blocks other devices on this network.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
@@ -66,7 +72,7 @@ describe("Windows Firewall consent step", () => {
     // No rule yet on a Public network: the offer, the note, and after Allow the note stays.
     invoke.mockReset();
     windowsApp({ ...BLOCKED, public_networks: ["eduroam"] });
-    render(<Peers pollMs={1000} />);
+    renderDevices();
     await user.click(await screen.findByRole("button", { name: ALLOW }));
     await screen.findByText("Allowed on private networks.");
     expect(screen.getByText(PUBLIC_NOTE)).toBeTruthy();
@@ -78,9 +84,9 @@ describe("Windows Firewall consent step", () => {
     let outcome = "cancelled";
     windowsApp(BLOCKED, () => Promise.reject(outcome));
     installFakeDaemon({ network: NETWORK_ON });
-    render(<Peers pollMs={1000} />);
+    renderDevices();
     await user.click(await screen.findByRole("button", { name: ALLOW }));
-    expect((await screen.findByRole("alert")).textContent).toBe("Nothing changed: the Windows confirmation was cancelled. Other devices still cannot reach this computer.");
+    expect((await screen.findByRole("alert")).textContent).toBe("Nothing changed: the Windows confirmation was cancelled. Other devices may still be unable to connect.");
 
     outcome = "netsh could not add the rule (exit code 1)";
     await user.click(screen.getByRole("button", { name: ALLOW }));
@@ -97,8 +103,8 @@ describe("Windows Firewall consent step", () => {
     ] as const) {
       windowsApp(status);
       installFakeDaemon({ network });
-      const { unmount } = render(<Peers pollMs={1000} />);
-      await screen.findByText("This device");
+      const { unmount } = renderDevices();
+      await screen.findByRole("grid", { name: "Devices" });
       await waitFor(() => expect(invoke).toHaveBeenCalledWith("firewall_status"));
       expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
       unmount();
@@ -107,8 +113,8 @@ describe("Windows Firewall consent step", () => {
     // A browser tab on the dev server: no Tauri, so nothing is asked of it.
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
     installFakeDaemon({ network: NETWORK_ON });
-    render(<Peers pollMs={1000} />);
-    await screen.findByText("This device");
+    renderDevices();
+    await screen.findByRole("grid", { name: "Devices" });
     expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
   });
@@ -117,7 +123,7 @@ describe("Windows Firewall consent step", () => {
     const user = userEvent.setup();
     windowsApp(BLOCKED, () => Promise.reject("cancelled"));
     installFakeDaemon({ network: NETWORK_ON });
-    const { container } = render(<Peers pollMs={1000} />);
+    const { container } = renderDevices();
     const serious = async () =>
       (await axe.run(container, { rules: { "color-contrast": { enabled: false } } })).violations
         .filter((v) => v.impact === "serious" || v.impact === "critical")
@@ -125,7 +131,8 @@ describe("Windows Firewall consent step", () => {
     await user.click(await screen.findByRole("button", { name: ALLOW }));
     await screen.findByRole("alert");
     expect(await serious()).toEqual([]);
-    await user.click(screen.getByRole("button", { name: "Pair this device" }));
+    const d = await openPair(user);
+    await user.click(within(d).getByRole("button", { name: "Pair this device" }));
     await screen.findByRole("group", { name: "Pairing code" });
     expect(await serious()).toEqual([]);
   });
@@ -134,13 +141,15 @@ describe("Windows Firewall consent step", () => {
     const user = userEvent.setup();
     windowsApp();
     installFakeDaemon({ network: NETWORK_ON });
-    render(<Peers pollMs={1000} />);
+    renderDevices();
     await screen.findByRole("button", { name: ALLOW });
-    await user.click(screen.getByRole("button", { name: "Pair this device" }));
+    const d = await openPair(user);
+    await user.click(within(d).getByRole("button", { name: "Pair this device" }));
     const code = await screen.findByRole("group", { name: "Pairing code" });
-    expect(within(code).getByRole("button", { name: ALLOW })).toBeTruthy();
-    // One notice, not two.
+    expect(await within(code).findByRole("button", { name: ALLOW })).toBeTruthy();
+    // One notice, not two: the banner above the table steps aside while the dialog is open.
     expect(screen.getAllByRole("button", { name: ALLOW })).toHaveLength(1);
+    expect(within(toolbar()).queryByRole("button", { name: ALLOW })).toBeNull();
   });
 });
 
@@ -149,24 +158,26 @@ describe("joining a pairing window where nothing answers", () => {
     const user = userEvent.setup();
     const fake = installFakeDaemon({ network: NETWORK_ON });
     const real = fake.fetchMock.getMockImplementation() as typeof fetch;
+    // The hint is the service's (E0 wording, common-network pairing.rs `no_answer`).
+    const hint = "a firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common through the firewall on that device (Devices in its desktop app)";
     fake.fetchMock.mockImplementation(async (u: RequestInfo | URL, init?: RequestInit) =>
-      String(u).endsWith("/api/pair/join") && String(init?.body).includes("51999")
-        ? apiError("pairing_failed", "nothing answered at 192.168.1.20:51999", 401, "a firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common under Peers on that device")
-        : real(u, init),
+      String(u).endsWith("/api/pair/join") && String(init?.body).includes("51999") ? apiError("pairing_failed", "nothing answered at 192.168.1.20:51999", 401, hint) : real(u, init),
     );
-    render(<Peers pollMs={1000} />);
-    await user.type(await screen.findByLabelText("Address"), "192.168.1.20:51999");
-    await user.type(screen.getByLabelText("Code"), `${JOIN_CODE}{Enter}`);
-    const alert = await screen.findByRole("alert");
+    renderDevices();
+    const d = await openPair(user);
+    await user.click(within(d).getByRole("tab", { name: "Enter a code" }));
+    await user.type(within(d).getByLabelText("Address"), "192.168.1.20:51999");
+    await user.type(within(d).getByLabelText("Code"), `${JOIN_CODE}{Enter}`);
+    const alert = await within(d).findByRole("alert");
     expect(alert.textContent).toContain("Pairing did not complete.");
-    expect(alert.textContent).toContain("A firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common under Peers on that device.");
+    expect(alert.textContent).toContain("A firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common through the firewall on that device (Devices in its desktop app).");
     expect(alert.textContent).toContain("nothing answered at 192.168.1.20:51999");
     expect(alert.textContent).not.toContain("Check the code");
 
-    await user.clear(screen.getByLabelText("Address"));
-    await user.type(screen.getByLabelText("Address"), "192.168.1.20:51234");
-    await user.clear(screen.getByLabelText("Code"));
-    await user.type(screen.getByLabelText("Code"), "999999{Enter}");
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Check the code"));
+    await user.clear(within(d).getByLabelText("Address"));
+    await user.type(within(d).getByLabelText("Address"), "192.168.1.20:51234");
+    await user.clear(within(d).getByLabelText("Code"));
+    await user.type(within(d).getByLabelText("Code"), "999999{Enter}");
+    await waitFor(() => expect(within(d).getByRole("alert").textContent).toContain("Check the code"));
   });
 });

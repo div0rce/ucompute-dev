@@ -1,0 +1,1027 @@
+/* UCompute base styles: the shell and every shared primitive in src/ui. Frozen after Phase 0 (plan §3.3); sections
+   style their own content in src/sections/<x>/<x>.css. Inline style only sets custom properties for measured
+   geometry (--w column widths, --inspector-h, FitBar, Sparkline, phase bar). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font: 13px/1.35 var(--font-ui);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+}
+h3 {
+  font-size: 12px;
+  font-weight: 600;
+}
+a {
+  color: var(--accent);
+}
+code,
+kbd,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+code {
+  background: var(--surface-2);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+kbd {
+  border: 1px solid var(--line-input);
+  border-radius: var(--r-1);
+  padding: 0 4px;
+  background: var(--surface);
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+[hidden] {
+  display: none !important;
+}
+.small {
+  font-size: 12px;
+}
+.muted,
+.note {
+  color: var(--muted);
+}
+.note {
+  font-size: 11px;
+  margin-left: 6px;
+}
+.prose {
+  line-height: 1.5;
+  max-width: 64ch;
+}
+
+/* Tones: colour only together with an icon and a word (plan §0.3). Neutral and idle use the text colours. */
+.tone-ok {
+  color: var(--ok);
+}
+.tone-active {
+  color: var(--active);
+}
+.tone-warn {
+  color: var(--warn);
+}
+.tone-danger {
+  color: var(--danger);
+}
+.tone-neutral {
+  color: var(--muted);
+}
+
+/* Icons */
+.icon {
+  flex: none;
+  vertical-align: -3px;
+}
+.icon.flip {
+  transform: rotate(180deg);
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Controls */
+.btn,
+.tool-btn,
+.icon-btn,
+.scope-btn {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line-input);
+  border-radius: var(--r-1);
+  min-height: 24px;
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.btn {
+  padding: 3px 10px;
+}
+.btn:hover,
+.tool-btn:hover,
+.icon-btn:hover,
+.scope-btn:hover {
+  background: var(--hover);
+}
+.btn-primary,
+.btn.primary,
+.tool-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-primary:hover,
+.btn.primary:hover,
+.tool-btn.primary:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.btn-sm {
+  padding: 1px 8px;
+  font-size: 12px;
+}
+button:disabled,
+[aria-disabled="true"] {
+  color: var(--faint);
+  cursor: default;
+}
+.tool-btn[aria-disabled="true"],
+.btn[aria-disabled="true"] {
+  background: transparent;
+  border-color: var(--line);
+}
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border-color: transparent;
+  background: transparent;
+}
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line-input);
+  border-radius: var(--r-1);
+  padding: 3px 6px;
+  min-height: 24px;
+}
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0 6px 0 0;
+  vertical-align: -3px;
+}
+/* <input type="checkbox" role="switch" class="switch"> */
+input.switch {
+  appearance: none;
+  width: 30px;
+  height: 18px;
+  border-radius: 9px;
+  border: 1px solid var(--line-input);
+  background: var(--surface-2);
+  position: relative;
+  cursor: pointer;
+}
+input.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--t-fast) var(--ease);
+}
+input.switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input.switch:checked::after {
+  transform: translateX(12px);
+  background: var(--accent-ink);
+}
+label.check {
+  display: inline-flex;
+  align-items: center;
+  margin-right: var(--s4);
+}
+
+/* Shell (plan §1.1) */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--statusbar-h);
+  height: 100%;
+}
+.skip {
+  position: absolute;
+  left: 8px;
+  top: -40px;
+  z-index: 20;
+  padding: 4px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line-input);
+  border-radius: var(--r-1);
+}
+.skip:focus {
+  top: 8px;
+}
+.shell-main {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+}
+.shell-main:focus {
+  outline: none;
+}
+.rail {
+  grid-column: 1;
+  grid-row: 1;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  padding: var(--s2);
+  overflow: auto;
+}
+.rail ul {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: 0;
+}
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 6px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-1);
+  color: var(--text);
+  text-decoration: none;
+}
+.rail-item:hover {
+  background: var(--hover);
+}
+.rail-item[aria-current="page"] {
+  background: var(--selected);
+  font-weight: 600;
+}
+.rail-item[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--lime);
+}
+.rail-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--lime);
+  color: var(--lime-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+/* A dot carries meaning without text: --active keeps 3:1 on light surfaces, where lime does not. */
+.rail-badge.dot {
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  background: var(--active);
+}
+.rail-badge.warn {
+  box-shadow: 0 0 0 2px var(--warn);
+}
+@media (max-width: 899px) {
+  .shell {
+    grid-template-columns: var(--rail-w-collapsed) minmax(0, 1fr);
+  }
+  .rail {
+    padding: var(--s2) 6px;
+  }
+  .rail-item {
+    justify-content: center;
+    padding: 0;
+  }
+  .rail-brand {
+    justify-content: center;
+    padding: 0;
+  }
+  /* Labels stay the accessible name (aria-label) and show as a bubble on hover/focus. */
+  .rail-label {
+    position: absolute;
+    left: calc(100% + 6px);
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 30;
+    padding: 2px 8px;
+    border-radius: var(--r-1);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-pop);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .rail-brand .rail-label {
+    display: none;
+  }
+  .rail-item:hover .rail-label,
+  .rail-item:focus-visible .rail-label {
+    opacity: 1;
+  }
+  .rail-badge {
+    position: absolute;
+    right: 0;
+    top: 0;
+    min-width: 8px;
+    width: 8px;
+    height: 8px;
+    padding: 0;
+    font-size: 0;
+    background: var(--active);
+  }
+}
+
+/* Status bar (plan §1.2): a size container; droppable items carry their order (1 drops first). */
+.statusbar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  container: statusbar / inline-size;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-width: 0;
+  padding: 0 var(--s2);
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.sb-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.sb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+  min-width: 0;
+}
+a.sb-item:hover,
+button.sb-item:hover {
+  background: var(--hover);
+}
+.sb-item.tone-neutral {
+  color: var(--text);
+}
+.sb-item.tone-ok .sb-dot {
+  background: var(--ok);
+}
+.sb-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+@container statusbar (max-width: 1080px) {
+  .sb-drop-1 {
+    display: none;
+  }
+}
+@container statusbar (max-width: 960px) {
+  .sb-drop-2 {
+    display: none;
+  }
+}
+@container statusbar (max-width: 860px) {
+  .sb-drop-3 {
+    display: none;
+  }
+}
+@container statusbar (max-width: 780px) {
+  .sb-drop-4 {
+    display: none;
+  }
+}
+
+/* Section frame */
+.frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.frame-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: var(--toolbar-h);
+  padding: 0 var(--s3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.frame-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.tb-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--line);
+}
+.tool-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+@media (max-width: 1199px) {
+  .tool-btn {
+    width: 28px;
+    padding: 0;
+    justify-content: center;
+  }
+  /* The label stays the accessible name and shows as a bubble on hover/focus. */
+  .tool-label {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 30;
+    padding: 2px 8px;
+    border-radius: var(--r-1);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-pop);
+    font-size: 11px;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .tool-btn:hover .tool-label,
+  .tool-btn:focus-visible .tool-label {
+    opacity: 1;
+  }
+}
+.frame-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  height: var(--scope-h);
+  padding: 0 var(--s3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.scope-bar {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  /* Narrow windows scroll the scopes instead of clipping them: every scope stays reachable and visible on focus. */
+  overflow-x: auto;
+}
+.scope-btn {
+  height: 24px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.scope-btn[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--line-input);
+  font-weight: 600;
+}
+.scope-count {
+  margin-left: 2px;
+  color: var(--muted);
+}
+.filter-box {
+  width: 200px;
+  height: 24px;
+  font-size: 12px;
+}
+.frame-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  padding: 6px var(--s3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
+  flex: none;
+}
+.frame-banner details {
+  color: var(--text);
+}
+.frame-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.frame-main {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Data grid (plan §3.7): 28 px rows, sticky header, tabular figures. */
+.grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scroll-padding-top: var(--row-h);
+}
+.grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  table-layout: fixed;
+  font-variant-numeric: tabular-nums;
+}
+.grid:focus {
+  outline: none;
+}
+.grid col {
+  width: var(--w, auto);
+}
+.grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: var(--row-h);
+  padding: 0;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+.grid th > button,
+.grid th > span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: var(--row-h);
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.grid th.num > button,
+.grid th.num > span {
+  justify-content: flex-end;
+}
+.grid td {
+  position: relative;
+  height: var(--row-h);
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grid .num {
+  text-align: right;
+}
+.grid tbody tr:hover {
+  background: var(--hover);
+}
+.grid tbody tr[aria-selected="true"] {
+  background: var(--selected);
+}
+.grid tbody tr[aria-selected="true"] td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.grid td:focus-visible,
+.grid th > :focus-visible {
+  outline-offset: -2px;
+}
+.grid tr.stale td {
+  color: var(--muted);
+}
+/* Cells clip their overflow: a fixed tooltip escapes it, placed at its static position just under the text. */
+.grid td .tip {
+  position: fixed;
+  top: auto;
+  left: auto;
+  transform: translateY(20px);
+}
+
+/* Inspector */
+.inspector {
+  position: relative;
+  flex: none;
+  height: var(--inspector-h, 240px);
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  transition: height var(--t-panel) var(--ease);
+}
+.inspector.collapsed {
+  height: var(--tabbar-h);
+  min-height: 0;
+}
+.splitter {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 8px;
+  cursor: row-resize;
+  z-index: 2;
+}
+.splitter:hover,
+.splitter:focus-visible {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.inspector-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--tabbar-h);
+  padding: 0 4px 0 var(--s2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.inspector-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tablist {
+  display: flex;
+  height: 100%;
+}
+.tablist [role="tab"] {
+  height: 100%;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tablist [role="tab"][aria-selected="true"] {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.inspector-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s3);
+}
+.inspector-panel:focus-visible {
+  outline-offset: -2px;
+}
+.inspector-empty {
+  padding: var(--s3);
+  color: var(--muted);
+}
+
+/* State, key/value, unavailable, empty */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.state.tone-neutral .state-word {
+  color: var(--text);
+}
+/* In a narrow grid cell the badge shrinks and ends in an ellipsis (an inline-flex box would be clipped mid-word). */
+.grid td .tip-host,
+.grid td .state {
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.grid td .state > svg {
+  flex: none;
+}
+.grid td .state > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.unavailable .note {
+  margin-left: 4px;
+}
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: 4px var(--s4);
+  margin: 0;
+}
+.kv-row {
+  display: contents;
+}
+.kv dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.empty-state {
+  padding: var(--s5) var(--s4);
+  color: var(--muted);
+}
+.empty-title {
+  color: var(--text);
+  font-weight: 600;
+}
+.empty-reason {
+  margin-top: 4px;
+  max-width: 64ch;
+  line-height: 1.5;
+}
+.empty-action {
+  margin-top: var(--s3);
+}
+.empty {
+  color: var(--muted);
+  padding: var(--s2) 0;
+}
+
+/* Notices (Firewall, inline outcomes) */
+.notice {
+  margin: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-input);
+  border-left: 3px solid currentColor;
+  border-radius: var(--r-1);
+  background: var(--surface);
+  max-width: 72ch;
+}
+.notice > * {
+  color: var(--text);
+}
+.notice-title {
+  font-weight: 600;
+}
+.notice p + p {
+  margin-top: 4px;
+}
+.notice-actions {
+  margin-top: var(--s2);
+}
+.notice > .notice-detail {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Tooltips (Tip) */
+.tip-host {
+  position: relative;
+  display: inline-flex;
+}
+.tip {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  width: max-content;
+  max-width: 360px;
+  padding: 4px 8px;
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: normal;
+  line-height: 1.4;
+  pointer-events: none;
+}
+.statusbar .tip {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+/* Dialogs */
+.dialog {
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: var(--s4);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  max-width: min(640px, calc(100vw - 32px));
+}
+.dialog::backdrop {
+  background: rgb(0 0 0 / 0.35);
+}
+.dialog h2 {
+  margin-bottom: var(--s3);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+  margin-top: var(--s4);
+}
+.shortcuts th {
+  text-align: left;
+  padding: 3px var(--s3) 3px 0;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.shortcuts td {
+  padding: 3px 0;
+  color: var(--muted);
+}
+
+/* Sparkline: series colours by order */
+.sparkline {
+  width: 160px;
+  height: 32px;
+}
+.sparkline polyline {
+  fill: none;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.spark-0 {
+  stroke: var(--active);
+}
+.spark-1 {
+  stroke: var(--ok);
+}
+.spark-2 {
+  stroke: var(--warn);
+}
+
+/* Groups editor and membership (src/ui/Groups.tsx) */
+.groups-editor .group,
+.group-membership {
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  padding: var(--s2) var(--s3);
+  margin: var(--s2) 0;
+}
+.group-members {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--line-input);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.tag-x {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  min-width: 24px;
+  min-height: 24px;
+  cursor: pointer;
+}
+.group-new {
+  display: flex;
+  align-items: end;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.group-new label {
+  display: grid;
+  gap: 2px;
+}
+.membership-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--s4);
+  padding: 3px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+  }
+}

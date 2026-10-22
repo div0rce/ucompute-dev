@@ -31,3 +31,28 @@ export const num = (n: number | null | undefined, digits = 0) =>
 
 /** "1 device", "2 devices", "1,024 tokens". `many` for irregular plurals. */
 export const plural = (n: number, one: string, many = `${one}s`) => `${num(n)} ${n === 1 ? one : many}`;
+
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "always", style: "short" });
+/** "12 sec. ago", "3 min. ago" (locale-formatted) from an ISO timestamp or epoch ms; "—" when unknown. */
+export function ago(t: string | number | null | undefined, now = Date.now()): string {
+  const ms = typeof t === "string" ? Date.parse(t) : t;
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  if (s < 60) return rtf.format(-s, "second");
+  if (s < 3600) return rtf.format(-Math.floor(s / 60), "minute");
+  if (s < 86400) return rtf.format(-Math.floor(s / 3600), "hour");
+  return rtf.format(-Math.floor(s / 86400), "day");
+}
+
+/** Local wall-clock time "HH:MM:SS" (24 h); "—" when unknown. */
+export function clock(t: string | number | null | undefined): string {
+  const ms = typeof t === "string" ? Date.parse(t) : t;
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+/** A byte rate: "12 KB/s", "< 1 KB/s"; "—" when unknown. */
+export function byteRate(bytesPerSecond: number | null | undefined): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return "—";
+  return bytesPerSecond < 1024 ? "< 1 KB/s" : `${humanBytes(bytesPerSecond)}/s`;
+}

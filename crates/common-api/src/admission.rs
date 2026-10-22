@@ -44,16 +44,16 @@ impl Admission {
     }
 
     /// A permit, or the typed rejection. The permit is held for the whole request (streaming included).
+    /// A waiter whose request is dropped (its client went away) leaves the queue then too.
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, Rejected> {
         if let Ok(p) = self.sem.clone().try_acquire_owned() {
             return Ok(p);
         }
+        let _waiting = Waiting(&self.queued);
         if self.queued.fetch_add(1, Ordering::SeqCst) >= self.max_queue {
-            self.queued.fetch_sub(1, Ordering::SeqCst);
             return Err(Rejected::QueueFull);
         }
         let r = tokio::time::timeout(self.timeout, self.sem.clone().acquire_owned()).await;
-        self.queued.fetch_sub(1, Ordering::SeqCst);
         match r {
             Ok(Ok(p)) => Ok(p),
             // Closed semaphore cannot happen (never closed); report it as a timeout rather than panic.
@@ -74,6 +74,15 @@ impl Admission {
 
     pub fn inflight(&self) -> usize {
         self.max_concurrent.saturating_sub(self.sem.available_permits())
+    }
+}
+
+/// One place in the queue, given back on drop (also when the waiting future is dropped).
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -113,6 +122,23 @@ mod tests {
         assert!(t.elapsed() >= Duration::from_millis(30));
         assert_eq!(a.queued(), 0);
         assert_eq!(Rejected::Timeout.reason(), "queue_timeout");
+    }
+
+    /// Regression (found by `tests/jobs.rs`): hyper drops a handler whose client went away, and a
+    /// waiter dropped mid-wait used to keep its place forever, until the queue refused everyone.
+    #[tokio::test]
+    async fn a_dropped_waiter_leaves_the_queue() {
+        let a = Arc::new(Admission::new(1, 1, Duration::from_secs(10)));
+        let _held = a.acquire().await.unwrap();
+        let waiter = tokio::spawn({
+            let a = a.clone();
+            async move { a.acquire().await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(a.queued(), 1);
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(a.queued(), 0, "the place is free again");
     }
 
     #[test]

@@ -408,7 +408,7 @@ async fn silent_pairing_endpoint_points_at_the_firewall_single_host() {
     assert!(e.message.contains(&format!("nothing answered at {addr}")), "{e}");
     let hint = e.hint.expect("a hint");
     assert!(
-        hint.contains("firewall") && hint.contains(&format!("UDP {}", addr.port())) && hint.contains("Peers"),
+        hint.contains("firewall") && hint.contains(&format!("UDP {}", addr.port())) && hint.contains("Devices"),
         "{hint}"
     );
     assert!(b.peers.list().unwrap().is_empty(), "nothing pinned");

@@ -1,0 +1,42 @@
+{
+  "peers": [
+    {
+      "id": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "name": "Studio Mac",
+      "paired_at_utc": "2026-10-14T11:59:30Z",
+      "last_seen_utc": "2026-10-22T10:30:00Z",
+      "last_addr": "192.168.1.77:8193",
+      "short_label": "0f1e-2d3c-4b5a",
+      "groups": ["home"],
+      "connected": false,
+      "health": "disconnected",
+      "last_error": null,
+      "capabilities": null,
+      "connection": null,
+      "held": true
+    },
+    {
+      "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "name": "Laptop",
+      "paired_at_utc": "2026-10-15T09:00:00Z",
+      "last_seen_utc": "2026-10-21T18:00:00Z",
+      "last_addr": "172.20.10.6:8193",
+      "short_label": "eeee-eeee-eeee",
+      "groups": [],
+      "connected": false,
+      "health": "disconnected",
+      "last_error": {
+        "addr": "172.20.10.6:8193",
+        "code": "peer_held",
+        "message": "the other device disconnected this one",
+        "hint": null,
+        "at_utc": "2026-10-22T10:29:00Z"
+      },
+      "capabilities": null,
+      "connection": null,
+      "held": false
+    }
+  ],
+  "discovered": [],
+  "revocations": []
+}

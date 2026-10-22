@@ -333,6 +333,434 @@ fn format_utc(secs: u64) -> String {
     )
 }
 
+// ---- job registry (desktop UI 2.0, E3) ----
+
+/// The requests this daemon runs, sends to a paired device or serves for one, in memory only (lost
+/// at restart): the active ones and the last [`jobs::MAX_RECENT`] finished. Ids, counts, codes and
+/// durations only: no field of [`jobs::Job`] can hold prompt or completion text.
+pub mod jobs {
+    use super::format_utc;
+    use serde::Serialize;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// Finished jobs kept.
+    pub const MAX_RECENT: usize = 256;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum JobState {
+        /// Waiting for an engine slot (local admission); for a request to a paired device, which
+        /// takes no slot here, reaching that device until the request is sent (then `Running`).
+        Queued,
+        /// In the model step (a load, or finding the loaded model).
+        Loading,
+        /// Generating, or sent to a paired device.
+        Running,
+        Done,
+        Error,
+        Cancelled,
+    }
+
+    /// One request. Every key is always serialized; `null` means not known (yet).
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Job {
+        /// The response id (`chatcmpl-…`, `cmpl-…`), a registry id, or the peer's `request_id`.
+        pub id: String,
+        /// `X-Common-Client-Ref` of the request (an id, never text).
+        pub client_ref: Option<String>,
+        /// `chat`, `completion`, `embeddings` or `served_for_peer`.
+        pub kind: String,
+        pub model_id: String,
+        /// `local` or `peer:<hex>`: where it runs.
+        pub target: String,
+        /// `local` or `peer:<hex>`: who asked.
+        pub origin: String,
+        pub state: JobState,
+        pub created_at_utc: String,
+        pub started_at_utc: Option<String>,
+        pub first_token_at_utc: Option<String>,
+        pub finished_at_utc: Option<String>,
+        pub queue_ms: Option<u64>,
+        pub load_ms: Option<u64>,
+        pub ttft_ms: Option<u64>,
+        pub prompt_ms: Option<f64>,
+        pub decode_ms: Option<f64>,
+        pub duration_ms: Option<u64>,
+        pub prompt_tokens: Option<u32>,
+        /// Counted per streamed piece while active; the engine's final count once done.
+        pub completion_tokens: Option<u32>,
+        pub decode_tokens_per_second: Option<f64>,
+        pub finish_reason: Option<String>,
+        pub error_code: Option<String>,
+        /// Requests to or from a paired device: joins the `remote_request` audit entries.
+        pub request_id: Option<String>,
+        pub device_actual: Option<String>,
+    }
+
+    /// What the engine reported at the end of a generation.
+    #[derive(Debug, Clone, Default)]
+    pub struct Finished {
+        pub finish_reason: Option<String>,
+        pub prompt_tokens: Option<u32>,
+        pub completion_tokens: Option<u32>,
+        pub prompt_ms: Option<f64>,
+        pub decode_ms: Option<f64>,
+        pub decode_tokens_per_second: Option<f64>,
+    }
+
+    /// `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+    pub fn utc_ms(t: SystemTime) -> String {
+        let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+        let s = format_utc(d.as_secs());
+        format!("{}.{:03}Z", s.trim_end_matches('Z'), d.subsec_millis())
+    }
+
+    fn ms(since: Instant) -> u64 {
+        since.elapsed().as_millis() as u64
+    }
+
+    struct Entry {
+        key: u64,
+        job: Job,
+        created: Instant,
+        started: Option<Instant>,
+    }
+
+    #[derive(Default)]
+    struct Inner {
+        next: u64,
+        active: Vec<Entry>,
+        recent: VecDeque<Job>,
+    }
+
+    /// The registry; one per daemon, shared with peer serving.
+    #[derive(Default)]
+    pub struct Jobs(Mutex<Inner>);
+
+    impl Jobs {
+        pub fn new() -> Arc<Jobs> {
+            Arc::default()
+        }
+
+        fn lock(&self) -> MutexGuard<'_, Inner> {
+            self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// Register a request as `queued`. The handle moves it on and finishes it, at the latest
+        /// when dropped (`cancelled`: the request went away without an outcome).
+        pub fn start(
+            self: &Arc<Self>,
+            id: String,
+            kind: &str,
+            model_id: &str,
+            target: String,
+            origin: String,
+            client_ref: Option<String>,
+        ) -> JobHandle {
+            let mut job = Job {
+                id,
+                client_ref,
+                kind: kind.into(),
+                // The request's own string, checked only later: bounded like a catalog id.
+                model_id: model_id.chars().take(200).collect(),
+                target,
+                origin,
+                state: JobState::Queued,
+                created_at_utc: utc_ms(SystemTime::now()),
+                started_at_utc: None,
+                first_token_at_utc: None,
+                finished_at_utc: None,
+                queue_ms: None,
+                load_ms: None,
+                ttft_ms: None,
+                prompt_ms: None,
+                decode_ms: None,
+                duration_ms: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                decode_tokens_per_second: None,
+                finish_reason: None,
+                error_code: None,
+                request_id: None,
+                device_actual: None,
+            };
+            let mut g = self.lock();
+            // A ref is the caller's own id for one request: a second request with a ref the
+            // registry already holds (any local client can read refs from /api/jobs) gets none, so
+            // its row never passes for the first caller's (the desktop matches rows and Stop by ref).
+            let taken = job.client_ref.as_ref().is_some_and(|r| {
+                g.active.iter().any(|e| e.job.client_ref.as_ref() == Some(r))
+                    || g.recent.iter().any(|j| j.client_ref.as_ref() == Some(r))
+            });
+            if taken {
+                job.client_ref = None;
+            }
+            g.next += 1;
+            let key = g.next;
+            g.active.push(Entry {
+                key,
+                job,
+                created: Instant::now(),
+                started: None,
+            });
+            JobHandle {
+                jobs: self.clone(),
+                key,
+            }
+        }
+
+        /// Active jobs (oldest first) and finished ones (newest first).
+        pub fn list(&self) -> (Vec<Job>, Vec<Job>) {
+            let g = self.lock();
+            (
+                g.active.iter().map(|e| e.job.clone()).collect(),
+                g.recent.iter().cloned().collect(),
+            )
+        }
+    }
+
+    /// Updates one job; see [`Jobs::start`].
+    pub struct JobHandle {
+        jobs: Arc<Jobs>,
+        key: u64,
+    }
+
+    impl JobHandle {
+        fn with(&self, f: impl FnOnce(&mut Entry)) {
+            let mut g = self.jobs.lock();
+            if let Some(e) = g.active.iter_mut().find(|e| e.key == self.key) {
+                f(e);
+            }
+        }
+
+        fn begin(e: &mut Entry) {
+            if e.started.is_none() {
+                e.started = Some(Instant::now());
+                e.job.started_at_utc = Some(utc_ms(SystemTime::now()));
+                e.job.queue_ms = Some(ms(e.created));
+            }
+        }
+
+        /// Admitted: `loading` (the model step comes next).
+        pub fn started(&self) {
+            self.with(|e| {
+                Self::begin(e);
+                e.job.state = JobState::Loading;
+            });
+        }
+
+        /// The model is ready: `running`; `load_ms` is the time since admission.
+        pub fn loaded(&self, device_actual: &str) {
+            self.with(|e| {
+                Self::begin(e);
+                e.job.load_ms = e.started.map(ms);
+                e.job.device_actual = Some(device_actual.into());
+                e.job.state = JobState::Running;
+            });
+        }
+
+        /// Sent to a paired device: `running` there (no local slot or load).
+        pub fn sent(&self, request_id: &str) {
+            self.with(|e| {
+                Self::begin(e);
+                e.job.request_id = Some(request_id.into());
+                e.job.state = JobState::Running;
+            });
+        }
+
+        pub fn set_request_id(&self, request_id: &str) {
+            self.with(|e| e.job.request_id = Some(request_id.into()));
+        }
+
+        /// One more streamed piece (a token or a tool-call delta).
+        pub fn token(&self) {
+            self.with(|e| {
+                if e.job.first_token_at_utc.is_none() {
+                    e.job.first_token_at_utc = Some(utc_ms(SystemTime::now()));
+                    e.job.ttft_ms = Some(ms(e.created));
+                }
+                e.job.completion_tokens = Some(e.job.completion_tokens.unwrap_or(0) + 1);
+            });
+        }
+
+        /// Finished normally; the engine's numbers replace the live count.
+        pub fn done(&self, f: Finished) {
+            self.finish(JobState::Done, |j| {
+                j.finish_reason = f.finish_reason;
+                j.prompt_tokens = f.prompt_tokens;
+                j.completion_tokens = f.completion_tokens.or(j.completion_tokens);
+                j.prompt_ms = f.prompt_ms;
+                j.decode_ms = f.decode_ms;
+                j.decode_tokens_per_second = f.decode_tokens_per_second;
+            });
+        }
+
+        /// Ended with an error code; `cancelled` and `client_gone` end as `cancelled`.
+        pub fn fail(&self, code: &str) {
+            let state = match code {
+                "cancelled" | "client_gone" => JobState::Cancelled,
+                _ => JobState::Error,
+            };
+            self.finish(state, |j| j.error_code = Some(code.into()));
+        }
+
+        /// Moves the job to `recent` (once; later calls do nothing).
+        fn finish(&self, state: JobState, f: impl FnOnce(&mut Job)) {
+            let mut g = self.jobs.lock();
+            let Some(i) = g.active.iter().position(|e| e.key == self.key) else {
+                return;
+            };
+            let e = g.active.remove(i);
+            let mut job = e.job;
+            f(&mut job);
+            job.state = state;
+            job.finished_at_utc = Some(utc_ms(SystemTime::now()));
+            job.duration_ms = Some(ms(e.created));
+            g.recent.push_front(job);
+            g.recent.truncate(MAX_RECENT);
+        }
+    }
+
+    impl Drop for JobHandle {
+        fn drop(&mut self) {
+            self.fail("cancelled");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn start(jobs: &Arc<Jobs>, id: &str) -> JobHandle {
+            jobs.start(
+                id.into(),
+                "chat",
+                "m",
+                "local".into(),
+                "local".into(),
+                Some("ref-1".into()),
+            )
+        }
+
+        #[test]
+        fn a_job_moves_from_active_to_recent_once() {
+            let jobs = Jobs::new();
+            let h = start(&jobs, "chatcmpl-1");
+            let (active, recent) = jobs.list();
+            assert_eq!((active.len(), recent.len()), (1, 0));
+            assert_eq!(active[0].state, JobState::Queued);
+            assert_eq!(active[0].client_ref.as_deref(), Some("ref-1"));
+            h.started();
+            assert_eq!(jobs.list().0[0].state, JobState::Loading);
+            h.loaded("cpu");
+            h.token();
+            h.token();
+            let a = &jobs.list().0[0];
+            assert_eq!(
+                (a.state, a.completion_tokens, a.device_actual.as_deref()),
+                (JobState::Running, Some(2), Some("cpu"))
+            );
+            assert!(
+                a.ttft_ms.is_some() && a.first_token_at_utc.is_some() && a.queue_ms.is_some() && a.load_ms.is_some()
+            );
+            h.done(Finished {
+                finish_reason: Some("length".into()),
+                completion_tokens: Some(3),
+                ..Default::default()
+            });
+            h.fail("internal");
+            drop(h);
+            let (active, recent) = jobs.list();
+            assert!(active.is_empty());
+            assert_eq!(recent.len(), 1, "finished once");
+            assert_eq!(
+                (recent[0].state, recent[0].completion_tokens),
+                (JobState::Done, Some(3))
+            );
+            assert!(recent[0].error_code.is_none() && recent[0].duration_ms.is_some());
+        }
+
+        #[test]
+        fn a_client_ref_already_held_is_not_given_to_another_request() {
+            let jobs = Jobs::new();
+            let first = start(&jobs, "a");
+            let copy = start(&jobs, "b");
+            assert_eq!(jobs.list().0[1].client_ref, None, "a ref of an active row");
+            drop(first);
+            drop(copy);
+            let _late = start(&jobs, "c");
+            assert_eq!(jobs.list().0[0].client_ref, None, "a ref of a finished row too");
+            let _other = jobs.start(
+                "d".into(),
+                "chat",
+                "m",
+                "local".into(),
+                "local".into(),
+                Some("ref-2".into()),
+            );
+            assert_eq!(jobs.list().0[1].client_ref.as_deref(), Some("ref-2"));
+        }
+
+        #[test]
+        fn dropped_and_failed_jobs_say_how_they_ended() {
+            let jobs = Jobs::new();
+            drop(start(&jobs, "a"));
+            start(&jobs, "b").fail("overloaded");
+            start(&jobs, "c").fail("client_gone");
+            let recent = jobs.list().1;
+            let got: Vec<(&str, JobState, Option<&str>)> = recent
+                .iter()
+                .map(|j| (j.id.as_str(), j.state, j.error_code.as_deref()))
+                .collect();
+            assert_eq!(
+                got,
+                [
+                    ("c", JobState::Cancelled, Some("client_gone")),
+                    ("b", JobState::Error, Some("overloaded")),
+                    ("a", JobState::Cancelled, Some("cancelled")),
+                ],
+                "newest first"
+            );
+        }
+
+        #[test]
+        fn recent_is_bounded_and_every_key_is_serialized() {
+            let jobs = Jobs::new();
+            for i in 0..MAX_RECENT + 10 {
+                drop(start(&jobs, &i.to_string()));
+            }
+            let recent = jobs.list().1;
+            assert_eq!(recent.len(), MAX_RECENT);
+            assert_eq!(recent[0].id, (MAX_RECENT + 9).to_string());
+            let v = serde_json::to_value(&recent[0]).unwrap();
+            assert_eq!(v.as_object().unwrap().len(), 24, "{v}");
+            assert!(v["prompt_ms"].is_null() && v["state"] == "cancelled");
+        }
+
+        #[test]
+        fn a_huge_model_field_is_not_kept_whole() {
+            let jobs = Jobs::new();
+            let _h = jobs.start(
+                "x".into(),
+                "chat",
+                &"m".repeat(100_000),
+                "local".into(),
+                "local".into(),
+                None,
+            );
+            assert_eq!(jobs.list().0[0].model_id.len(), 200);
+        }
+
+        #[test]
+        fn timestamps_have_milliseconds() {
+            let t = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_042);
+            assert_eq!(utc_ms(t), "2023-11-14T22:13:20.042Z");
+        }
+    }
+}
+
 // ---- redaction ----
 
 /// JSON keys whose string values are replaced by `<redacted>` wherever they appear in text.

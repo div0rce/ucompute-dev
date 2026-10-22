@@ -1,0 +1,146 @@
+/* settings section styles (owner D, plan 5.1). Shared tokens and primitives live in src/ui/; base.css is frozen. */
+.settings {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.settings-nav {
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+  padding: var(--s2);
+  overflow: auto;
+}
+.settings-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.settings-nav a {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 var(--s2);
+  border-radius: var(--r-1);
+  color: var(--text);
+  text-decoration: none;
+}
+.settings-nav a:hover {
+  background: var(--hover);
+}
+.settings-nav a[aria-current="page"] {
+  background: var(--selected);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.settings-page {
+  overflow: auto;
+  padding: var(--s4) var(--s5) var(--s6);
+  max-width: 720px;
+  min-width: 0;
+}
+.settings-page > h2 {
+  font-size: 14px;
+  margin-bottom: var(--s3);
+}
+.settings-page h3 {
+  margin: var(--s4) 0 var(--s2);
+}
+.settings-page .notice {
+  margin: var(--s2) 0;
+}
+.settings-fieldset {
+  border: 0;
+  margin: 0 0 var(--s3);
+  padding: 0;
+  min-width: 0;
+}
+.settings-fieldset legend {
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 6px;
+}
+.settings-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+}
+.settings-row,
+.settings-field {
+  margin: 0 0 var(--s3);
+}
+.settings-field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.settings-field input {
+  width: 240px;
+  max-width: 100%;
+}
+.settings-help {
+  display: block;
+  margin: 4px 0 0;
+  max-width: 64ch;
+}
+.settings-status:empty {
+  display: none;
+}
+.settings-current {
+  margin-bottom: var(--s3);
+}
+.settings-modes {
+  display: grid;
+  gap: var(--s2);
+}
+.settings-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+.settings-mode > span {
+  display: grid;
+  gap: 2px;
+}
+.settings-mode .note {
+  margin-left: 0;
+  font-size: 12px;
+}
+.settings-ack {
+  margin-top: var(--s2);
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0;
+}
+.settings-id {
+  word-spacing: 4px;
+}
+.settings-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.settings-table th,
+.settings-table td {
+  text-align: left;
+  padding: 4px var(--s3) 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.settings-table .num {
+  text-align: right;
+}
+@media (max-width: 899px) {
+  .settings {
+    grid-template-columns: 140px minmax(0, 1fr);
+  }
+  .settings-page {
+    padding: var(--s3);
+  }
+}

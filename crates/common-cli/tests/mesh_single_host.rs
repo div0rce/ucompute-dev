@@ -723,6 +723,29 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
     let table = b.ok(&["peers", "list"]);
     assert!(table.contains("CONNECTED") && !table.contains("not running"), "{table}");
 
+    // E5: Disconnect in daemon B holds A for B's CLI too. `run --peer` (its own client Node) is
+    // refused before it dials; daemon A, which holds nothing, would serve it. Connect ends the hold.
+    let (st, v) = http(
+        api_b,
+        "POST",
+        &format!("/api/peers/{id_a}/disconnect"),
+        Some(serde_json::json!({})),
+    );
+    assert_eq!((st, v["id"].as_str()), (200, Some(id_a.as_str())), "{v}");
+    let err = b.fails_with(
+        &["run", MODEL, "-p", PROMPT, "-n", "4", "--peer", &id_a],
+        "policy_denied",
+    );
+    assert!(err.contains("disconnected by you"), "{err}");
+    let (st, v) = http(
+        api_b,
+        "POST",
+        &format!("/api/peers/{id_a}/connect"),
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(connected(api_b, &id_a), Some(true));
+
     // Revocation with both daemons running (F-06-05). The CLI goes through daemon B (serve.json),
     // which closes A's session at once: daemon A sees it closed within 5 s.
     let r = json(&b.ok(&["peers", "revoke", &label_a, "--json"]));

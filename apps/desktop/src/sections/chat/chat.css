@@ -1,0 +1,192 @@
+/* chat section styles (owner D, plan 5.1). Shared tokens and primitives live in src/ui/; base.css is frozen. */
+.chat-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.chat-select-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.chat-select select {
+  max-width: 260px;
+}
+.chat-local-only {
+  font-size: 12px;
+  color: var(--muted);
+}
+.chat-hint {
+  padding: 6px var(--s3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
+  flex: none;
+}
+
+.chat-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  flex: 1;
+  min-height: 0;
+}
+.chat-body.panel-hidden {
+  grid-template-columns: minmax(0, 1fr) 44px;
+}
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.chat-body .chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s3) var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.chat-body .msg {
+  max-width: 72ch;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.chat-body .msg.user {
+  align-self: flex-end;
+  padding: 6px 10px;
+  border-radius: var(--r-2);
+  background: var(--selected);
+}
+.chat-body .msg .body {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.chat-body .cursor {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+}
+.chat-body .cursor::after {
+  content: none;
+}
+.reply-foot {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.reply-foot .note {
+  display: block;
+  margin-left: 0;
+}
+
+.chat-body .composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4) var(--s3);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+}
+.composer-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.chat-body .composer textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 40vh;
+  line-height: 1.5;
+}
+
+.run-panel {
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  overflow: auto;
+  min-height: 0;
+}
+.run-panel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 var(--s1) 0 var(--s3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  position: sticky;
+  top: 0;
+}
+.panel-hidden .run-panel-bar {
+  padding: 0;
+  justify-content: center;
+}
+.panel-hidden .run-panel-bar h2 {
+  display: none;
+}
+.run-panel-body {
+  padding: var(--s3);
+}
+.run-panel-body h3 {
+  margin: var(--s3) 0 6px;
+}
+.run-panel-body h3:first-child {
+  margin-top: 0;
+}
+.run-panel-body .kv {
+  grid-template-columns: minmax(96px, max-content) minmax(0, 1fr);
+}
+.run-caption {
+  display: block;
+  margin: 6px 0 0;
+}
+/* Narrow panel: state words flow and wrap as text (icon first), notes go on their own line. */
+.run-panel .state {
+  display: inline;
+  white-space: normal;
+}
+.run-panel .state .icon {
+  margin-right: 4px;
+}
+.run-panel .note {
+  margin-left: 0;
+}
+.run-panel .state .note,
+.run-panel dd > .note {
+  display: block;
+}
+@media (max-width: 1099px) {
+  .chat-select select {
+    max-width: 170px;
+  }
+  /* The words stay the selects' accessible names; only their visible copy goes. */
+  .chat-select-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+@media (max-width: 899px) {
+  .chat-body {
+    grid-template-columns: minmax(0, 1fr) 220px;
+  }
+  .chat-select select {
+    max-width: 130px;
+  }
+}
+.chat-body .composer .btn-primary:disabled {
+  background: transparent;
+  border-color: var(--line-input);
+}

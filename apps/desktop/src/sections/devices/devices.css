@@ -1,0 +1,191 @@
+/* Devices section (owner B). Shared tokens and primitives live in src/ui/. Selectors are scoped to this section's
+   containers. */
+
+/* Toolbar: the Networking switch is its own Tab stop, outside role=toolbar. */
+.frame-controls .net-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.frame-controls .net-switch label {
+  display: inline;
+}
+
+/* Table: trust icon in the Name cell. */
+.grid .device-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.grid .trust {
+  display: inline-flex;
+}
+
+/* Banners under the scope row: hints and the inline Remove confirmation. */
+.frame .devices-hint {
+  color: var(--muted);
+}
+.frame .confirm,
+.inspector-panel .confirm,
+.pair-dialog .confirm {
+  margin: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-input);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  max-width: 72ch;
+  display: grid;
+  gap: var(--s2);
+}
+.inspector-panel .confirm,
+.pair-dialog .confirm {
+  margin: var(--s2) 0;
+}
+.confirm-actions {
+  display: flex;
+  gap: var(--s2);
+}
+
+/* Inspector tabs */
+.inspector-panel h3 {
+  margin: var(--s4) 0 var(--s2);
+  color: var(--muted);
+}
+.inspector-panel h3:first-child {
+  margin-top: 0;
+}
+.inspector-panel .detail {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.inspector-panel .tab-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.inspector-panel .tab-foot {
+  margin-top: var(--s3);
+}
+.inspector-panel .device-id-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.inspector-panel .device-id {
+  display: inline;
+  padding: 0 4px;
+  margin: 0;
+  word-spacing: 0.3em;
+}
+.inspector-panel .danger-zone {
+  margin-top: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+.inspector-panel .danger-zone h3 {
+  margin-top: 0;
+  color: var(--danger);
+}
+.inspector-panel .plain-list {
+  margin: 0;
+  padding-left: var(--s4);
+}
+.inspector-panel .plain-list li + li {
+  margin-top: 2px;
+}
+.inspector-panel .grid-scroll {
+  max-height: 260px;
+}
+
+/* Small read-only tables inside the inspector (GPUs, backends, models, performance). */
+table.mini {
+  border-collapse: collapse;
+  margin-bottom: var(--s2);
+  font-size: 12px;
+}
+table.mini caption {
+  caption-side: bottom;
+  text-align: left;
+  color: var(--muted);
+  padding-top: 4px;
+}
+table.mini th,
+table.mini td {
+  padding: 3px var(--s3) 3px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+table.mini th {
+  color: var(--muted);
+  font-weight: 600;
+}
+table.mini .num {
+  text-align: right;
+}
+
+/* Connect form (Connection tab) and the Pair dialog's join form. */
+.inspector-panel .field,
+.pair-dialog .field {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 var(--s3);
+  max-width: 420px;
+}
+.inspector-panel .field label,
+.pair-dialog .field label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.inspector-panel .connect-form {
+  margin-top: var(--s3);
+  max-width: 64ch;
+}
+
+/* Pair dialog */
+.dialog.pair-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+.pair-dialog .pair-tabs {
+  height: var(--tabbar-h);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--s3);
+}
+.pair-dialog .pair-step {
+  display: grid;
+  gap: var(--s3);
+  justify-items: start;
+}
+.pair-dialog .pair-live {
+  display: grid;
+  gap: var(--s2);
+}
+.pair-dialog .pair-code {
+  font-size: 32px;
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  margin: 0;
+  color: var(--text);
+}
+/* One click selects the whole address, so it is copied exactly. */
+.pair-dialog .pair-addr {
+  user-select: all;
+}
+.pair-dialog .qr-payload {
+  display: block;
+  margin-top: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.pair-dialog .notice {
+  margin: var(--s2) 0 0;
+}

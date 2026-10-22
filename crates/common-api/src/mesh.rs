@@ -147,6 +147,7 @@ impl PeerQuota {
             })),
             engine_slots: Some(engine_slots),
             peer_slots: Arc::new(tokio::sync::Semaphore::new(self.peer_slots(engine_slot_count))),
+            jobs: common_observability::jobs::Jobs::new(),
         }
     }
 }
@@ -510,6 +511,8 @@ impl AppState {
         id: PeerId,
         hint: Option<SocketAddr>,
     ) -> Result<Arc<PeerConnection>> {
+        // A held device (E5) is refused before any address is looked at, known or not.
+        node.refuse_held(&id)?;
         let open: Vec<Arc<PeerConnection>> = node.connections().into_iter().filter(|c| c.peer_id == id).collect();
         let flags: Vec<bool> = open.iter().map(|c| c.outbound).collect();
         if let Some(i) = survivor(self.identity.id < id, &flags) {
@@ -552,7 +555,9 @@ impl AppState {
         });
         Err(match e.hint {
             Some(_) => e,
-            None => e.with_hint("check that it is awake and on the same network, or enter its address under Peers"),
+            None => e.with_hint(
+                "check that it is awake and on the same network, or enter its address (Devices in the desktop app)",
+            ),
         })
     }
 
@@ -872,7 +877,9 @@ async fn sync_loop(st: Arc<AppState>, node: Arc<Node>) {
                 .unwrap_or_default()
                 .into_iter()
                 .map(|p| p.id)
-                .filter(|id| !connected.contains(id) && redial.get(id).is_none_or(|(_, next)| *next <= now))
+                .filter(|id| {
+                    !connected.contains(id) && !node.is_held(id) && redial.get(id).is_none_or(|(_, next)| *next <= now)
+                })
                 .collect()
         };
         seen_before = seen_now;
@@ -1078,6 +1085,22 @@ pub async fn generate_remote_audited(
     privacy: &str,
     cancel: CancellationToken,
 ) -> Result<GenerateStream> {
+    generate_remote_audited_with_id(audit, conn, model_id, model_sha256, req, privacy, cancel)
+        .await
+        .map(|(_, stream)| stream)
+}
+
+/// [`generate_remote_audited`], also returning the `request_id` both sides' entries (and job
+/// rows) carry.
+pub async fn generate_remote_audited_with_id(
+    audit: Arc<Audit>,
+    conn: Arc<PeerConnection>,
+    model_id: &str,
+    model_sha256: &str,
+    req: GenerateRequest,
+    privacy: &str,
+    cancel: CancellationToken,
+) -> Result<(String, GenerateStream)> {
     let peer = conn.peer_id;
     // Any other mode is refused inside `generate_remote_with_id` before a stream opens.
     let leaves = serde_json::from_value::<PrivacyMode>(Value::String(privacy.into()))
@@ -1091,8 +1114,8 @@ pub async fn generate_remote_audited(
     let mut outcome = Outcome::new(audit, peer, model_id);
     match remote::generate_remote_with_id(conn, model_id, model_sha256, req, privacy, cancel).await {
         Ok((request_id, inner)) => {
-            outcome.request_id = Some(request_id);
-            Ok(Audited { inner, outcome }.boxed())
+            outcome.request_id = Some(request_id.clone());
+            Ok((request_id, Audited { inner, outcome }.boxed()))
         }
         Err(e) => {
             outcome.finish(e.code.as_str());
@@ -1221,22 +1244,98 @@ pub async fn network_put(
     Ok(axum::Json(st.network_status().await))
 }
 
-/// Pinned peers (with `connected`, `health`, `last_error` and their groups), peers mDNS currently
-/// sees (never this device; `addrs` best first; `trusted` only when pinned here, never a trust
-/// decision by itself) and the revocations this store holds. `health` is `Node::health`
-/// (F-02-05): `connected`, `unhealthy`, `reconnecting` or `disconnected`; `disconnected` too while
-/// networking is off or before the first connection to that device. `last_error` is
-/// `Node::dial_failure`: the latest failed dial to it (address, code, message, hint, time) since
-/// its last connection, `null` when there is none or networking is off.
+/// Peer-supplied text shown as is: at most 64 characters.
+fn cap(s: &str) -> String {
+    s.chars().take(64).collect()
+}
+
+/// A peer's hardware report with every string at most 64 characters and every list at most 32
+/// long: it is the peer's own JSON, re-typed, and served on every `/api/peers` poll.
+fn cap_hardware(mut h: common_hardware::HardwareReport) -> common_hardware::HardwareReport {
+    const MAX_ITEMS: usize = 32;
+    let host = &mut h.host;
+    for s in [&mut host.os, &mut host.os_version, &mut host.arch, &mut host.chip] {
+        *s = cap(s);
+    }
+    h.cpu.model = cap(&h.cpu.model);
+    h.cpu.arch = cap(&h.cpu.arch);
+    h.cpu.features.truncate(MAX_ITEMS);
+    h.cpu.features.iter_mut().for_each(|f| *f = cap(f));
+    h.gpus.truncate(MAX_ITEMS);
+    for g in &mut h.gpus {
+        for s in [&mut g.name, &mut g.vendor, &mut g.backend] {
+            *s = cap(s);
+        }
+    }
+    h.backends.truncate(MAX_ITEMS);
+    for b in &mut h.backends {
+        b.name = cap(&b.name);
+        b.reason = b.reason.as_deref().map(cap);
+    }
+    h
+}
+
+/// E1: what a connected peer signed at this connection's handshake, re-typed here (its raw JSON is
+/// never passed on): hardware and free memory as measured when its networking started, engines,
+/// version, and the models it caches (resolved to ids by `ids`, sha256 → this device's store or
+/// catalog id; `null` for a file this device does not know). `hardware` is `null` when the peer's
+/// report does not parse as this version's `HardwareReport`.
+fn capabilities_json(pc: &PeerConnection, ids: &HashMap<String, String>) -> Value {
+    let Some(c) = lock(&pc.capabilities).clone() else {
+        return Value::Null;
+    };
+    let hardware = serde_json::from_str::<common_hardware::HardwareReport>(&c.hardware_json)
+        .ok()
+        .map(cap_hardware);
+    let models: Vec<Value> = c
+        .cached_model_sha256
+        .iter()
+        .filter(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|sha| json!({ "sha256": sha, "id": ids.get(&sha.to_ascii_lowercase()) }))
+        .collect();
+    json!({
+        "common_version": cap(&c.common_version),
+        "protocol_minor": pc.negotiated_minor,
+        "engines": c.engines.iter().map(|e| cap(e)).collect::<Vec<_>>(),
+        "issued_at_utc": common_identity::format_utc(c.issued_at),
+        "free_memory_bytes": c.free_memory_bytes,
+        "hardware": hardware,
+        "models": models,
+    })
+}
+
+/// Pinned peers (with `connected`, `health`, `last_error`, `held`, their groups and, while
+/// connected, `capabilities` and `connection`), peers mDNS currently sees (never this device;
+/// `addrs` best first; `trusted` only when pinned here, never a trust decision by itself) and the
+/// revocations this store holds. `health` is `Node::health` (F-02-05): `connected`, `unhealthy`,
+/// `reconnecting` or `disconnected`; `disconnected` too while networking is off or before the first
+/// connection to that device. `last_error` is `Node::dial_failure`: the latest failed dial to it
+/// (address, code, message, hint, time) since its last connection, `null` when there is none or
+/// networking is off. `held`: disconnected here by the user (E5) until Connect or a restart.
 pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
     let (node, discovered) = {
         let net = st.net.lock().await;
         (net.node.clone(), net.discovered())
     };
-    let connected: HashSet<PeerId> = node
-        .as_ref()
-        .map(|n| n.connections().iter().map(|c| c.peer_id).collect())
-        .unwrap_or_default();
+    // Per peer, the connection to use comes first in `connections()`.
+    let mut conns: HashMap<PeerId, Arc<PeerConnection>> = HashMap::new();
+    for c in node.as_ref().map(|n| n.connections()).unwrap_or_default() {
+        conns.entry(c.peer_id).or_insert(c);
+    }
+    let mut ids: HashMap<String, String> = st
+        .catalog
+        .models
+        .iter()
+        .map(|e| (e.sha256.to_ascii_lowercase(), e.id.clone()))
+        .collect();
+    // Only to name a peer's cached models: an unreadable store never fails the peer list (ids fall
+    // back to the catalog or null). ponytail: the manifests are read on every poll; cache the map
+    // if a store grows past a few dozen models.
+    let local = st.store.list().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "model store not listed; peer model ids from the catalog only");
+        vec![]
+    });
+    ids.extend(local.into_iter().map(|m| (m.sha256.to_ascii_lowercase(), m.id)));
     let health = |id: &PeerId| {
         node.as_ref()
             .and_then(|n| n.health(id))
@@ -1253,12 +1352,16 @@ pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<a
                 .filter(|g| g.members.contains(&p.id))
                 .map(|g| g.name.as_str())
                 .collect();
+            let conn = conns.get(&p.id);
             let mut v = json!(p);
             v["short_label"] = json!(p.id.short_label());
-            v["connected"] = json!(connected.contains(&p.id));
+            v["connected"] = json!(conn.is_some());
             v["health"] = json!(health(&p.id));
             v["last_error"] = json!(node.as_ref().and_then(|n| n.dial_failure(&p.id)));
+            v["held"] = json!(node.as_ref().is_some_and(|n| n.is_held(&p.id)));
             v["groups"] = json!(names);
+            v["capabilities"] = conn.map_or(Value::Null, |c| capabilities_json(c, &ids));
+            v["connection"] = json!(conn.map(|c| c.info()));
             v
         })
         .collect();
@@ -1287,21 +1390,38 @@ pub async fn peer_connect(
     Json(body): Json<ConnectBody>,
 ) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
     let id = st.resolve_peer(&id)?;
-    let not_paired = || {
+    paired(&st, &id)?;
+    let hint = body.addr.as_deref().map(parse_dial_addr).transpose()?;
+    let node = st.node().await?;
+    node.release(&id);
+    lock(&st.redial).remove(&id);
+    st.peer_connection_via(&node, id, hint).await?;
+    Ok(axum::Json(paired(&st, &id)?))
+}
+
+/// The record of a device paired here, else `peer_unauthorized` (nothing is sent for it).
+fn paired(st: &AppState, id: &PeerId) -> Result<PeerRecord> {
+    st.peers.get(id)?.ok_or_else(|| {
         CommonError::new(
             ErrorCode::PeerUnauthorized,
             format!("no paired device {}", id.short_label()),
         )
         .with_hint("pair it first")
-    };
-    if st.peers.get(&id)?.is_none() {
-        return Err(not_paired().into());
-    }
-    let hint = body.addr.as_deref().map(parse_dial_addr).transpose()?;
-    let node = st.node().await?;
-    lock(&st.redial).remove(&id);
-    st.peer_connection_via(&node, id, hint).await?;
-    Ok(axum::Json(st.peers.get(&id)?.ok_or_else(not_paired)?))
+    })
+}
+
+/// E5: close every connection to a paired device (`CLOSE_HELD`; audited `peer_disconnected`,
+/// reason `by_user`) and refuse it in both directions, including this device's own requests and
+/// redials, until `POST /api/peers/{id}/connect` or networking or the service restarts. The device
+/// sees `peer_held`. Returns its record.
+pub async fn peer_disconnect(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
+    let id = st.resolve_peer(&id)?;
+    let rec = paired(&st, &id)?;
+    st.node().await?.hold(&id);
+    Ok(axum::Json(rec))
 }
 
 /// Unpin without revoking (the device may pair again) and close its connections.
@@ -1317,6 +1437,8 @@ pub async fn peer_delete(
     let node = st.net.lock().await.node.clone();
     if let Some(node) = node {
         node.disconnect(&id, "unpaired").await;
+        // A hold belongs to the pairing it was set on: pairing the device again starts unheld.
+        node.release(&id);
     }
     st.audit("peer_removed", Some(&id), json!({}));
     Ok(StatusCode::NO_CONTENT)
@@ -1340,6 +1462,7 @@ pub async fn peer_revoke(
     let node = st.net.lock().await.node.clone();
     if let Some(node) = node {
         node.disconnect(&id, "revoked").await;
+        node.release(&id);
     }
     let _ = st.revocations.send(rev.clone());
     st.audit(
@@ -1631,6 +1754,47 @@ mod tests {
         assert_eq!((s.privacy, s.network_enabled), (PrivacyMode::TrustedGroup, false));
         std::fs::write(Settings::path(&paths), "{nope").unwrap();
         assert_eq!(Settings::load(&paths).unwrap_err().code, ErrorCode::Io);
+    }
+
+    /// A paired device's hardware report is its own text: every string 64 characters at most,
+    /// every list 32 items at most, before `/api/peers` serves it.
+    #[test]
+    fn peer_hardware_text_is_bounded() {
+        use common_hardware::{BackendInfo, GpuInfo, HardwareReport};
+        let long = "x".repeat(10_000);
+        let mut h = HardwareReport::default();
+        h.host.chip = long.clone();
+        h.cpu.model = long.clone();
+        h.cpu.features = vec![long.clone(); 500];
+        h.gpus = vec![
+            GpuInfo {
+                name: long.clone(),
+                vendor: long.clone(),
+                backend: long.clone(),
+                ..GpuInfo::default()
+            };
+            100
+        ];
+        h.backends = vec![
+            BackendInfo {
+                name: long.clone(),
+                available: false,
+                reason: Some(long.clone())
+            };
+            100
+        ];
+        let c = cap_hardware(h);
+        assert_eq!((c.cpu.features.len(), c.gpus.len(), c.backends.len()), (32, 32, 32));
+        let v = serde_json::to_value(&c).unwrap();
+        fn longest(v: &Value) -> usize {
+            match v {
+                Value::String(s) => s.chars().count(),
+                Value::Array(a) => a.iter().map(longest).max().unwrap_or(0),
+                Value::Object(o) => o.values().map(longest).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        assert_eq!(longest(&v), 64, "{v}");
     }
 
     /// `peer_quota` is optional field by field; the defaults are the policy crate's.

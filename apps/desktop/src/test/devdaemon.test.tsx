@@ -1,5 +1,5 @@
 // Dev-only `?daemon=` selection for SINGLE-HOST UI testing: two tabs on the Vite dev server, two daemons.
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { configure, getBaseUrl } from "../api/client";
@@ -59,11 +59,12 @@ describe("devDaemonUrl", () => {
 });
 
 describe("app with ?daemon=", () => {
-  it("talks to the chosen daemon and shows its URL in Diagnostics (development)", async () => {
+  it("talks to the chosen daemon and shows its URL in Settings › General (development)", async () => {
     const fake = installFakeDaemon();
-    window.history.replaceState(null, "", "/?daemon=http://127.0.0.1:18301#/diagnostics");
+    window.history.replaceState(null, "", "/?daemon=http://127.0.0.1:18301#/settings/general");
     render(<App />);
-    await screen.findByText("Running");
+    // The status bar says "Running" too; this is the About block's own service line (plan §2.7).
+    await within(screen.getByRole("main")).findByText("Running");
     expect(getBaseUrl()).toBe("http://127.0.0.1:18301");
     const urls = fake.fetchMock.mock.calls.map(([u]) => String(u));
     expect(urls.length).toBeGreaterThan(0);
@@ -75,9 +76,9 @@ describe("app with ?daemon=", () => {
   it("keeps the default daemon in a production build", async () => {
     vi.stubEnv("DEV", false);
     const fake = installFakeDaemon();
-    window.history.replaceState(null, "", "/?daemon=http://127.0.0.1:18301#/diagnostics");
+    window.history.replaceState(null, "", "/?daemon=http://127.0.0.1:18301#/settings/general");
     render(<App />);
-    await screen.findByText("Running");
+    await within(screen.getByRole("main")).findByText("Running");
     await waitFor(() => expect(getBaseUrl()).toBe(DEFAULT));
     expect(fake.fetchMock.mock.calls.every(([u]) => String(u).startsWith(`${DEFAULT}/`))).toBe(true);
     expect(screen.getByText(DEFAULT, { selector: "code" })).toBeTruthy();

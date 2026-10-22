@@ -276,3 +276,12 @@ Commands and results on the owner's Mac (Apple M2, macOS 26.2, debug builds; loa
 - Earlier in the same change set the integrator also ran `cargo test -p common-network --test discovery` with mDNS on (SINGLE-HOST, loopback adverts): passed.
 
 Label: unit and SINGLE-HOST evidence only. Nothing here satisfies a two-machine criterion; the physical Mac/Mac/Windows run with the rebuilt apps follows (`tests/distributed/two_machine/discovery_two_machine.py`, committed here).
+
+## Desktop UI 2.0 (2026-10-22): unit and SINGLE-HOST verification
+
+Details, reviews and open items: `docs/evidence/desktop-ui2-2026-10-22.md`. Owner's Mac (Apple M2, macOS 26.2, load average 7-12):
+- `cd apps/desktop && caffeinate -i pnpm test --maxWorkers=2` → 33 files, 420 passed, 0 failed; `npx tsc --noEmit`, `pnpm build` clean (no axe code in the bundle).
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `caffeinate -i env COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 COMMON_MDNS=0 cargo test --no-fail-fast` → 431 passed, 2 failed (signal-exit timing bound under load; 3/3 alone), 2 ignored.
+- Reviews: 29 confirmed findings (2 high) plus 16 Devices-versus-plan gaps, all fixed with tests.
+Label: unit and SINGLE-HOST (dev build against a scratch daemon); packaged apps, screen readers and physical checks pending.

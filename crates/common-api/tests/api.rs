@@ -8,7 +8,7 @@ use common::*;
 use common_api::{bind_addr, serve, serve_on, ApiConfig, ROUTES, SHUTDOWN_GRACE};
 use common_core::ErrorCode;
 use common_hardware::HardwareReport;
-use common_runtime::manager::{LoadOptions, Slot};
+use common_runtime::manager::LoadOptions;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -520,11 +520,7 @@ async fn status_ready_models_and_admin_validation() {
         embeddings: true,
         ..srv.state.load_options()
     };
-    *srv.state.manager.loaded.lock().await = Some(Slot {
-        model_id: MODEL_ID.into(),
-        opts,
-        model: FakeModel::new(1, Duration::ZERO),
-    });
+    *srv.state.manager.loaded.lock().await = Some(slot(MODEL_ID, opts, FakeModel::new(1, Duration::ZERO)));
     let r = c
         .post(srv.url("/v1/embeddings"))
         .json(&json!({"model": MODEL_ID, "input": ["a b", "c"]}))
@@ -719,6 +715,23 @@ async fn cross_origin_and_foreign_host_requests_are_refused() {
         .unwrap();
     assert_eq!(r.status(), 204);
     assert_eq!(r.headers()["access-control-allow-origin"], "tauri://localhost");
+    // E2/E3: the app's own request id may ride on a chat (preflighted because it is a custom header).
+    let r = c
+        .request(reqwest::Method::OPTIONS, srv.url("/v1/chat/completions"))
+        .header("origin", "tauri://localhost")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type, x-common-client-ref")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let allowed = r.headers()["access-control-allow-headers"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    for h in ["content-type", "x-common-client-ref"] {
+        assert!(allowed.split(", ").any(|a| a == h), "{h} not in {allowed}");
+    }
     let r = c
         .post(srv.url("/api/unload"))
         .header("origin", "tauri://localhost")
@@ -926,5 +939,65 @@ async fn overload_at_10x_capacity_is_bounded() {
         metric(&text, "common_requests_rejected_total{reason=\"queue_full\"}").unwrap(),
         28.0
     );
+    srv.stop().await;
+}
+
+/// E2 with the FAKE double in the slot: status and both model lists answer while something holds
+/// the slot (a load holds it for the whole hash check and engine start; before E2 these requests
+/// waited that long). The loaded model stays visible from the last moment the slot was free.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_and_model_lists_answer_while_the_slot_is_held_fake() {
+    let (srv, _dir) = empty_server(cfg()).await;
+    let c = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let get = |path: &'static str| {
+        let (c, url) = (c.clone(), srv.url(path));
+        async move {
+            let r = c.get(url).send().await.unwrap_or_else(|e| panic!("GET {path}: {e}"));
+            assert_eq!(r.status(), 200, "{path}");
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    let v = get("/api/status").await;
+    assert_eq!(
+        v["engine"],
+        json!({"state": "idle", "loading_model_id": null, "loading_for_ms": null})
+    );
+    assert!(v["loaded"].is_null(), "{v}");
+
+    seed_slot(&srv.state, MODEL_ID, FakeModel::new(1, Duration::ZERO)).await;
+    let v = get("/api/status").await;
+    assert_eq!(v["engine"]["state"], "ready");
+    assert_eq!(v["loaded"]["model_id"], MODEL_ID);
+    assert_eq!(v["loaded"]["loaded_for"], "local");
+    assert_eq!(v["loaded"]["in_flight"], 0);
+    assert!(
+        v["loaded"]["loaded_at_utc"].is_string() && v["loaded"].get("context_note").is_some(),
+        "{v}"
+    );
+
+    let held = srv.state.manager.loaded.lock().await;
+    let t0 = Instant::now();
+    let v = get("/api/status").await;
+    assert_eq!(
+        (v["engine"]["state"].as_str(), v["loaded"]["model_id"].as_str()),
+        (Some("ready"), Some(MODEL_ID))
+    );
+    // (Not downloaded here, so its catalog row says loaded: false; the point is that it answers.)
+    assert!(get("/api/models").await["models"].is_array());
+    let list = get("/v1/models").await;
+    let m = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == MODEL_ID)
+        .unwrap();
+    assert_eq!(m["common"]["loaded"], true);
+    assert_eq!(get("/v1/models/stories15M-q4_0").await["common"]["loaded"], true);
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    drop(held);
     srv.stop().await;
 }

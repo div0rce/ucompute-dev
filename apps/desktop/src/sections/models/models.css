@@ -1,0 +1,115 @@
+/* models section styles (owner C, plan 5.1). Shared tokens and primitives live in src/ui/; base.css is frozen. */
+
+.model-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line-input);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.model-warn {
+  margin-left: 8px;
+}
+.model-confirm p {
+  max-width: 64ch;
+}
+.model-caveat {
+  display: block;
+  margin: var(--s2) 0 0;
+}
+.model-locations h3,
+.model-download h3 {
+  margin: var(--s3) 0 var(--s1);
+}
+.model-locations h3:first-child {
+  margin-top: 0;
+}
+.model-load-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s2) var(--s3);
+  margin-top: var(--s3);
+}
+.model-load-form label,
+.import-form label {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.import-form {
+  display: grid;
+  gap: var(--s2);
+  min-width: min(480px, calc(100vw - 64px));
+}
+.import-form input {
+  width: 100%;
+}
+.field-error {
+  font-size: 12px;
+}
+.sub-table {
+  border-collapse: collapse;
+  margin-top: var(--s1);
+  font-variant-numeric: tabular-nums;
+}
+.sub-table caption {
+  caption-side: bottom;
+  text-align: left;
+  margin: var(--s1) 0 0;
+}
+.sub-table th,
+.sub-table td {
+  padding: 3px var(--s4) 3px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.sub-table th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.model-download progress {
+  width: min(360px, 100%);
+  margin-bottom: var(--s2);
+  accent-color: var(--accent);
+}
+
+/* FitBar (src/components/FitBar.tsx): weights + KV cache + buffers + overhead against available memory. */
+.fit {
+  display: grid;
+  gap: 4px;
+  max-width: 480px;
+  margin: var(--s2) 0 var(--s3);
+}
+.fit-track {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line-input);
+  border-radius: 5px;
+  background: var(--surface-2);
+}
+.fit-seg {
+  width: var(--w, 0);
+  height: 100%;
+  background: var(--accent);
+}
+.fit-seg.kv {
+  opacity: 0.7;
+}
+.fit-seg.compute {
+  opacity: 0.45;
+}
+.fit-seg.overhead {
+  opacity: 0.25;
+}
+.fit-track.over .fit-seg {
+  background: var(--warn);
+}
+.fit-legend {
+  font-size: 12px;
+  color: var(--muted);
+}

@@ -25,7 +25,7 @@ use quinn::{ConnectionError, IdleTimeout, TransportConfig, TransportErrorCode, V
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -41,6 +41,9 @@ pub const CLOSE_UNAUTHORIZED: u32 = 0x5541;
 pub const CLOSE_PROTOCOL: u32 = 0x5056;
 /// `'FT'`: a control frame exceeded its bound.
 pub const CLOSE_FRAME_TOO_LARGE: u32 = 0x4654;
+/// `'HD'`: this device's owner disconnected the peer ([`Node::hold`]); it is refused until they
+/// connect it again. Read as `peer_held` by builds that know it, `peer_lost` by older ones.
+pub const CLOSE_HELD: u32 = 0x4844;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// `peer_rejected` lines written per minute from inbound connections; the rest are counted.
@@ -76,8 +79,13 @@ pub struct ControlStream {
 
 /// An authenticated connection to a pinned peer.
 pub struct PeerConnection {
+    /// Unique per connection in this process (never reused, unlike `quinn::Connection::stable_id`).
+    pub id: u64,
     pub peer_id: PeerId,
     pub remote_addr: SocketAddr,
+    /// When the control handshake finished.
+    pub opened_at_utc: String,
+    opened: Instant,
     pub conn: quinn::Connection,
     /// Received right after Hello; refreshed by Status messages.
     pub capabilities: std::sync::Mutex<Option<Capabilities>>,
@@ -101,10 +109,46 @@ impl PeerConnection {
         InFlight(self.clone())
     }
 
-    fn is_retired(&self) -> bool {
+    pub(crate) fn is_retired(&self) -> bool {
         self.retired.load(Ordering::SeqCst)
     }
+
+    /// Whole seconds since the control handshake finished.
+    pub fn connected_s(&self) -> u64 {
+        self.opened.elapsed().as_secs()
+    }
+
+    /// Who opened it, its age and its traffic now (`GET /api/peers`).
+    pub fn info(&self) -> ConnectionInfo {
+        let stats = self.conn.stats();
+        ConnectionInfo {
+            id: self.id,
+            opened_at_utc: self.opened_at_utc.clone(),
+            remote_addr: self.remote_addr.to_string(),
+            direction: if self.outbound { "outbound" } else { "inbound" },
+            rtt_ms: self.conn.rtt().as_secs_f64() * 1000.0,
+            tx_bytes: stats.udp_tx.bytes,
+            rx_bytes: stats.udp_rx.bytes,
+            lost_packets: stats.path.lost_packets,
+        }
+    }
 }
+
+/// [`PeerConnection::info`]. Byte counts are UDP payload bytes since the connection opened,
+/// keep-alives included; `id` changes when the connection does, so rates are taken within one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConnectionInfo {
+    pub id: u64,
+    pub opened_at_utc: String,
+    pub remote_addr: String,
+    pub direction: &'static str,
+    pub rtt_ms: f64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub lost_packets: u64,
+}
+
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
 /// Guard from [`PeerConnection::in_flight`].
 pub struct InFlight(Arc<PeerConnection>);
@@ -166,6 +210,10 @@ pub struct Node {
     rejections: Mutex<RejectionLog>,
     /// Latest failed outbound dial per (peer, address) since the peer's last connection.
     dial_failures: Mutex<HashMap<(PeerId, SocketAddr), (DialFailure, Instant)>>,
+    /// Peers this device's owner disconnected ([`Node::hold`]), each with whether a refused
+    /// inbound connection from it was audited during this hold. In memory: a new Node (networking
+    /// or service restart) starts empty.
+    held: Mutex<HashMap<PeerId, bool>>,
 }
 
 /// Fixed one-minute window over inbound `peer_rejected` audit lines.
@@ -249,7 +297,9 @@ fn unproven(e: CommonError, shown: bool, addr: SocketAddr, expected: &PeerId) ->
         ErrorCode::PeerUnauthorized,
         format!("the device at {addr} did not prove it is {}", expected.short_label()),
     )
-    .with_hint("nothing was trusted or saved; check the address shown on that device under Peers")
+    .with_hint(
+        "nothing was trusted or saved; check the address that device shows for itself (Devices in its desktop app)",
+    )
 }
 
 /// A quinn connection error as a typed `CommonError`. TLS alerts carry the verifier's verdict
@@ -307,6 +357,7 @@ fn app_error(code: u64, reason: &[u8]) -> CommonError {
         c if c == u64::from(CLOSE_FRAME_TOO_LARGE) => {
             (ErrorCode::FrameTooLarge, "the peer rejected a frame as too large")
         }
+        c if c == u64::from(CLOSE_HELD) => (ErrorCode::PeerHeld, "the other device disconnected this one"),
         _ => (ErrorCode::PeerLost, "closed by peer"),
     };
     CommonError::new(ec, format!("{why} (code {code:#x} {reason})"))
@@ -317,6 +368,7 @@ fn close_code(e: &CommonError) -> u32 {
         ErrorCode::PeerRevoked => CLOSE_REVOKED,
         ErrorCode::PeerUnauthorized => CLOSE_UNAUTHORIZED,
         ErrorCode::FrameTooLarge => CLOSE_FRAME_TOO_LARGE,
+        ErrorCode::PeerHeld => CLOSE_HELD,
         _ => CLOSE_PROTOCOL,
     }
 }
@@ -515,6 +567,7 @@ impl Node {
             me: me.clone(),
             rejections: Mutex::new(RejectionLog::new(Instant::now())),
             dial_failures: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
         });
         tracing::info!(addr = %endpoint.local_addr()?, "peer endpoint listening");
         // The loop holds only a Weak: dropping the last Node closes the endpoint (Drop) and ends it.
@@ -690,8 +743,11 @@ impl Node {
         outbound: bool,
     ) -> Result<(Arc<PeerConnection>, bool)> {
         let pc = Arc::new(PeerConnection {
+            id: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             peer_id: peer,
             remote_addr: conn.remote_address(),
+            opened_at_utc: utc_now(),
+            opened: Instant::now(),
             conn,
             capabilities: Mutex::new(Some(caps)),
             negotiated_minor: minor,
@@ -728,7 +784,12 @@ impl Node {
         let Some(keep) = keep else {
             return Err(CommonError::new(ErrorCode::PeerLost, "no live connection to the peer"));
         };
-        if let Err(e) = allowed(&self.peers, &peer) {
+        // A hold placed during the handshake (E5) closes it like a revoke does.
+        let refusal = match allowed(&self.peers, &peer) {
+            Err(e) => Some((close_code(&e), e)),
+            Ok(()) => self.refuse_held(&peer).err().map(|e| (CLOSE_HELD, e)),
+        };
+        if let Some((code, e)) = refusal {
             let gone: Vec<Arc<PeerConnection>> = {
                 let mut g = lock(&self.conns);
                 let (gone, rest) = g.drain(..).partition(|c| c.peer_id == peer);
@@ -736,8 +797,7 @@ impl Node {
                 gone
             };
             for c in gone.iter().chain([&pc]) {
-                c.conn
-                    .close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+                c.conn.close(VarInt::from_u32(code), e.code.as_str().as_bytes());
             }
             return Err(e);
         }
@@ -808,6 +868,10 @@ impl Node {
             conn.close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
             return rejected(Some(&peer), e);
         }
+        if self.is_held(&peer) {
+            conn.close(VarInt::from_u32(CLOSE_HELD), b"held");
+            return self.held_refused(&peer, &addr);
+        }
         let registered = self
             .finish_handshake(&conn, peer, false)
             .await
@@ -825,8 +889,65 @@ impl Node {
                 );
                 let _ = tx.send(pc).await;
             }
+            Err(_) if self.is_held(&peer) => self.held_refused(&peer, &addr),
             Err(e) => rejected(Some(&peer), e),
         }
+    }
+
+    /// E5: close every connection to `peer` with [`CLOSE_HELD`] (audited `peer_disconnected`,
+    /// reason `by_user`) and refuse it in both directions until [`Node::release`] or this Node
+    /// stops (networking turned off or restarted, the service restarted). The hold lives in this
+    /// Node's memory (owner decision 3); a process with its own Node (`common run --peer` builds a
+    /// client-only one) asks the running daemon (`GET /api/peers` `held`) and holds the device in
+    /// its Node before dialling, so [`Node::connect`] refuses it there too.
+    pub fn hold(&self, peer: &PeerId) {
+        lock(&self.held).insert(*peer, false);
+        self.close_peer(peer, CLOSE_HELD, "by_user");
+    }
+
+    /// Ends a [`Node::hold`]; the next dial in either direction is admitted as usual.
+    pub fn release(&self, peer: &PeerId) {
+        lock(&self.held).remove(peer);
+    }
+
+    pub fn is_held(&self, peer: &PeerId) -> bool {
+        lock(&self.held).contains_key(peer)
+    }
+
+    /// `PolicyDenied` while `peer` is held: no dial path of this Node (its sync loop, requests and
+    /// connects through the daemon's API, the CLI's client Node) reaches it (see [`Node::hold`]).
+    pub fn refuse_held(&self, peer: &PeerId) -> Result<()> {
+        if !self.is_held(peer) {
+            return Ok(());
+        }
+        Err(CommonError::new(
+            ErrorCode::PolicyDenied,
+            format!("{} is disconnected by you; connect it first", peer.short_label()),
+        )
+        .with_hint(format!("POST /api/peers/{}/connect", peer.to_hex())))
+    }
+
+    /// The `peer_rejected` line (reason `held`) for a held peer's connection, once per hold (the
+    /// peer redials with backoff, and each refusal says nothing new) and within the inbound
+    /// rejection cap like every other refusal.
+    fn held_refused(&self, peer: &PeerId, addr: &str) {
+        tracing::info!(peer = %peer.short_label(), addr, "held peer refused");
+        let suppressed = {
+            let mut held = lock(&self.held);
+            let Some(audited) = held.get_mut(peer).filter(|a| !**a) else {
+                return;
+            };
+            let Some(suppressed) = lock(&self.rejections).admit(Instant::now()) else {
+                return;
+            };
+            *audited = true;
+            suppressed
+        };
+        self.audit(
+            "peer_rejected",
+            Some(peer),
+            serde_json::json!({ "addr": addr, "reason": "held", "detail": "disconnected by you", "suppressed": suppressed }),
+        );
     }
 
     /// Connect to a pinned peer; Hello/Capabilities exchanged; typed errors: PeerUnauthorized,
@@ -843,6 +964,7 @@ impl Node {
     /// nothing and records nothing.
     pub async fn connect(&self, addr: SocketAddr, expected: PeerId) -> Result<Arc<PeerConnection>> {
         allowed(&self.peers, &expected)?;
+        self.refuse_held(&expected)?;
         if let Some(live) = self.live(&expected) {
             return Ok(live);
         }
@@ -971,6 +1093,11 @@ impl Node {
 
     /// Close every connection to `id` with the REVOKED close code (F-06-05, ≤ 5 s).
     pub async fn disconnect(&self, id: &PeerId, reason: &str) {
+        self.close_peer(id, CLOSE_REVOKED, reason);
+    }
+
+    /// Close every connection to `id` with `code`; audited `peer_disconnected` when one was open.
+    fn close_peer(&self, id: &PeerId, code: u32, reason: &str) {
         let victims: Vec<Arc<PeerConnection>> = {
             let mut g = lock(&self.conns);
             let (gone, keep): (Vec<_>, Vec<_>) = g.drain(..).partition(|c| c.peer_id == *id);
@@ -978,7 +1105,7 @@ impl Node {
             gone
         };
         for c in &victims {
-            c.conn.close(VarInt::from_u32(CLOSE_REVOKED), reason.as_bytes());
+            c.conn.close(VarInt::from_u32(code), reason.as_bytes());
         }
         if !victims.is_empty() {
             self.audit(
@@ -1103,6 +1230,7 @@ mod tests {
             (ErrorCode::PeerUnauthorized, CLOSE_UNAUTHORIZED),
             (ErrorCode::FrameTooLarge, CLOSE_FRAME_TOO_LARGE),
             (ErrorCode::ProtocolIncompatible, CLOSE_PROTOCOL),
+            (ErrorCode::PeerHeld, CLOSE_HELD),
         ] {
             assert_eq!(close_code(&CommonError::new(ec, "")), code);
             assert_eq!(map_conn_error(&app(code)).code, ec);

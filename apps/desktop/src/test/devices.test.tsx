@@ -1,15 +1,17 @@
 // Defects seen with the installed apps on a Mac and a Windows laptop (docs/evidence/desktop-two-machine-2026-10-19.md)
-// and the Peers view's discovery and connection state. Unit level against the fake daemon: no test here claims two
-// devices; the physical two-machine checks are the integrator's.
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+// and the Devices section's discovery and connection state. Unit level against the fake daemon: no test here claims
+// two devices; the physical two-machine checks are the integrator's. Migrated from the Peers view (plan §5.4): same
+// assertions, selectors by role and column header. Deliberate changes: "Offline" reads "Not seen nearby"; a device
+// whose last dial found nothing and that is not announced nearby reads "Not seen nearby" with the reason in its
+// inspector (plan §2.2 ★7); Connect dials from the toolbar and the optional address lives in the Connection tab;
+// the device name is edited in Settings › Network (D), so its field is no longer asserted here.
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "../App";
-import { refreshStatus } from "../daemon";
-import { fitText, plural } from "../format";
+import { bodies, cellText, inspector, renderDevices, rowOf, selectionActions, toolbar } from "../sections/devices/fixtures";
+import { setTable } from "../state/ui";
 import { chatHistory, daemon, lastError, privacy, runTarget, settings } from "../state/stores";
-import { Peers } from "../views/Peers";
-import { installFakeDaemon, LOADED, NETWORK, NETWORK_ON, PEER, PRIVACY, STRANGER } from "./mocks";
+import { installFakeDaemon, NETWORK, NETWORK_ON, PEER, PRIVACY, STRANGER } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
@@ -22,51 +24,32 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 const TRUSTED = { ...PRIVACY, mode: "trusted_group" as const };
-const posts = (fake: ReturnType<typeof installFakeDaemon>, path: string) =>
-  fake.fetchMock.mock.calls
-    .filter(([u, init]) => String(u).endsWith(path) && (init as RequestInit)?.method === "POST")
-    .map(([, init]) => JSON.parse(String((init as RequestInit).body ?? "{}")));
-const chatBody = (fake: ReturnType<typeof installFakeDaemon>) => posts(fake, "/v1/chat/completions").at(-1);
+const posts = (fake: ReturnType<typeof installFakeDaemon>, path: string) => bodies(fake, "POST", path);
+const tab = async (user: ReturnType<typeof userEvent.setup>, name: string) => user.click(await within(inspector()).findByRole("tab", { name }));
+const pick = async (user: ReturnType<typeof userEvent.setup>, name: string) => user.click(await rowOf(name));
 
 describe("E1: no macOS wording on other systems", () => {
-  it.each(["home", "models", "chat", "hardware", "settings", "peers", "privacy"])("#/%s never says this Mac", async (route) => {
-    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER], privacy: route === "privacy" ? PRIVACY : TRUSTED });
-    fake.loaded = LOADED;
-    await refreshStatus();
-    window.location.hash = `#/${route}`;
-    const { container } = render(<App poll={false} />);
-    await screen.findByRole("heading", { level: 1 });
-    await new Promise((r) => setTimeout(r, 100)); // every fetch of the view answered
-    const placeholders = [...container.querySelectorAll("[placeholder]")].map((e) => e.getAttribute("placeholder")).join(" ");
-    expect(`${container.textContent} ${placeholders}`).not.toMatch(/this Mac/i);
-  });
-
-  it("names this computer neutrally where it is the target or the fit", async () => {
-    expect(fitText({ verdict: "fits", headroom_bytes: 1024 ** 3 })).toBe("Fits on this computer (1.0 GB to spare)");
-    installFakeDaemon({ network: NETWORK_ON, peers: [PEER], privacy: TRUSTED });
-    window.location.hash = "#/chat";
-    render(<App poll={false} />);
-    const sel = await screen.findByRole("combobox", { name: "Run on" });
-    expect(within(sel).getAllByRole("option")[0].textContent).toBe("This computer");
-  });
-
   it("pairs under the daemon's device name unless the user set one", async () => {
     const user = userEvent.setup();
     const fake = installFakeDaemon({ network: NETWORK_ON });
-    render(<Peers pollMs={20} />);
-    const name = await screen.findByRole("textbox", { name: "Name other devices see" });
-    expect(name).toHaveProperty("value", "");
-    expect(name.getAttribute("placeholder")).toBe(NETWORK.device_name);
-    expect(screen.getByText(`Leave empty to use this computer's name, ${NETWORK.device_name}.`)).toBeTruthy();
+    renderDevices();
+    // This computer is listed under the daemon's own name, and the dialog says which name other devices will see.
+    expect(await cellText(NETWORK.device_name!, "Name")).toBe(`${NETWORK.device_name}This computer`);
+    await user.click(within(toolbar()).getByRole("button", { name: "Pair a device…" }));
+    const d = await screen.findByRole("dialog", { name: "Pair a device" });
+    expect(d.textContent).toContain(`Other devices will see this computer as ${NETWORK.device_name}`);
 
-    await user.click(screen.getByRole("button", { name: "Pair this device" }));
+    await user.click(within(d).getByRole("button", { name: "Pair this device" }));
     await screen.findByRole("group", { name: "Pairing code" });
     expect(posts(fake, "/api/pair/start")).toEqual([{}]);
 
     fake.completePairing();
-    await screen.findByText("Paired with Studio Mac.");
-    await user.type(name, "Kitchen PC");
-    await user.click(screen.getByRole("button", { name: "Pair this device" }));
+    await within(d).findByText("Paired with Studio Mac.");
+    // A name chosen in Settings › Network (the same store) is what the next window announces.
+    act(() => settings.set({ ...settings.get(), device_name: "Kitchen PC" }));
+    expect(await cellText("Kitchen PC", "Name")).toBe("Kitchen PCThis computer");
+    expect(d.textContent).toContain("Other devices will see this computer as Kitchen PC");
+    await user.click(within(d).getByRole("button", { name: "Pair this device" }));
     await waitFor(() => expect(posts(fake, "/api/pair/start")).toEqual([{}, { name: "Kitchen PC" }]));
   });
 
@@ -83,95 +66,7 @@ describe("E1: no macOS wording on other systems", () => {
   });
 });
 
-describe("E2: a paired device runs prompts without a model loaded here", () => {
-  it("offers every model this daemon knows, sends it with the peer target, and says where it ran", async () => {
-    const user = userEvent.setup();
-    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER], privacy: TRUSTED });
-    await refreshStatus();
-    window.location.hash = "#/chat";
-    render(<App poll={false} />);
-    const box = await screen.findByRole("textbox", { name: "Message" });
-    expect(box).toHaveProperty("disabled", true);
-
-    await user.selectOptions(await screen.findByRole("combobox", { name: "Run on" }), `peer:${PEER.id}`);
-    expect(screen.queryByRole("button", { name: "Load model" })).toBeNull();
-    expect(screen.getByText(/Prompts run on Studio Mac, which loads the model you pick/)).toBeTruthy();
-    const model = screen.getByRole("combobox", { name: "Model" });
-    // Not only what is downloaded here: the other device may have a model this one does not.
-    expect(within(model).getAllByRole("option").map((o) => o.getAttribute("value"))).toEqual(["qwen2.5-1.5b-instruct-q4_k_m", "stories15M-q4_0", "llama-3.1-70b-q4_k_m"]);
-    await user.selectOptions(model, "llama-3.1-70b-q4_k_m");
-    await waitFor(() => expect(box).toHaveProperty("disabled", false));
-
-    await user.type(box, "Hi{Enter}");
-    await screen.findByText(/Ran on Studio Mac\./);
-    expect(chatBody(fake)).toMatchObject({ model: "llama-3.1-70b-q4_k_m", target: `peer:${PEER.id}` });
-    expect(fake.loaded).toBeNull();
-  });
-
-  it("tells the user plainly when the device does not have the model", async () => {
-    const user = userEvent.setup();
-    installFakeDaemon({ network: NETWORK_ON, peers: [PEER], privacy: TRUSTED, peerModels: { [PEER.id]: ["stories15M-q4_0"] } });
-    await refreshStatus();
-    window.location.hash = "#/chat";
-    render(<App poll={false} />);
-    await screen.findByRole("option", { name: "Studio Mac" });
-    await user.selectOptions(screen.getByRole("combobox", { name: "Run on" }), `peer:${PEER.id}`);
-    await user.selectOptions(screen.getByRole("combobox", { name: "Model" }), "qwen2.5-1.5b-instruct-q4_k_m");
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi{Enter}");
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Studio Mac does not have Qwen2.5 1.5B Instruct (Q4_K_M).");
-    expect(alert.textContent).toContain("Download it on Studio Mac, or pick another model under Model.");
-    expect(alert.textContent).toContain("model_not_downloaded");
-    // Not saved as an empty reply.
-    expect(chatHistory.get().messages.map((m) => m.role)).toEqual(["user"]);
-
-    await user.selectOptions(screen.getByRole("combobox", { name: "Model" }), "stories15M-q4_0");
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "Again{Enter}");
-    await screen.findByText(/Ran on Studio Mac\./);
-  });
-
-  it("a local run still needs a model loaded here", async () => {
-    installFakeDaemon({ network: NETWORK_ON, peers: [PEER], privacy: TRUSTED });
-    await refreshStatus();
-    window.location.hash = "#/chat";
-    render(<App poll={false} />);
-    const box = await screen.findByRole("textbox", { name: "Message" });
-    expect(box).toHaveProperty("disabled", true);
-    expect(box.getAttribute("placeholder")).toBe("Load a model first");
-    expect(await screen.findByRole("button", { name: "Load model" })).toBeTruthy();
-  });
-});
-
-describe("E3: counts are pluralised", () => {
-  it("one device, two devices, one token", async () => {
-    expect([plural(1, "device"), plural(2, "device"), plural(0, "token"), plural(1024, "token")]).toEqual(["1 device", "2 devices", "0 tokens", "1,024 tokens"]);
-    const other = { ...PEER, id: "cd".repeat(32), short_label: "cdcd-cdcd-cdcd", name: "Old laptop" };
-    installFakeDaemon({
-      network: NETWORK_ON,
-      peers: [PEER, other],
-      groups: [
-        { name: "home", members: [PEER.id], policy: { allow_remote_inference: true, allow_pooled_inference: false } },
-        { name: "work", members: [PEER.id, other.id], policy: { allow_remote_inference: false, allow_pooled_inference: false } },
-      ],
-    });
-    render(<Peers pollMs={20} />);
-    expect(await screen.findByText("Group home with 1 device.")).toBeTruthy();
-    expect(screen.getByText("Group work with 2 devices.")).toBeTruthy();
-  });
-
-  it("a one-token reply says 1 token", async () => {
-    const user = userEvent.setup();
-    const fake = installFakeDaemon({ chat: { chunks: ["Hi"], delayMs: 0 } });
-    fake.loaded = LOADED;
-    await refreshStatus();
-    window.location.hash = "#/chat";
-    render(<App poll={false} />);
-    await user.type(await screen.findByRole("textbox", { name: "Message" }), "Hi{Enter}");
-    expect((await screen.findByText(/^1 token,/)).textContent).toMatch(/^1 token, first token in/);
-  });
-});
-
-describe("Peers: discovery and connection state", () => {
+describe("Devices: discovery and connection state", () => {
   const OLD = { ...PEER, id: "cd".repeat(32), short_label: "cdcd-cdcd-cdcd", name: "Old laptop", connected: false, health: "disconnected" as const, last_addr: null };
   const AWAY = {
     ...PEER,
@@ -183,40 +78,49 @@ describe("Peers: discovery and connection state", () => {
     last_addr: "172.20.10.6:8193",
     last_error: { addr: "172.20.10.6:8193", code: "peer_lost", message: "no answer from 172.20.10.6:8193 within 4 s", hint: "the device may be asleep or on another network, or a firewall may block UDP port 8193", at_utc: "2026-10-19T03:40:00Z" },
   };
-  const cell = async (name: string, col: number) => within((await screen.findByText(name, { selector: ".model-name" })).closest("tr")!).getAllByRole("cell")[col];
+  const REASON = /^Last try at .+: No answer from 172\.20\.10\.6:8193 within 4 s\. The device may be asleep or on another network, or a firewall may block UDP port 8193\.$/;
 
   it("shows where each paired device is: seen nearby, last known, or not known; and why it is not connected", async () => {
+    const user = userEvent.setup();
+    setTable("devices", { columns: { addr: true } });
     installFakeDaemon({
       network: NETWORK_ON,
       peers: [{ ...PEER, health: "connected" }, AWAY, OLD],
       discovered: [{ ...STRANGER, id: PEER.id, trusted: true, pairing: false, addr: "192.168.1.77:8193", addrs: ["192.168.1.77:8193", "10.0.0.9:8193"] }],
     });
-    render(<Peers pollMs={20} />);
-    expect((await cell("Studio Mac", 2)).textContent).toBe("192.168.1.77:8193, 10.0.0.9:8193Seen on this network");
-    expect((await cell("Laptop", 2)).textContent).toBe("172.20.10.6:8193Last known, not seen on this network");
-    expect((await cell("Old laptop", 2)).textContent).toBe("Not known");
+    renderDevices();
+    expect(await cellText("Studio Mac", "Address")).toBe("192.168.1.77:8193seen nearby");
+    expect(await cellText("Laptop", "Address")).toBe("172.20.10.6:8193last known");
+    expect(await cellText("Old laptop", "Address")).toBe("—not known");
+    // Every advertised address is in the Connection tab.
+    await pick(user, "Studio Mac");
+    await tab(user, "Connection");
+    expect(within(inspector()).getByText(/^192\.168\.1\.77:8193, 10\.0\.0\.9:8193/)).toBeTruthy();
     // The reason and what to check, only while not connected.
-    const health = (await cell("Laptop", 1)).textContent!;
-    expect(health).toMatch(/^UnreachableLast try at .+: no answer from 172\.20\.10\.6:8193 within 4 s\. The device may be asleep or on another network, or a firewall may block UDP port 8193\.$/);
-    expect((await cell("Studio Mac", 1)).textContent).toBe("Connected");
+    expect(await cellText("Laptop", "State")).toBe("Not seen nearby");
+    await pick(user, "Laptop");
+    await tab(user, "Overview");
+    expect(within(inspector()).getByText(REASON)).toBeTruthy();
+    expect(await cellText("Studio Mac", "State")).toBe("Connected");
     // Paired devices are not offered for pairing among nearby strangers.
-    expect(screen.queryByRole("button", { name: /^Pair with/ })).toBeNull();
+    expect(within(screen.getByRole("group", { name: "Show devices" })).getByRole("button", { name: /^Nearby/ }).textContent).toBe("Nearby 0");
+    expect(selectionActions().some((a) => a.startsWith("Pair with"))).toBe(false);
     // This computer's own address, for the other device to type.
-    expect(screen.getByText("192.168.1.10:8193", { selector: "code" })).toBeTruthy();
+    expect(await cellText(NETWORK.device_name!, "Address")).toBe("192.168.1.10:8193this computer");
   });
 
   it("reconnects by address after the device moved networks; the typed address is only a hint, the key decides", async () => {
     const user = userEvent.setup();
     const fake = installFakeDaemon({ network: NETWORK_ON, peers: [AWAY], answersAt: { [AWAY.id]: "10.12.0.44:8193" }, impostors: ["10.12.0.45:8193"] });
-    render(<Peers pollMs={1000} />);
-    // Connected devices and strangers get no Connect button; this one does.
-    await user.click(await screen.findByRole("button", { name: "Connect to Laptop" }));
-    const panel = screen.getByRole("form", { name: "Connect to Laptop" });
+    renderDevices();
+    await pick(user, "Laptop");
+    // Connected devices and strangers get no enabled Connect; this one does.
+    await user.click(await within(toolbar()).findByRole("button", { name: "Connect to Laptop" }));
+    // Connect shows the device's Connection tab, where the outcome and the address field are.
+    const panel = await screen.findByRole("form", { name: "Connect to Laptop" });
     const addr = within(panel).getByLabelText("Address (optional)");
-    await waitFor(() => expect(document.activeElement).toBe(addr));
 
     // 1. Retry with what the daemon knows: the old address does not answer.
-    await user.keyboard("{Enter}");
     expect((await within(panel).findByRole("alert")).textContent).toContain("The connection to the other device was lost.");
     expect(within(panel).getByRole("alert").textContent).toContain("firewall may block UDP port 8193");
 
@@ -225,7 +129,7 @@ describe("Peers: discovery and connection state", () => {
     // Never "not authorized, pair it": the address proved nothing, and the device itself may be fine.
     await waitFor(() =>
       expect(within(panel).getByRole("alert").textContent).toContain(
-        "The device that answered did not prove it is Laptop, or Laptop no longer trusts this computer.Nothing was trusted or saved. Check the address shown on Laptop under Peers > This device.peer_unauthorized: the device at 10.12.0.45:8193 did not prove it is",
+        "The device that answered did not prove it is Laptop, or Laptop no longer trusts this computer.Nothing was trusted or saved. Check the address shown on Laptop under Devices › This computer › Connection.peer_unauthorized: the device at 10.12.0.45:8193 did not prove it is",
       ),
     );
     expect(fake.peers[0]).toMatchObject({ connected: false, last_addr: "172.20.10.6:8193" });
@@ -235,20 +139,23 @@ describe("Peers: discovery and connection state", () => {
     await user.type(addr, "10.12.0.44:8193{Enter}");
     await screen.findByText("Connected to Laptop.");
     expect(screen.queryByRole("form", { name: "Connect to Laptop" })).toBeNull();
-    // The panel and its Connect button are gone; focus lands on the outcome, not the top of the page.
+    // The form and its Connect button are gone; focus lands on the outcome, not the top of the page.
     await waitFor(() => expect(document.activeElement?.textContent).toBe("Connected to Laptop."));
-    expect((await cell("Laptop", 1)).textContent).toBe("Connected");
-    expect((await cell("Laptop", 2)).textContent).toContain("10.12.0.44:8193");
+    expect(await cellText("Laptop", "State")).toBe("Connected");
+    expect(within(inspector()).getByText("10.12.0.44:8193", { exact: false })).toBeTruthy();
     expect(posts(fake, `/api/peers/${AWAY.id}/connect`)).toEqual([{}, { addr: "10.12.0.45:8193" }, { addr: "10.12.0.44:8193" }]);
-    expect(screen.queryByRole("button", { name: "Connect to Laptop" })).toBeNull();
+    // Connected: Connect stays visible but is not possible, with the reason.
+    expect(within(toolbar()).getByRole("button", { name: "Connect to Laptop" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("names each state the daemon can back; a cached nearby record never makes a device connected or ready", async () => {
-    privacy.set(TRUSTED);
+    const user = userEvent.setup();
     const dev = (n: number, extra: Partial<typeof PEER>) => ({ ...PEER, id: String(n).repeat(64), short_label: `${n}${n}${n}${n}-x`, name: `Device ${n}`, last_addr: null, ...extra });
     const near = (n: number) => ({ ...STRANGER, id: String(n).repeat(64), trusted: true, pairing: false, addrs: [STRANGER.addr] });
+    // Through the service: Devices reads /api/privacy on mount, so a store set here would be overwritten.
     installFakeDaemon({
       network: NETWORK_ON,
+      privacy: TRUSTED,
       peers: [
         dev(1, { connected: true, health: "connected" }),
         dev(2, { connected: true, health: "unhealthy" }),
@@ -266,80 +173,109 @@ describe("Peers: discovery and connection state", () => {
         { name: "work", members: ["2".repeat(64)], policy: { allow_remote_inference: false, allow_pooled_inference: false } },
       ],
     });
-    render(<Peers pollMs={1000} />);
-    const state = async (n: number) => (await cell(`Device ${n}`, 1)).textContent;
-    const prompts = async (n: number) => (await cell(`Device ${n}`, 3)).querySelector(".model-meta")!.textContent;
+    renderDevices();
+    const state = (n: number) => cellText(`Device ${n}`, "State");
+    const run = (n: number) => cellText(`Device ${n}`, "Can run there");
+    /** The readiness sentence in the device's Overview. */
+    const prompts = async (n: number) => {
+      await pick(user, `Device ${n}`);
+      return (await within(inspector()).findByText(/^(Can|Cannot) run prompts from this computer/)).textContent;
+    };
     expect(await state(1)).toBe("Connected");
+    expect(await run(1)).toBe("Can sendIts own permissions, serving setting and load are not reported.");
     expect(await prompts(1)).toBe("Can run prompts from this computer.");
     expect(await state(2)).toBe("Not responding");
+    // Not responding is not live: nothing can be sent there now.
+    expect(await run(2)).toBe("—");
     expect(await prompts(2)).toBe('Cannot run prompts from this computer yet: turn on "Members may run prompts for each other" in its group.');
     expect(await state(3)).toBe("Reconnecting");
     expect(await prompts(3)).toBe("Cannot run prompts from this computer yet: connect it, add it to a group that allows prompts.");
     // Seen nearby and in a group that allows prompts, but no open connection: neither connected nor ready.
     expect(await state(4)).toBe("Not connected");
-    expect((await cell("Device 4", 2)).textContent).toContain("Seen on this network");
+    expect(await run(4)).toBe("—");
     expect(await prompts(4)).toBe("Cannot run prompts from this computer yet: connect it.");
-    expect(await state(5)).toBe("Offline");
-    expect((await cell("Device 5", 2)).textContent).toBe("Not known");
+    expect(await state(5)).toBe("Not seen nearby");
     // Seen nearby, yet the dial failed (a firewall, say): the failure wins, with its reason.
-    expect(await state(6)).toMatch(/^UnreachableLast try at .+: no answer from 172\.20\.10\.6:8193 within 4 s\./);
+    expect(await state(6)).toBe("Unreachable");
     expect(await prompts(6)).toBe("Cannot run prompts from this computer yet: connect it.");
-    expect(await state(7)).toMatch(/^UnreachableLast try at /);
-    // Discovered, not paired: listed apart, untrusted, never in the paired table.
-    const nearby = (await screen.findByRole("heading", { name: "Nearby, not paired" })).closest(".section") as HTMLElement;
-    expect(within(nearby).getByText(STRANGER.id.slice(0, 4), { exact: false }).closest("tr")!.textContent).toContain("Not trusted");
-    expect(within(nearby).queryByText("Device 4")).toBeNull();
+    expect(within(inspector()).getAllByText(REASON).length).toBeGreaterThan(0);
+    // Not announced and the last dial found nothing: not seen nearby, with the reason (never "Unreachable" there).
+    expect(await state(7)).toBe("Not seen nearby");
+    // Discovered, not paired: listed under Nearby, untrusted, never as a paired device.
+    await user.click(within(screen.getByRole("group", { name: "Show devices" })).getByRole("button", { name: /^Nearby/ }));
+    const stranger = await rowOf(STRANGER.id.slice(0, 4));
+    expect(stranger.textContent).toContain("Untrusted (nearby)");
+    expect(stranger.textContent).toContain("Not paired");
+    expect(within(stranger.closest("table")!).queryByRole("row", { name: (n) => n.includes("Device 4") })).toBeNull();
   });
 
-  it("calls a device offline only where this computer looks for devices, and says when Privacy blocks prompts", async () => {
+  it("calls a device not seen nearby only where this computer looks for devices, and says when Privacy blocks prompts", async () => {
+    const user = userEvent.setup();
     installFakeDaemon({
       network: { ...NETWORK_ON, mdns: false },
       peers: [{ ...PEER, connected: false, last_addr: "192.168.1.77:8193" }],
       groups: [{ name: "home", members: [PEER.id], policy: { allow_remote_inference: true, allow_pooled_inference: false } }],
     });
-    render(<Peers pollMs={1000} />);
-    expect((await cell("Studio Mac", 1)).textContent).toBe("Not connected");
-    expect((await cell("Studio Mac", 3)).textContent).toBe("homeCannot run prompts from this computer yet: connect it, allow trusted devices under Privacy.");
+    renderDevices();
+    expect(await cellText("Studio Mac", "State")).toBe("Not connected");
+    await pick(user, "Studio Mac");
+    expect(await within(inspector()).findByText("Cannot run prompts from this computer yet: connect it, allow trusted devices under Privacy.")).toBeTruthy();
+    expect(within(inspector()).getByText("home")).toBeTruthy();
   });
 
-  it("a malformed address is the daemon's invalid_request, shown in the panel", async () => {
+  it("a malformed address is an invalid_request, shown in the Connection tab; it is checked here, so nothing is sent", async () => {
     const user = userEvent.setup();
-    installFakeDaemon({ network: NETWORK_ON, peers: [AWAY] });
-    render(<Peers pollMs={1000} />);
-    await user.click(await screen.findByRole("button", { name: "Connect to Laptop" }));
-    await user.type(screen.getByLabelText("Address (optional)"), "laptop.local{Enter}");
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [AWAY] });
+    renderDevices(`#/devices/${AWAY.id}?tab=connection`);
+    const field = await screen.findByLabelText("Address (optional)");
+    await user.type(field, "laptop.local{Enter}");
     expect((await screen.findByRole("alert")).textContent).toContain("invalid_request");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(posts(fake, `/api/peers/${AWAY.id}/connect`)).toEqual([]);
   });
 
   it("offers Connect only while networking is on", async () => {
+    const user = userEvent.setup();
     installFakeDaemon({ network: NETWORK, peers: [AWAY] });
-    render(<Peers pollMs={20} />);
-    await screen.findByText("Laptop", { selector: ".model-name" });
-    expect(screen.queryByRole("button", { name: "Connect to Laptop" })).toBeNull();
+    renderDevices();
+    await pick(user, "Laptop");
+    const connect = await within(toolbar()).findByRole("button", { name: "Connect to Laptop" });
+    expect(connect.getAttribute("aria-disabled")).toBe("true");
+    await user.click(connect);
+    await tab(user, "Connection");
+    expect(screen.queryByRole("form", { name: "Connect to Laptop" })).toBeNull();
+    expect(within(inspector()).getByText("Networking is off: turn it on to connect.")).toBeTruthy();
   });
 
-  it("says why no device shows up: discovery off here, or a network that blocks it", async () => {
+  it("says why no device shows up nearby: discovery off here, or a network that blocks it", async () => {
+    const user = userEvent.setup();
     const fake = installFakeDaemon({ network: { ...NETWORK_ON, mdns: false } });
-    const { unmount } = render(<Peers pollMs={20} />);
+    const nearby = async () => user.click(within(await screen.findByRole("group", { name: "Show devices" })).getByRole("button", { name: /^Nearby/ }));
+    const { unmount } = renderDevices();
+    await nearby();
     expect(await screen.findByText(/This computer is not looking for devices on the network\. Pair by address instead/)).toBeTruthy();
     unmount();
     fake.network = NETWORK_ON;
-    render(<Peers pollMs={20} />);
+    renderDevices();
+    await nearby();
     expect(await screen.findByText(/campus and office Wi-Fi networks, stop devices from finding each other; pair by address instead/)).toBeTruthy();
   });
 
-  it("the keyboard reaches Connect, and Cancel closes the panel", async () => {
+  it("the keyboard reaches Connect: arrow to the row, then the toolbar", async () => {
     const user = userEvent.setup();
-    installFakeDaemon({ network: NETWORK_ON, peers: [AWAY] });
-    render(<Peers pollMs={1000} />);
-    const btn = await screen.findByRole("button", { name: "Connect to Laptop" });
-    btn.focus();
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [AWAY] });
+    renderDevices();
+    const self = await rowOf(NETWORK.device_name!);
+    within(self).getAllByRole("gridcell")[0].focus();
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect((document.activeElement as HTMLElement).closest("tr")?.textContent).toContain("Laptop"));
+    const btn = await within(toolbar()).findByRole("button", { name: "Connect to Laptop" });
+    // The toolbar is one Tab stop; arrow keys move between its buttons.
+    for (let i = 0; i < 15 && !toolbar().contains(document.activeElement); i++) await user.tab({ shift: true });
+    for (let i = 0; i < 5 && document.activeElement !== btn; i++) await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(btn);
     await user.keyboard("{Enter}");
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Address (optional)")));
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("form", { name: "Connect to Laptop" })).toBeNull();
-    // Back on the button that opened the panel, not the top of the page.
-    await waitFor(() => expect(document.activeElement).toBe(btn));
+    await waitFor(() => expect(posts(fake, `/api/peers/${AWAY.id}/connect`)).toEqual([{}]));
   });
 
   it("while one device is connecting, the others' Connect waits, so neither outcome is lost", async () => {
@@ -353,16 +289,20 @@ describe("Peers: discovery and connection state", () => {
       if (String(u).endsWith("/connect")) await held;
       return real(u, init);
     });
-    render(<Peers pollMs={1000} />);
-    await user.click(await screen.findByRole("button", { name: "Connect to Laptop" }));
-    await user.keyboard("{Enter}");
-    await screen.findByRole("button", { name: "Connecting" });
-    expect((await cell("Laptop", 1)).textContent).toMatch(/^Connecting/);
-    expect((screen.getByRole("button", { name: "Connect to Old laptop" }) as HTMLButtonElement).disabled).toBe(true);
+    renderDevices();
+    await pick(user, "Laptop");
+    await user.click(await within(toolbar()).findByRole("button", { name: "Connect to Laptop" }));
+    await within(await screen.findByRole("form", { name: "Connect to Laptop" })).findByRole("button", { name: "Connecting" });
+    expect(await cellText("Laptop", "State")).toBe("Connecting");
+    await pick(user, "Old laptop");
+    expect((await within(toolbar()).findByRole("button", { name: "Connect to Old laptop" })).getAttribute("aria-disabled")).toBe("true");
     release();
-    // Laptop's failure is shown in its own panel; then the other device can be tried.
+    await waitFor(async () => expect(await cellText("Laptop", "State")).toBe("Not seen nearby"));
+    // The other device can be tried now; Laptop's failure is still shown in its own Connection tab.
+    await waitFor(() => expect(within(toolbar()).getByRole("button", { name: "Connect to Old laptop" }).getAttribute("aria-disabled")).toBeNull());
+    await pick(user, "Laptop");
+    await tab(user, "Connection");
     const panel = screen.getByRole("form", { name: "Connect to Laptop" });
     expect((await within(panel).findByRole("alert")).textContent).toContain("The connection to the other device was lost.");
-    expect((screen.getByRole("button", { name: "Connect to Old laptop" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

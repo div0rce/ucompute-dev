@@ -1,0 +1,104 @@
+/* UCompute design tokens (plan §3.1–3.3). Light on :root; dark under prefers-color-scheme (unless the user chose
+   light) and under data-theme="dark". Contrast pairs are enforced by tokens.test.ts; change both together. */
+
+:root {
+  --bg: #ecf0ed;
+  --surface: #ffffff;
+  --surface-2: #f4f6f4;
+  --hover: #ebf1ec;
+  --selected: #ddeedc;
+  --line: #d3dbd5;
+  --line-input: #7a867e;
+  --text: #121813;
+  --muted: #4f5d54;
+  --faint: #6b776f;
+  --accent: #1d6b43;
+  --accent-ink: #ffffff;
+  --lime: #b5f25c;
+  --lime-ink: #0f1a0b;
+  --brand: #1d6b43;
+  --ok: #16723a;
+  --active: #3f6f0c;
+  --warn: #8a5a00;
+  --danger: #b3261e;
+  --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.16);
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace;
+
+  --r-1: 4px;
+  --r-2: 6px;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  --row-h: 28px;
+  --toolbar-h: 44px;
+  --scope-h: 30px;
+  --tabbar-h: 30px;
+  --statusbar-h: 26px;
+  --rail-w: 208px;
+  --rail-w-collapsed: 48px;
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t-panel: 160ms;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101412;
+    --surface: #151a17;
+    --surface-2: #1b211e;
+    --hover: #212925;
+    --selected: #1d3a2b;
+    --line: #2a332e;
+    --line-input: #76857d;
+    --text: #e4ebe6;
+    --muted: #a3b0a8;
+    --faint: #7e8b84;
+    --accent: #b5f25c;
+    --accent-ink: #0f1a0b;
+    --brand: #2f8f5b;
+    --ok: #7fdc8e;
+    --active: #b5f25c;
+    --warn: #f2c14e;
+    --danger: #ff8a80;
+    --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.45);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #101412;
+  --surface: #151a17;
+  --surface-2: #1b211e;
+  --hover: #212925;
+  --selected: #1d3a2b;
+  --line: #2a332e;
+  --line-input: #76857d;
+  --text: #e4ebe6;
+  --muted: #a3b0a8;
+  --faint: #7e8b84;
+  --accent: #b5f25c;
+  --accent-ink: #0f1a0b;
+  --brand: #2f8f5b;
+  --ok: #7fdc8e;
+  --active: #b5f25c;
+  --warn: #f2c14e;
+  --danger: #ff8a80;
+  --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.45);
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-panel: 0ms;
+  }
+}

@@ -63,6 +63,8 @@ pub enum ErrorCode {
     ProtocolIncompatible,
     /// A protocol frame exceeded its size bound.
     FrameTooLarge,
+    /// The other device disconnected this one (`Disconnect` there); it must connect again from its side.
+    PeerHeld,
 }
 
 impl ErrorCode {
@@ -95,6 +97,7 @@ impl ErrorCode {
         ErrorCode::PeerLost,
         ErrorCode::ProtocolIncompatible,
         ErrorCode::FrameTooLarge,
+        ErrorCode::PeerHeld,
     ];
 
     /// Stable snake_case string form, identical to the serde representation.
@@ -126,6 +129,7 @@ impl ErrorCode {
             ErrorCode::PeerLost => "peer_lost",
             ErrorCode::ProtocolIncompatible => "protocol_incompatible",
             ErrorCode::FrameTooLarge => "frame_too_large",
+            ErrorCode::PeerHeld => "peer_held",
         }
     }
 
@@ -134,7 +138,7 @@ impl ErrorCode {
         match self {
             ErrorCode::InvalidRequest | ErrorCode::ContextTooLong => 400,
             ErrorCode::Unauthorized | ErrorCode::PairingFailed => 401,
-            ErrorCode::PolicyDenied | ErrorCode::PeerUnauthorized | ErrorCode::PeerRevoked => 403,
+            ErrorCode::PolicyDenied | ErrorCode::PeerUnauthorized | ErrorCode::PeerRevoked | ErrorCode::PeerHeld => 403,
             ErrorCode::FrameTooLarge => 413,
             ErrorCode::PairingLocked => 429,
             ErrorCode::PeerLost => 502,
@@ -201,7 +205,7 @@ impl ErrorCode {
             ),
             ErrorCode::BackendFailed => (
                 "The inference engine stopped unexpectedly.",
-                "Try again. If it keeps failing, open Diagnostics and share the log.",
+                "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run common diagnostics) and share them.",
             ),
             ErrorCode::GpuUnavailable => (
                 "Your GPU could not be used for this model.",
@@ -223,7 +227,7 @@ impl ErrorCode {
             ),
             ErrorCode::PolicyDenied => (
                 "Your settings do not allow this action.",
-                "Review Privacy and Network settings.",
+                "Review the privacy and network settings (Settings in the desktop app, or common privacy).",
             ),
             ErrorCode::Unauthorized => (
                 "This computer is not authorized to use the API.",
@@ -235,11 +239,11 @@ impl ErrorCode {
             ),
             ErrorCode::Internal => (
                 "Something went wrong inside Common.",
-                "Try again. If it keeps failing, open Diagnostics and share the log.",
+                "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run common diagnostics) and share them.",
             ),
             ErrorCode::PeerUnauthorized => (
                 "This computer is not authorized to run that on the selected device.",
-                "Pair the device and add it to a trusted group in Peers.",
+                "Pair the device and add it to a group that allows prompts (Devices in the desktop app, or common groups).",
             ),
             ErrorCode::PeerRevoked => ("That device's access was revoked.", "Pair it again if you trust it."),
             ErrorCode::PairingLocked => (
@@ -261,6 +265,10 @@ impl ErrorCode {
             ErrorCode::FrameTooLarge => (
                 "A message from the other device was too large and was rejected.",
                 "Update Common on both devices; if this persists, revoke the device.",
+            ),
+            ErrorCode::PeerHeld => (
+                "The other device disconnected this computer.",
+                "It must connect again from its side (Connect in its desktop app's Devices section).",
             ),
         }
     }

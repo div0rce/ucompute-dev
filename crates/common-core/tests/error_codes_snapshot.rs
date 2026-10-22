@@ -38,6 +38,8 @@ fn error_codes_are_stable() {
             ("peer_lost", 502, "server_error"),
             ("protocol_incompatible", 426, "invalid_request_error"),
             ("frame_too_large", 413, "invalid_request_error"),
+            // UI 2.0 E5, appended
+            ("peer_held", 403, "permission_error"),
         ]
     );
 }

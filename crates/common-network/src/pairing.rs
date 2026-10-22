@@ -129,7 +129,7 @@ fn clean_name(name: &str) -> String {
 /// its pairing endpoint is on a random port per window (see [`start`]), which no port rule covers.
 fn no_answer(addr: SocketAddr) -> CommonError {
     failed(format!("nothing answered at {addr}")).with_hint(format!(
-        "a firewall on the other device may block its pairing port (UDP {}); on Windows, allow Common under Peers on that device",
+        "a firewall on the other device may block its pairing port (UDP {}); on Windows, allow Common through the firewall on that device (Devices in its desktop app)",
         addr.port()
     ))
 }

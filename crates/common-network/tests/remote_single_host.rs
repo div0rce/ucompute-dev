@@ -721,6 +721,69 @@ async fn peer_supplied_grammar_refused_before_load() {
     assert!(m.status().await.is_none(), "nothing was loaded");
 }
 
+/// A request over the peer's quota is refused at once and audited, never a job row: refusals cost
+/// the peer nothing, so as rows they could push this computer's own history out of the 256 kept.
+/// SINGLE-HOST, no engine: the one admitted request fails at the load (the model is not in this
+/// store), which still makes it a row.
+#[tokio::test]
+async fn quota_refusals_are_audited_but_not_job_rows_single_host() {
+    let (a, b) = pair();
+    let policy = serving_policy(&b, &a, true);
+    let l = link(&a, &b).await;
+    let empty = tempfile::tempdir().unwrap();
+    let jobs = common_observability::jobs::Jobs::new();
+    let opts = ServeOptions {
+        quotas: Arc::new(Quotas::new(QuotaConfig {
+            requests_per_minute: 1,
+            ..QuotaConfig::default()
+        })),
+        jobs: jobs.clone(),
+        ..ServeOptions::standalone()
+    };
+    tokio::spawn(serve_peer_with(
+        l.inn.clone(),
+        manager(&Paths::at(empty.path().to_path_buf())),
+        policy,
+        b.audit.clone(),
+        opts,
+    ));
+    let mut codes = vec![];
+    for _ in 0..3 {
+        let r = match generate_remote(
+            l.out.clone(),
+            MODEL_ID,
+            MODEL_SHA,
+            greedy(PROMPT, 4),
+            "trusted_group",
+            CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(s) => collect(s).await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        codes.push(r.unwrap_err().code);
+    }
+    assert_eq!(codes[1..], [ErrorCode::Overloaded, ErrorCode::Overloaded], "{codes:?}");
+    assert_ne!(codes[0], ErrorCode::Overloaded, "{codes:?}");
+    poll_until(Duration::from_secs(5), || jobs.list().1.len() == 1)
+        .await
+        .expect("the admitted request ends as a row");
+    let refused = poll_until(Duration::from_secs(5), || {
+        let tail = b.audit.tail(50).unwrap();
+        tail.iter()
+            .filter(|e| e.kind == "remote_request" && e.fields["outcome"] == "overloaded")
+            .count()
+            == 2
+    })
+    .await;
+    assert!(refused.is_some(), "both refusals are audited: {:?}", audit_kinds(&b));
+    let (active, recent) = jobs.list();
+    assert!(active.is_empty(), "{active:?}");
+    assert_eq!(recent.len(), 1, "only the admitted request is a job: {recent:?}");
+    assert_ne!(recent[0].error_code.as_deref(), Some("overloaded"));
+}
+
 /// F-06-04 `peer_flood_throttled` + `bench:abuse-flood`: a peer floods 8 concurrent requests at a
 /// time while this device serves its own (local) requests. The serving side shares its engine as
 /// the daemon would (`serve_peer_with`: the local load options, the local admission's engine-slot
@@ -751,6 +814,7 @@ async fn peer_flood_throttled_local_p95_within_20pct_single_host() {
         })),
         engine_slots: Some(engine.clone()),
         peer_slots: peer_share.clone(),
+        ..ServeOptions::standalone()
     };
     tokio::spawn(serve_peer_with(l.inn.clone(), m.clone(), policy, b.audit.clone(), opts));
     let model = m.ensure_loaded(MODEL_ID, load).await.unwrap();
