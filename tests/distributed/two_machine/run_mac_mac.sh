@@ -1,5 +1,9 @@
-#!/bin/sh
-# Mac (A, this machine's installed app) <-> second Mac (B, its installed app) acceptance run.
+#!/bin/bash
+# Mac (A, this machine's installed app) <-> second Mac (B, its installed app): discovery and connection-state
+# checks against the two apps' daemons.
+# A daemon API run, not an app UI run: every step, pairing included, goes through the two daemons' loopback
+# APIs and no window is driven. Not covered here (each needs its own manual UI evidence): pairing started in
+# either app, a wrong code typed by hand, the Mac-side group and run steps.
 #
 #   OUT=<evidence dir> [MAC_HOST=...] [NO_MDNS=1] [STEPS=...] tests/distributed/two_machine/run_mac_mac.sh
 #
@@ -7,7 +11,7 @@
 # its app (the Cmd+Q path), crashed with SIGKILL and started with `open -a`, all through
 # scripts/mac-host.sh. Long runs keep B awake with `caffeinate -i` for their duration (a closed lid still
 # sleeps a MacBook on battery).
-set -eu
+set -euo pipefail  # a crashed driver must stop the run, not hide behind tee
 cd "$(dirname "$0")/../../.."
 : "${OUT:?set OUT}"
 HOST="${MAC_HOST:-192.168.1.115}"

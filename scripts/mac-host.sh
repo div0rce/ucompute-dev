@@ -34,12 +34,14 @@ case "${1:-}" in
     cd "$(dirname "$0")/.."
     # shellcheck disable=SC2086
     git archive --format=tar HEAD | ssh $SSH_OPTS "$USER_@$HOST" "mkdir -p src/common && tar -xf - -C src/common"
-    # Delete files HEAD does not track (a stale deleted source breaks the build); keep build outputs.
+    # Delete files HEAD does not track (a stale deleted source breaks the build); keep build outputs. The
+    # keep-list is exactly the archive's file list (HEAD's tree, unquoted paths), compared ignoring case: on
+    # case-insensitive APFS a file extracted into a folder whose case changed keeps the old folder's case.
     # shellcheck disable=SC2086
-    git ls-files | ssh $SSH_OPTS "$USER_@$HOST" 'cd src/common && sort > /tmp/common-sync-manifest &&
+    git -c core.quotePath=false ls-tree -r --name-only HEAD | ssh $SSH_OPTS "$USER_@$HOST" 'cd src/common && cat > /tmp/common-sync-manifest &&
       find . -type f -not -path "./target/*" -not -path "./.common/*" -not -path "*/node_modules/*" \
         -not -path "./apps/desktop/src-tauri/binaries/*" -not -path "./apps/desktop/src-tauri/gen/*" -not -path "./apps/desktop/dist/*" |
-      sed "s|^\./||" | sort | comm -23 - /tmp/common-sync-manifest > /tmp/common-sync-stale &&
+      sed "s|^\./||" | awk "NR == FNR { keep[tolower(\$0)]; next } (tolower(\$0) in keep) == 0" /tmp/common-sync-manifest - > /tmp/common-sync-stale &&
       n=$(wc -l < /tmp/common-sync-stale) && [ "$(wc -l < /tmp/common-sync-manifest)" -ge 50 ] &&
       if [ "$n" -gt 200 ]; then echo "refusing to delete $n files"; exit 1; fi &&
       while IFS= read -r f; do rm -f -- "$f" && echo "removed stale $f"; done < /tmp/common-sync-stale'

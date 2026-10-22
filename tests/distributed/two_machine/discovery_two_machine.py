@@ -5,10 +5,12 @@ daemons of the two installed desktop apps) on two physical machines.
     python3 -I discovery_two_machine.py --a http://127.0.0.1:8192 --b http://127.0.0.1:18302 --out <dir> \
         [--steps state,manual,pair,quit,crash,wifi,offline] [--quit-b CMD] [--crash-b CMD] [--start-b CMD] \
         [--procs-b CMD] [--wifi-cycle-b CMD] [--stranger URL --stranger-addr IP:PORT] [--offline-peer ID] \
-        [--watch SECONDS]
+        [--watch SECONDS] [--bogus-addr IP:PORT] [--no-mdns]
 
 A and B are the daemons' loopback APIs (B through an SSH tunnel; the API never leaves loopback). Peer
-traffic between the machines is Common's QUIC transport. Steps:
+traffic between the machines is Common's QUIC transport. Every step, pairing included, goes through those APIs:
+this is daemon API evidence, not app UI evidence (no window is driven, no code is typed by hand, the Windows
+firewall consent step is not reached). Steps:
   state    both daemons name themselves (no "This Mac"), discovered entries carry 1-2 routable addresses,
            "last seen" advances while connected.
   manual   connect at an address: an unpaired id is refused before any packet; a wrong hint never replaces
@@ -23,6 +25,7 @@ traffic between the machines is Common's QUIC transport. Steps:
            connection comes back.
   offline  a paired device that is switched off (--offline-peer, pinned on A): one audit line, not one per
            redial, and a reason in GET /api/peers.
+--no-mdns (the network drops multicast): the nearby checks are recorded N/A (ok null), never PASS.
 Every HTTP call goes to <out>/raw.jsonl, results to <out>/results.json. Stdlib only.
 """
 import argparse
@@ -35,6 +38,7 @@ import urllib.request
 
 RESULTS = []
 RAW = None
+DRIVEN = "daemon API run (not app UI): every step goes through the two daemons' loopback APIs"
 
 
 def utc():
@@ -72,7 +76,7 @@ NO_MDNS = False  # set by --no-mdns: the network drops multicast, so nothing can
 
 
 def na(name, why="the network carries no mDNS (multicast dropped), so nothing can be seen nearby"):
-    RESULTS.append({"step": name, "ok": True, "na": why, "t": utc()})
+    RESULTS.append({"step": name, "ok": None, "na": why, "t": utc()})
     print(f"N/A  {name} ({why})", flush=True)
 
 
@@ -108,9 +112,27 @@ def connected(base, pid):
     return bool(p and p.get("connected"))
 
 
-def rejected(base, pid):
-    _, v, _ = call(base, "GET", "/api/audit?n=5000")
-    return [e for e in v.get("events", []) if e["kind"] == "peer_rejected" and e.get("peer_id") == pid]
+def audit(base):
+    """The newest audit events, newest first (the API returns at most 1000)."""
+    _, v, _ = call(base, "GET", "/api/audit?n=1000")
+    return v.get("events", []) if isinstance(v, dict) else []
+
+
+def since(events, mark):
+    """The events newer than `mark`, the newest event of an earlier audit() (None: the trail was empty).
+    Counting instead would see nothing new once the trail holds 1000 events."""
+    return events[:events.index(mark)] if mark in events else events
+
+
+def rejected(events, pid):
+    return [e for e in events if e["kind"] == "peer_rejected" and e.get("peer_id") == pid]
+
+
+def lost_reason(events, pid):
+    """Why A's first lost connection to `pid` in `events` ended (peer_lost audit): "closed_by_peer" when
+    the peer's daemon closed it (graceful stop), "timed_out"/"reset" when it vanished (killed)."""
+    hits = [e for e in events if e["kind"] == "peer_lost" and e.get("peer_id") == pid]
+    return (hits[-1].get("fields") or {}).get("reason") if hits else None
 
 
 def routable(addr):
@@ -118,10 +140,10 @@ def routable(addr):
     return not (ip.startswith("127.") or ip.startswith("169.254.") or ip == "::1" or ip.lower().startswith("fe80"))
 
 
-def s_state(A, B, ida, idb, na, nb, a):
-    names = {"A": na.get("device_name"), "B": nb.get("device_name")}
+def s_state(A, B, ida, idb, neta, netb, a):
+    names = {"A": neta.get("device_name"), "B": netb.get("device_name")}
     step("state: each daemon reports its own host name", all(names.values()) and "This Mac" not in names.values(),
-         names=names, dial_addr={"A": na.get("dial_addr"), "B": nb.get("dial_addr")})
+         names=names, dial_addr={"A": neta.get("dial_addr"), "B": netb.get("dial_addr")})
     for me, base, oid in (("A", A, idb), ("B", B, ida)):
         if NO_MDNS:
             na(f"state: {me} sees the other with 1-2 routable addresses, best first")
@@ -139,17 +161,17 @@ def s_state(A, B, ida, idb, na, nb, a):
          before=before and before["last_seen_utc"], after=after and after["last_seen_utc"])
 
 
-def s_manual(A, B, ida, idb, na, nb, a):
-    b_dial = nb.get("dial_addr")
+def s_manual(A, B, ida, idb, neta, netb, a):
+    b_dial = netb.get("dial_addr")
     stranger_id = "ab" * 32
     before_a, before_b = peers(A)["peers"], peers(B)["peers"]
-    b_audit = len(call(B, "GET", "/api/audit?n=5000")[1].get("events", []))
+    b_mark = (audit(B) or [None])[0]
     s, v, ms = call(A, "POST", f"/api/peers/{stranger_id}/connect", {"addr": b_dial})
     time.sleep(2)
-    b_audit_after = call(B, "GET", "/api/audit?n=5000")[1].get("events", [])
+    b_new = since(audit(B), b_mark)
     step("manual: an unpaired id is refused before any packet (requirement 8)",
-         s == 403 and (v.get("error") or {}).get("code") == "peer_unauthorized" and len(b_audit_after) == b_audit
-         and peers(A)["peers"] == before_a, status=s, ms=ms, b_new_audit=b_audit_after[b_audit:])
+         s == 403 and (v.get("error") or {}).get("code") == "peer_unauthorized" and not b_new
+         and peers(A)["peers"] == before_a, status=s, ms=ms, b_new_audit=b_new)
     pinned = (peer(A, idb) or {}).get("last_addr")
     bogus = a.bogus_addr
     s, v, ms = call(A, "POST", f"/api/peers/{idb}/connect", {"addr": bogus}, timeout=90)
@@ -176,7 +198,7 @@ def pair(src_show, src_join, label):
     s, start, _ = call(src_show, "POST", "/api/pair/start", {})
     if s != 200:
         step(f"pair {label}: pairing window opens", False, status=s, response=start)
-        return
+        return False
     # One window: a wrong code first (the window stays open, up to 5 failures), then the right one.
     code, addr = start["code"], start.get("pair_addr")
     wrong = str((int(code) + 1) % 1_000_000).zfill(6)
@@ -185,24 +207,37 @@ def pair(src_show, src_join, label):
     step(f"pair {label}: wrong code refused, right code pairs",
          s1 >= 400 and (v1.get("error") or {}).get("code") == "pairing_failed" and s2 == 200,
          pair_addr=addr, wrong=(s1, (v1.get("error") or {}).get("message"), ms1), right=(s2, v2 if s2 != 200 else v2.get("name"), ms2))
+    return s2 == 200
 
 
-def s_pair(A, B, ida, idb, na, nb, a):
-    pair(A, B, "A shows the code, B joins")
-    pair(B, A, "B shows the code, A joins")
+def s_pair(A, B, ida, idb, neta, netb, a):
+    paired = [pair(A, B, "A shows the code, B joins"), pair(B, A, "B shows the code, A joins")]
+    name = "pair: connected again after re-pairing, named by host name"
+    if not any(paired):
+        na(name, "no pairing succeeded, so nothing was re-paired")
+        return
     both = wait(lambda: connected(A, idb) and connected(B, ida), 30)
-    step("pair: connected again after re-pairing, named by host name", both is not None,
-         seconds=both, a_calls_b=(peer(A, idb) or {}).get("name"), b_calls_a=(peer(B, ida) or {}).get("name"))
+    a_calls_b, b_calls_a = (peer(A, idb) or {}).get("name"), (peer(B, ida) or {}).get("name")
+    step(name, both is not None and a_calls_b == netb.get("device_name") and b_calls_a == neta.get("device_name"),
+         seconds=both, a_calls_b=a_calls_b, b_calls_a=b_calls_a)
 
 
 def lost_and_back(A, B, ida, idb, a, how, cmd):
-    rej0 = len(rejected(A, idb))
+    mark = (audit(A) or [None])[0]
     t0 = time.monotonic()
     out = sh(cmd)
     gone = wait(lambda: not connected(A, idb), 30)
     unlisted = wait(lambda: nearby(A, idb) is None, 15 if how == "quit" else 1)
+    wait(lambda: lost_reason(since(audit(A), mark), idb), 10)
+    why = lost_reason(since(audit(A), mark), idb)
     p = peer(A, idb) or {}
-    step(f"{how}: A shows B as not connected", gone is not None, seconds=gone, health=p.get("health"), cmd_output=out[-300:])
+    step(f"{how}: A shows B as not connected", gone is not None, seconds=gone, health=p.get("health"), lost_reason=why,
+         cmd_output=out[-300:])
+    if how == "quit":
+        # Every other quit check also passes when B's app falls back to killing its daemon (A's idle timeout
+        # ends the connection); only B's own close tells the graceful stop apart, mDNS or not.
+        step("quit: B's daemon closed the connection itself (graceful stop, not the kill fallback)",
+             why == "closed_by_peer", lost_reason=why)
     if how == "quit" and NO_MDNS:
         na("quit: A drops B from nearby within seconds (goodbye sent on quit, E6)")
     elif how == "quit":
@@ -230,7 +265,7 @@ def lost_and_back(A, B, ida, idb, a, how, cmd):
              status=s, code=code, ms=ms, message=(v.get("error") or {}).get("message") if isinstance(v, dict) else v,
              pinned=pinned)
     time.sleep(a.watch)
-    rej = rejected(A, idb)[rej0:]
+    rej = rejected(since(audit(A), mark), idb)
     step(f"{how}: one audit line for B while it is away, not one per redial (E4)", len(rej) <= 1,
          audit_lines=len(rej), watched_s=round(time.monotonic() - t0), lines=rej[:3])
     if how == "crash" and NO_MDNS:
@@ -249,17 +284,17 @@ def lost_and_back(A, B, ida, idb, a, how, cmd):
         wait(lambda: call(B, "GET", "/health")[0] == 200, 60, 1)
 
 
-def s_quit(A, B, ida, idb, na, nb, a):
+def s_quit(A, B, ida, idb, neta, netb, a):
     if a.quit_b:
         lost_and_back(A, B, ida, idb, a, "quit", a.quit_b)
 
 
-def s_crash(A, B, ida, idb, na, nb, a):
+def s_crash(A, B, ida, idb, neta, netb, a):
     if a.crash_b:
         lost_and_back(A, B, ida, idb, a, "crash", a.crash_b)
 
 
-def s_wifi(A, B, ida, idb, na, nb, a):
+def s_wifi(A, B, ida, idb, neta, netb, a):
     if not a.wifi_cycle_b:
         return
     d0 = nearby(A, idb) or {}
@@ -273,12 +308,12 @@ def s_wifi(A, B, ida, idb, na, nb, a):
          before=d0, after=nearby(A, idb), total_s=round(time.monotonic() - t0, 1))
 
 
-def s_offline(A, B, ida, idb, na, nb, a):
+def s_offline(A, B, ida, idb, neta, netb, a):
     if not a.offline_peer:
         return
-    rej0 = len(rejected(A, a.offline_peer))
+    mark = (audit(A) or [None])[0]
     time.sleep(a.watch)
-    rej = rejected(A, a.offline_peer)[rej0:]
+    rej = rejected(since(audit(A), mark), a.offline_peer)
     p = peer(A, a.offline_peer) or {}
     step("offline: a switched-off paired device costs at most one audit line per state change (E4)", len(rej) <= 1,
          audit_lines=len(rej), watched_s=a.watch, last_error=p.get("last_error"), health=p.get("health"))
@@ -306,16 +341,18 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     RAW = open(os.path.join(a.out, "raw.jsonl"), "a")
     A, B = a.a, a.b
-    na, nb = call(A, "GET", "/api/network")[1], call(B, "GET", "/api/network")[1]
-    ida, idb = na["peer_id"], nb["peer_id"]
-    print(f"A {na.get('device_name')} {na['short_label']} {na.get('dial_addr')}  |  "
-          f"B {nb.get('device_name')} {nb['short_label']} {nb.get('dial_addr')}", flush=True)
+    print(DRIVEN, flush=True)
+    neta, netb = call(A, "GET", "/api/network")[1], call(B, "GET", "/api/network")[1]
+    ida, idb = neta["peer_id"], netb["peer_id"]
+    print(f"A {neta.get('device_name')} {neta['short_label']} {neta.get('dial_addr')}  |  "
+          f"B {netb.get('device_name')} {netb['short_label']} {netb.get('dial_addr')}", flush=True)
     for name in a.steps.split(","):
-        STEPS[name](A, B, ida, idb, na, nb, a)
+        STEPS[name](A, B, ida, idb, neta, netb, a)
     with open(os.path.join(a.out, "results.json"), "w") as f:
-        json.dump({"a": na, "b": nb, "steps": RESULTS}, f, indent=2, default=str)
-    failed = [r["step"] for r in RESULTS if not r["ok"]]
-    print("FAILED: " + ", ".join(failed) if failed else "ALL PASS")
+        json.dump({"driven": DRIVEN, "a": neta, "b": netb, "steps": RESULTS}, f, indent=2, default=str)
+    failed = [r["step"] for r in RESULTS if r["ok"] is False]
+    n_a = sum(r["ok"] is None for r in RESULTS)
+    print("FAILED: " + ", ".join(failed) if failed else "ALL PASS" + (f" ({n_a} N/A)" if n_a else ""))
 
 
 if __name__ == "__main__":

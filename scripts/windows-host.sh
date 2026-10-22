@@ -37,7 +37,9 @@ case "${1:-}" in
     # delete every file HEAD does not track (a stale file, e.g. a deleted source, breaks the build).
     # Kept: target/, node_modules/, .common/ and the build's own outputs (staged sidecar, dist).
     tmp=$(mktemp -d)
-    git ls-files > "$tmp/.sync-manifest"
+    # The keep-list is exactly the archive's file list: HEAD's tree, unquoted UTF-8 paths (`git ls-files`
+    # reads the index, which a staged rename or removal makes differ from HEAD, and quotes non-ASCII paths).
+    git -c core.quotePath=false ls-tree -r --name-only HEAD > "$tmp/.sync-manifest"
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "$USER_@$HOST" "if not exist C:\\Users\\$USER_\\src\\common mkdir C:\\Users\\$USER_\\src\\common"
     # shellcheck disable=SC2086

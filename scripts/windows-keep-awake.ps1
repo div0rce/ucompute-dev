@@ -12,7 +12,11 @@ $ES_CONTINUOUS = [uint32]"0x80000000"
 $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"
 [void][Common.Power]::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
 try {
-    $p = Start-Process -FilePath cmd.exe -ArgumentList "/c $Command" -NoNewWindow -Wait -PassThru
+    # /s: cmd strips only the outer quote pair we add, so a command with several quoted paths runs as written.
+    $p = Start-Process -FilePath cmd.exe -ArgumentList "/d /s /c `"$Command`"" -NoNewWindow -PassThru
+    $null = $p.Handle  # keep the handle, or ExitCode reads empty once the process has exited
+    # Wait for the command only: Start-Process -Wait would also wait for anything it left running in the background.
+    $p.WaitForExit()
     exit $p.ExitCode
 } finally {
     [void][Common.Power]::SetThreadExecutionState($ES_CONTINUOUS)
