@@ -419,4 +419,3 @@ function TimingRoute({ job, x }: { job: Job; x: JobsCtx }) {
     </>
   );
 }
-
