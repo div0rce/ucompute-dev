@@ -82,3 +82,9 @@ LTS 24 and pnpm 10.34.4. The WebView2 runtime ships with Windows 11. The desktop
 Long builds over SSH: Windows ends a session's processes when the SSH connection drops (a Wi-Fi switch is
 enough), so start them detached and poll a log, for example
 `scripts/windows-host.sh ps 'Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine="cmd /c cd /d C:\Users\jessg\src\common\apps\desktop && pnpm tauri build --bundles nsis > C:\Users\jessg\build.log 2>&1"}'`.
+
+## Long jobs and sleep (2026-10-22)
+
+- Jobs started from an SSH session end when the session closes (the OpenSSH server kills its children), so builds and long tests run from a scheduled task in the signed-in session (`CommonTestBuild`, `CommonTestLaunch`, `CommonTestQuit`, `CommonTestWifi`).
+- A sleeping laptop pauses them and drops off the network (SSH and Common both lose it). Wrap long jobs in `scripts\windows-keep-awake.ps1 -Command "<cmd>"`, which holds `ES_SYSTEM_REQUIRED` for the job's lifetime like `caffeinate -i` on macOS; no power setting changes. A closed lid on battery may still sleep.
+- `scripts/windows-host.sh sync` extracts HEAD and then deletes files HEAD no longer tracks through `scripts/windows-sync-clean.ps1`, which refuses to delete when paths look wrong (`SYNC_DRY_RUN=1` lists only).
