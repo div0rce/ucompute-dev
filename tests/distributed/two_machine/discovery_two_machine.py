@@ -68,6 +68,14 @@ def step(name, ok, **facts):
     print(("PASS " if ok else "FAIL ") + name + " " + json.dumps(facts, default=str), flush=True)
 
 
+NO_MDNS = False  # set by --no-mdns: the network drops multicast, so nothing can be seen nearby
+
+
+def na(name, why="the network carries no mDNS (multicast dropped), so nothing can be seen nearby"):
+    RESULTS.append({"step": name, "ok": True, "na": why, "t": utc()})
+    print(f"N/A  {name} ({why})", flush=True)
+
+
 def wait(cond, within, poll=0.25):
     t0 = time.monotonic()
     while time.monotonic() - t0 < within:
@@ -115,6 +123,9 @@ def s_state(A, B, ida, idb, na, nb, a):
     step("state: each daemon reports its own host name", all(names.values()) and "This Mac" not in names.values(),
          names=names, dial_addr={"A": na.get("dial_addr"), "B": nb.get("dial_addr")})
     for me, base, oid in (("A", A, idb), ("B", B, ida)):
+        if NO_MDNS:
+            na(f"state: {me} sees the other with 1-2 routable addresses, best first")
+            continue
         d = nearby(base, oid)
         addrs = (d or {}).get("addrs") or []
         step(f"state: {me} sees the other with 1-2 routable addresses, best first",
@@ -192,7 +203,9 @@ def lost_and_back(A, B, ida, idb, a, how, cmd):
     unlisted = wait(lambda: nearby(A, idb) is None, 15 if how == "quit" else 1)
     p = peer(A, idb) or {}
     step(f"{how}: A shows B as not connected", gone is not None, seconds=gone, health=p.get("health"), cmd_output=out[-300:])
-    if how == "quit":
+    if how == "quit" and NO_MDNS:
+        na("quit: A drops B from nearby within seconds (goodbye sent on quit, E6)")
+    elif how == "quit":
         step("quit: A drops B from nearby within seconds (goodbye sent on quit, E6)", unlisted is not None and unlisted <= 10,
              seconds=unlisted)
     else:
@@ -220,7 +233,9 @@ def lost_and_back(A, B, ida, idb, a, how, cmd):
     rej = rejected(A, idb)[rej0:]
     step(f"{how}: one audit line for B while it is away, not one per redial (E4)", len(rej) <= 1,
          audit_lines=len(rej), watched_s=round(time.monotonic() - t0), lines=rej[:3])
-    if how == "crash":
+    if how == "crash" and NO_MDNS:
+        na("crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)")
+    elif how == "crash":
         gone_rec = wait(lambda: nearby(A, idb) is None, 150, 1)
         step("crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)",
              gone_rec is not None or nearby(A, idb) is None, seconds_after_watch=gone_rec,
@@ -284,7 +299,10 @@ def main():
         ap.add_argument("--" + f)
     ap.add_argument("--bogus-addr", default="172.20.10.1:8193", help="an address with no Common device")
     ap.add_argument("--watch", type=int, default=180)
+    ap.add_argument("--no-mdns", action="store_true", help="the network drops multicast (e.g. eduroam): nearby checks are N/A")
     a = ap.parse_args()
+    global NO_MDNS
+    NO_MDNS = a.no_mdns
     os.makedirs(a.out, exist_ok=True)
     RAW = open(os.path.join(a.out, "raw.jsonl"), "a")
     A, B = a.a, a.b
