@@ -16,3 +16,13 @@ The laptop's SSH host key at the new address was compared with the one already k
 | Remote run, Mac → laptop, `stories15M-q4_0`, 32 tokens, temperature 0 | **golden completion**, `target: peer:1a54602a…`; first token 2.5 s (the laptop loaded the model on demand), 509 tok/s decode on the laptop (fixture: a path check, not performance); the Mac's new jobs list shows the request `done` with the peer target and 32 tokens |
 
 Not covered here (follows in the acceptance run with the new Windows build): pairing in both directions, the Windows firewall consent step, revocation, privacy, disconnect/hold, quit/crash cleanup, network change, Windows UI.
+
+## Windows firewall consent step and pairing started on Windows (2026-10-22, 21:28-21:29 UTC)
+
+The Windows installer built natively on the laptop from 593d4ea (`Common_0.1.0_x64-setup.exe`, sha256 `c8af273d467c38254fc96037d27dcc6cfdc115adf98f1e248fc4ab61c0ae05c0`, 4,608,282 bytes) was installed silently into `C:\Users\jessg\CommonVerify-593d4ea\app` by `apps/desktop/scripts/verify_windows_app.ps1`, with a fresh data folder (new device identity `b79212f0…`). While its window was open in the laptop's desktop session, the owner's side used both apps by hand (these steps were not automated):
+
+- **Firewall consent step:** "Allow on private networks" was pressed and the Windows elevation prompt approved at the laptop. The resulting rule, read with `netsh advfirewall firewall show rule name="Common (paired devices)" verbose`: Enabled Yes, Direction In, Profiles **Private**, Protocol **UDP**, Program **`C:\Users\jessg\CommonVerify-593d4ea\app\common.exe`**, Action Allow. Exactly the scope the step promises; nothing broader.
+- **Pairing started on Windows** (the direction Windows Firewall dropped on 2026-10-19, pktmon `receive inspection`): the laptop's audit log records `pairing_started` (port 50969) at 21:28:41 and `pairing_succeeded` with this Mac (`89839a1e…`, role initiator, addr 10.75.79.236:8193) at 21:29:09, then `peer_connected` outbound and, after Sharing was turned on, inbound. **The direction that failed is fixed on real hardware.**
+- **Device name:** this Mac lists the laptop as "JESS-HP" (its computer name), not "This Mac".
+
+The automated verifier itself stopped at its first launch check, because the app was being used by hand at the same time (its measurements need an untouched app); it is re-run on the next build. Networking was on in that fresh install only because it was turned on by hand (audit `network_changed` at 21:28:15); the default stays off.
