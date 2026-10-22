@@ -2,6 +2,20 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-22 (afternoon) — Claude Code — UI 2.0 packaged on macOS, browser checks, signal timing, eduroam connect-at-address
+
+- Verified: Desktop UI 2.0 packaged macOS app ALL PASS (15 checks) and installed (`docs/evidence/desktop-ui2-2026-10-22.md`); browser accessibility with colour contrast 0 violations at 1024×700 and 720×480 after 11 fixes, keyboard flows clean (SINGLE-HOST); jobs report `connecting` for requests to paired devices; the whole Windows desktop crate type-checks and passes clippy for x86_64-pc-windows-gnu.
+- Determined: the two signal-exit test failures were memory pressure on the 8 GB Mac (engine shutdown under swap hit the 2 s grace), not a defect; tests now assert the designed bound and a stuck-engine test exercises the kill fallback (`docs/VERIFICATION.md`, d9d8067).
+- TWO-MACHINE on eduroam (no mDNS): connect at address restored the Mac-laptop connection in 0.17 s from a stale hotspot address, and a remote run returned the golden output on the laptop (`docs/evidence/mesh-physical-2026-10-22-eduroam.md`).
+- Incident: the first guarded-sync attempt had a PowerShell escaping bug that deleted every file in the laptop's build copy of the repo (sources and caches only; the installed app, its data and everything else untouched). Fixed with a tracked cleanup script that refuses to delete when paths look wrong (593d4ea); the copy was restored and a full Windows rebuild started.
+- Hypothesis to check on Kyle's Mac: its macOS application firewall prompts for each new ad-hoc-signed build, which would explain the failed pairing on its random port (2026-10-21) and, earlier, this Mac's failed dials to it.
+- No ledger status changed.
+
+Next:
+    finish the Windows NSIS build (scheduled task CommonTestBuild), verify it with apps/desktop/scripts/verify_windows_app.ps1, install it, then
+    WIN_HOST=10.75.120.9 OUT=<dir> NO_MDNS=1 tests/distributed/two_machine/run_mac_windows.sh
+    OUT=<dir> tests/distributed/two_machine/run_mac_mac.sh when Kyle's Mac is awake
+
 ## 2026-10-22 — Claude Code — Desktop UI 2.0 implemented (unit + SINGLE-HOST); capability snapshot draft; publication readiness
 
 - Implemented: Desktop UI 2.0 per docs/design/desktop-ui-2-plan.md (control-center layout, seven sections, status bar, design system) and backend additions E0-E5 (peer details, engine state, jobs registry without prompt text, peer_lost audit, disconnect hold). Evidence: docs/evidence/desktop-ui2-2026-10-22.md.
