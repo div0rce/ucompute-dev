@@ -285,3 +285,13 @@ Details, reviews and open items: `docs/evidence/desktop-ui2-2026-10-22.md`. Owne
 - `caffeinate -i env COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 COMMON_MDNS=0 cargo test --no-fail-fast` → 431 passed, 2 failed (signal-exit timing bound under load; 3/3 alone), 2 ignored.
 - Reviews: 29 confirmed findings (2 high) plus 16 Devices-versus-plan gaps, all fixed with tests.
 Label: unit and SINGLE-HOST (dev build against a scratch daemon); packaged apps, screen readers and physical checks pending.
+
+## Signal-exit timing in `common run` (2026-10-22): environmental, test bound corrected
+
+`sigint_/sigterm_mid_generation_stops_and_exits_130` failed once each in the full-suite run of the Desktop UI 2.0 change (exit 2.40 s and 2.42 s against a `< 2 s` assertion) and passed when run alone.
+- Mechanism: on a signal the CLI cancels the stream, then `process::stop` sends the engine SIGTERM, waits up to 2 s and SIGKILLs it. Both failures sit at that 2 s grace plus ~0.4 s of the CLI's own work (memory read via `ps`, manifest write).
+- Code: the local `common run` exit path is unchanged in recent commits (the UI 2.0 change touched only the remote path's hold check and added a non-blocking view lock before the existing engine stop).
+- Measurements on the owner's Mac (8 GB, M2): idle-ish (load ~9.9) four interrupts → engine gone 0.051-0.094 s, CLI exit 0.063-0.106 s. Fault injection (engine SIGSTOPped before the interrupt): engine gone 2.049 / 2.057 s, CLI exit 2.073 / 2.076 s, exit 130, "stopped", no orphan. The machine was swapping heavily (5.6 of 6.1 GB swap used; one load refused with "only 663 MB available"); the full suite loads several engines in parallel. A CPU-stress attempt drove the load average to 198 through paging and was stopped.
+- Elsewhere: both tests passed in the full suite on Kyle's 16 GB M2 Pro (409/0, 2026-10-21) and on this Mac at 6ab9f8b.
+- Determination: environmental (memory pressure delays the engine's own shutdown); the product behaves as designed: exit bounded by the 2 s grace plus margin, correct code and message, no engine left behind. The test asserted `< 2 s`, which the design cannot guarantee.
+- Change: the tests now assert the designed bound (grace 2 s + 1 s margin) with the unchanged no-orphan, exit-code and `stopped` checks, and a new test `sigint_with_a_stuck_engine_kills_it_after_the_grace_and_exits_130` SIGSTOPs the engine to exercise the kill fallback every run (exit between 2 s and 3 s, 130, no orphan). Mutation check: with the grace set to 0 the new test fails ("exit after 121 ms"). `cargo test -p common-cli --test cli mid_generation stuck_engine` → 3 passed; clippy clean.

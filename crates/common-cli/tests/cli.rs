@@ -316,14 +316,23 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(unix)]
 #[test]
 fn sigint_mid_generation_stops_and_exits_130() {
-    signal_mid_generation("-INT");
+    signal_mid_generation("-INT", false);
 }
 
 /// SIGTERM (supervisor, `kill`) takes the same path as Ctrl-C: the engine is stopped, not orphaned.
 #[cfg(unix)]
 #[test]
 fn sigterm_mid_generation_stops_and_exits_130() {
-    signal_mid_generation("-TERM");
+    signal_mid_generation("-TERM", false);
+}
+
+/// An engine that cannot exit (stopped here with SIGSTOP, as a starved or wedged process would be)
+/// still ends: after the 2 s grace in `process::stop` the CLI kills it, prints `stopped`, exits 130
+/// and leaves nothing behind. Exit lands between the grace and the grace plus margin.
+#[cfg(unix)]
+#[test]
+fn sigint_with_a_stuck_engine_kills_it_after_the_grace_and_exits_130() {
+    signal_mid_generation("-INT", true);
 }
 
 /// SIGTERM to `common serve` with a model loaded stops that engine process before exiting.
@@ -392,8 +401,17 @@ fn sigterm_to_serve_stops_the_loaded_engine() {
     assert!(orphaned_engines().is_empty(), "{:?}", orphaned_engines());
 }
 
+/// How long the CLI waits for its engine after SIGTERM before killing it (`process::stop`), and
+/// the margin allowed on top for the CLI's own exit on a loaded machine. The exit is bounded by
+/// these, not by how fast the engine is: on an 8 GB Mac swapping during the full suite the engine
+/// can take the whole grace (observed 2.40 s exits), while an idle run exits in about 60 ms.
 #[cfg(unix)]
-fn signal_mid_generation(signal: &str) {
+const ENGINE_STOP_GRACE: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const EXIT_MARGIN: Duration = Duration::from_secs(1);
+
+#[cfg(unix)]
+fn signal_mid_generation(signal: &str, stall_engine: bool) {
     const SLOW: &str = "qwen2.5-0.5b-instruct-q4_k_m";
     if !assets_present() {
         return;
@@ -451,6 +469,19 @@ fn signal_mid_generation(signal: &str) {
         assert!(Instant::now() < deadline, "no tokens within 90 s");
         std::thread::sleep(Duration::from_millis(50));
     }
+    if stall_engine {
+        let kids = Command::new("pgrep")
+            .args(["-P", &child.id().to_string()])
+            .output()
+            .unwrap();
+        let engine = String::from_utf8_lossy(&kids.stdout)
+            .split_whitespace()
+            .filter_map(|p| p.parse::<i32>().ok())
+            .next()
+            .expect("the CLI's engine process");
+        // SAFETY: plain syscall on the engine this run started.
+        assert_eq!(unsafe { libc::kill(engine, libc::SIGSTOP) }, 0);
+    }
     let sent = Instant::now();
     assert!(Command::new("kill")
         .args([signal, &child.id().to_string()])
@@ -465,9 +496,15 @@ fn signal_mid_generation(signal: &str) {
     assert!(err.trim_end().ends_with("stopped"), "{err}");
     assert!(reader.join().unwrap() > 0, "tokens were streamed before the interrupt");
     assert!(
-        exit_latency < Duration::from_secs(2),
-        "exit after {signal} took {exit_latency:?} (observed ~60 ms alone)"
+        exit_latency < ENGINE_STOP_GRACE + EXIT_MARGIN,
+        "exit after {signal} took {exit_latency:?}: more than the engine grace plus margin"
     );
+    if stall_engine {
+        assert!(
+            exit_latency >= ENGINE_STOP_GRACE,
+            "a stuck engine must be waited for, then killed: exit after {exit_latency:?}"
+        );
+    }
     let m = read_manifest(&manifest_path(&err));
     assert!(
         m["completion_tokens"].as_u64().unwrap() > 0,
