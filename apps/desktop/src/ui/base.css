@@ -361,8 +361,10 @@ label.check {
   .shell {
     grid-template-columns: var(--rail-w-collapsed) minmax(0, 1fr);
   }
+  /* Visible, not auto: a scrolling rail clips the label bubbles beside it (the rail's content fits 480 px). */
   .rail {
     padding: var(--s2) 6px;
+    overflow: visible;
   }
   .rail-item {
     justify-content: center;
@@ -372,7 +374,7 @@ label.check {
     justify-content: center;
     padding: 0;
   }
-  /* Labels stay the accessible name (aria-label) and show as a bubble on hover/focus. */
+  /* Labels stay in the accessibility tree (the link's name comes from them) and show as a bubble on hover/focus. */
   .rail-label {
     position: absolute;
     left: calc(100% + 6px);
@@ -560,18 +562,20 @@ button.sb-item:hover {
   align-items: center;
   justify-content: space-between;
   gap: var(--s3);
-  height: var(--scope-h);
-  padding: 0 var(--s3);
+  /* Narrow windows wrap the scopes (as Activity does) instead of scrolling the last ones out of sight. */
+  flex-wrap: wrap;
+  row-gap: 2px;
+  min-height: var(--scope-h);
+  padding: 2px var(--s3);
   background: var(--surface-2);
   border-bottom: 1px solid var(--line);
   flex: none;
 }
 .scope-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 2px;
   min-width: 0;
-  /* Narrow windows scroll the scopes instead of clipping them: every scope stays reachable and visible on focus. */
-  overflow-x: auto;
 }
 .scope-btn {
   height: 24px;
@@ -673,6 +677,13 @@ button.sb-item:hover {
 .grid th.num > button,
 .grid th.num > span {
   justify-content: flex-end;
+}
+/* One line in the fixed-height header; the full text stays the accessible name and the tooltip. */
+.th-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .grid td {
   position: relative;

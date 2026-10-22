@@ -10,7 +10,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/chat has no serious or critical violations", async () => {
+  it("#/chat has no axe violations", async () => {
     const { container } = await scenario("chat");
     expect(await screen.findByRole("heading", { level: 1, name: "Chat" })).toBeTruthy();
     await screen.findByRole("textbox", { name: "Message" });

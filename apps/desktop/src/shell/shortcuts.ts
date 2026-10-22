@@ -43,8 +43,11 @@ function cycleRegions(back: boolean) {
   if (!regions.length) return;
   const i = regions.findIndex((r) => r.contains(document.activeElement));
   const next = regions[(i + (back ? -1 : 1) + regions.length) % regions.length];
+  // The current item first (the section's rail link, the selected tab), then the first focusable one.
   const target =
-    next.querySelector<HTMLElement>('[tabindex="0"], [aria-current="page"], a[href], button:not([tabindex="-1"]), input, select, textarea') ?? next;
+    next.querySelector<HTMLElement>('[aria-current="page"], [role="tab"][aria-selected="true"]') ??
+    next.querySelector<HTMLElement>('[tabindex="0"], a[href], button:not([tabindex="-1"]), input, select, textarea') ??
+    next;
   if (target === next && !next.hasAttribute("tabindex")) next.tabIndex = -1;
   target.focus();
 }

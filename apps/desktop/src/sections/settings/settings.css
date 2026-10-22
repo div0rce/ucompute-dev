@@ -19,8 +19,9 @@
 .settings-nav a {
   display: flex;
   align-items: center;
-  height: 30px;
-  padding: 0 var(--s2);
+  /* A label that wraps (narrow windows) grows the link, so its backgrounds and focus ring cover the text. */
+  min-height: 30px;
+  padding: 4px var(--s2);
   border-radius: var(--r-1);
   color: var(--text);
   text-decoration: none;

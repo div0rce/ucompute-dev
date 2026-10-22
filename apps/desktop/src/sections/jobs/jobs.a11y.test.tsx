@@ -12,7 +12,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/performance lands on Jobs with no serious or critical violations", async () => {
+  it("#/performance lands on Jobs with no axe violations", async () => {
     const { container } = await scenario("performance");
     expect(await screen.findByRole("heading", { level: 1, name: "Jobs" })).toBeTruthy();
     await screen.findByText(/Nothing is running/);

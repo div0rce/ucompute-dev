@@ -70,9 +70,12 @@ export function ToolButton({
   shortcut,
   primary,
   busy,
+  detail,
 }: {
   icon: IconName;
   label: string;
+  /** Visible after the label but not part of the name, for text that changes while the button may have focus (a countdown). */
+  detail?: string;
   onClick: () => void;
   disabledReason?: string | null;
   pressed?: boolean;
@@ -99,7 +102,10 @@ export function ToolButton({
       }}
     >
       <Icon name={busy ? "loader" : icon} className={busy ? "spin" : undefined} />
-      <span className="tool-label">{label}</span>
+      <span className="tool-label">
+        {label}
+        {detail && <span aria-hidden="true"> · {detail}</span>}
+      </span>
     </button>
   );
   return <Tip text={reason ?? (shortcut ? `Shortcut: ${shortcut}` : null)}>{btn}</Tip>;

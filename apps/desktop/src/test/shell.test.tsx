@@ -369,7 +369,10 @@ describe("rail", () => {
     render(<Rail current="devices" />);
     const nav = screen.getByRole("navigation", { name: "Sections" });
     expect(within(nav).getByText("UCompute")).toBeTruthy();
-    expect(within(nav).getAllByRole("link").map((a) => a.getAttribute("aria-label"))).toEqual(["Dashboard", "Devices", "Models", "Jobs", "Chat", "Activity", "Settings"]);
+    // The name is the visible label (no aria-label: with a badge showing it would not match the visible text, WCAG 2.5.3).
+    const links = within(nav).getAllByRole("link");
+    expect(links.map((a) => a.querySelector(".rail-label")!.textContent)).toEqual(["Dashboard", "Devices", "Models", "Jobs", "Chat", "Activity", "Settings"]);
+    expect(links.filter((a) => a.hasAttribute("aria-label"))).toEqual([]);
     const devices = within(nav).getByRole("link", { name: "Devices" });
     expect(devices.getAttribute("aria-current")).toBe("page");
     expect(devices.textContent).toBe("Devices1/2");
@@ -446,6 +449,19 @@ describe("shortcuts", () => {
     expect(seen).toEqual(["toolbar", "table", "statusbar", "rail"]);
     key({ key: "F6", shiftKey: true });
     expect(region()).toBe("statusbar");
+  });
+
+  it("F6 lands on the current item: the section's rail link, the inspector's selected tab", async () => {
+    installFakeDaemon({ network: NETWORK_ON, peers: [PEER] });
+    await refreshStatus();
+    window.location.hash = `#/devices/${PEER.id}`;
+    render(<App poll={false} />);
+    const overview = await screen.findByRole("tab", { name: "Overview" });
+    (document.activeElement as HTMLElement | null)?.blur();
+    key({ key: "F6" });
+    expect(document.activeElement).toBe(within(screen.getByRole("navigation", { name: "Sections" })).getByRole("link", { name: "Devices" }));
+    for (let i = 0; i < 6 && !overview.closest("[data-region]")!.contains(document.activeElement); i++) key({ key: "F6" });
+    expect(document.activeElement).toBe(overview);
   });
 
   it("Mod+F focuses the filter box when the section has one", () => {

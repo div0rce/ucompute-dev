@@ -108,6 +108,7 @@ export function Inspector({ id, label, hasSelection, empty, defaultHeight = "38%
     setHeight(height + d);
   };
 
+  const tabbed = hasSelection && tabs.length > 1;
   const panel = (t: InspectorTab) => (
     <div className="inspector-panel" role={tabs.length > 1 ? "tabpanel" : undefined} id={`${base}-panel`} aria-labelledby={tabs.length > 1 ? `${base}-tab-${t.id}` : undefined} tabIndex={0}>
       {t.render()}
@@ -134,7 +135,9 @@ export function Inspector({ id, label, hasSelection, empty, defaultHeight = "38%
         />
       )}
       <div className="inspector-bar">
-        {hasSelection && tabs.length > 1 ? (
+        {/* The inspector's h2: the tab panels' h3 groups sit under it, not straight under the section's h1. */}
+        <h2 className={tabbed ? "visually-hidden" : "inspector-title"}>{label}</h2>
+        {tabbed && (
           <div role="tablist" aria-label={label} className="tablist" onKeyDown={onTabKey}>
             {tabs.map((t, i) => (
               <button
@@ -154,8 +157,6 @@ export function Inspector({ id, label, hasSelection, empty, defaultHeight = "38%
               </button>
             ))}
           </div>
-        ) : (
-          <span className="inspector-title">{label}</span>
         )}
         <button type="button" className="icon-btn" aria-expanded={!collapsed} aria-label={collapsed ? `Show ${label}` : `Hide ${label}`} onClick={toggle}>
           <Icon name="chevron-down" className={collapsed ? "flip" : undefined} />

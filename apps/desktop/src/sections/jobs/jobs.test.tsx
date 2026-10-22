@@ -10,7 +10,7 @@ import { ownStreams, refresh } from "../../state/live";
 import { chatHistory } from "../../state/stores";
 import { resetStores } from "../../test/axe";
 import { installFakeDaemon, JOBS, LOADED, NETWORK_ON, PEER, type FakeDaemon } from "../../test/mocks";
-import { jobState } from "./Jobs";
+import { isActive, jobState } from "./Jobs";
 
 beforeEach(resetStores);
 afterEach(() => {
@@ -21,6 +21,7 @@ afterEach(() => {
 const RUNNING = JOBS.active[0]; // local chat, client_ref set
 const QUEUED = JOBS.active[1]; // local completion, no client_ref
 const SERVED = JOBS.active[2]; // served for PEER
+const CONNECTING = JOBS.active[3]; // chat to PEER, being dialled
 const SENT = JOBS.recent[1]; // done on PEER
 
 function cell(row: HTMLElement, header: string) {
@@ -46,14 +47,24 @@ async function open(fake: FakeDaemon, hash = "#/jobs") {
 describe("jobState", () => {
   it("uses only real E3 states, with errors.ts titles", () => {
     expect(jobState({ ...QUEUED }).word).toBe("Waiting for a slot");
-    // Queued on a request to another device means it is being dialled and sent, not waiting for a slot here.
-    expect(jobState({ ...QUEUED, target: `peer:${PEER.id}` })).toMatchObject({ word: "Connecting to the device", tone: "active" });
+    expect(jobState(CONNECTING)).toMatchObject({ word: "Connecting to the device", tone: "active" });
+    // A service from before `connecting` reports a request to another device as queued while it is dialled: no slot here.
+    expect(jobState({ ...CONNECTING, state: "queued" })).toMatchObject({ word: "Connecting to the device", tone: "active" });
+    // A state from a newer service is shown as reported, not guessed.
+    expect(jobState({ ...QUEUED, state: "paused" as Job["state"] }).word).toBe("State not known to this app: paused");
     expect(jobState({ ...QUEUED, state: "loading" }).word).toBe("Loading model");
     expect(jobState(RUNNING).word).toBe("Running");
     expect(jobState(JOBS.recent[2])).toMatchObject({ word: "Failed: Common is busy with other requests.", tone: "danger" });
     expect(jobState({ ...SENT, state: "cancelled", error_code: "client_gone" }).word).toBe("Requester disconnected");
     expect(jobState({ ...SENT, state: "cancelled", error_code: "cancelled" }).word).toBe("Stopped");
     expect(jobState(SENT)).toMatchObject({ word: "Done", tone: "ok", detail: "Finish reason: stop" });
+  });
+
+  it("never files a state it does not know under finished", () => {
+    // Unknown is not an outcome: it stays with the active jobs (and its Stop says why it is unavailable).
+    expect(isActive({ ...QUEUED, state: "paused" as Job["state"] })).toBe(true);
+    for (const state of ["queued", "connecting", "loading", "running"] as const) expect(isActive({ ...QUEUED, state })).toBe(true);
+    for (const state of ["done", "error", "cancelled"] as const) expect(isActive({ ...QUEUED, state })).toBe(false);
   });
 });
 
@@ -62,7 +73,7 @@ describe("Jobs section", () => {
     chatHistory.set({ messages: [{ role: "assistant", content: "x", client_ref: RUNNING.client_ref! }] });
     await open(installFakeDaemon({ jobs: JOBS, network: NETWORK_ON, peers: [PEER] }));
     const g = await grid();
-    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(7));
+    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(8));
     expect(within(screen.getByRole("group", { name: "Show jobs" })).getByRole("button", { name: /^All/ }).getAttribute("aria-pressed")).toBe("true");
     const states = within(g)
       .getAllByRole("row")
@@ -70,7 +81,7 @@ describe("Jobs section", () => {
       .map((r) => cell(r, "State"));
     // Active rows by state, then finished rows newest first whatever their outcome: the 10:29 failure is older than
     // both replies, so it comes last (a state sort would lift it above them).
-    expect(states).toEqual(["Running", "Running", "Waiting for a slot", "Done", "Done", "Failed: Common is busy with other requests."]);
+    expect(states).toEqual(["Running", "Running", "Waiting for a slot", "Connecting to the device", "Done", "Done", "Failed: Common is busy with other requests."]);
     expect(within(g).getAllByRole("columnheader").some((h) => h.hasAttribute("aria-sort"))).toBe(false);
 
     expect(cell(rowOf(g, RUNNING), "Requested by")).toBe("This app");
@@ -117,7 +128,7 @@ describe("Jobs section", () => {
     ownStreams.set({ [RUNNING.client_ref!]: { stop } });
     await open(installFakeDaemon({ jobs: JOBS, network: NETWORK_ON, peers: [PEER] }));
     const g = await grid();
-    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(7));
+    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(8));
 
     await user.click(rowOf(g, SERVED));
     const btn = screen.getByRole("button", { name: "Stop" });
@@ -161,7 +172,7 @@ describe("Jobs section", () => {
     chatHistory.set({ messages: [{ role: "assistant", content: "x", job_id: JOBS.recent[0].id }] });
     await open(installFakeDaemon({ jobs: JOBS, network: NETWORK_ON, peers: [PEER] }));
     const g = await grid();
-    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(7));
+    await waitFor(() => expect(within(g).getAllByRole("row")).toHaveLength(8));
     await user.click(rowOf(g, JOBS.recent[0]));
     expect(screen.getByRole("button", { name: "Show device" }).getAttribute("aria-disabled")).toBe("true");
     await user.click(screen.getByRole("button", { name: "Open in Chat" }));
@@ -184,7 +195,7 @@ describe("Jobs section", () => {
     expect(within(await grid()).getAllByRole("row")).toHaveLength(2);
     await user.click(within(scopes).getByRole("button", { name: /^All/ }));
     await user.type(screen.getByRole("searchbox", { name: "Filter jobs" }), "studio");
-    expect(within(await grid()).getAllByRole("row")).toHaveLength(3);
+    expect(within(await grid()).getAllByRole("row")).toHaveLength(4);
   });
 
   it("a service without /api/jobs shows the slot strip and says so; no table, no sparkline", async () => {

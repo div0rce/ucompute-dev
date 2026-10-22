@@ -17,7 +17,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/diagnostics has no serious or critical violations", async () => {
+  it("#/diagnostics has no axe violations", async () => {
     const user = userEvent.setup();
     const { fake, container } = await scenario("diagnostics");
     expect(await screen.findByRole("heading", { level: 1, name: "Activity" })).toBeTruthy();

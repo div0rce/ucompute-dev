@@ -18,7 +18,7 @@ export const PEERS_E1 = peersE1 as Mesh;
 export const PEER_E1: Peer = PEERS_E1.peers[0];
 /** E5 `GET /api/peers`: one held here, one that the other device held (`last_error.code: "peer_held"`). */
 export const PEERS_E5 = peersE5 as Mesh;
-/** E3 `GET /api/jobs`: running (with `client_ref`), queued, served for a peer; done, sent to a peer, failed. */
+/** E3 `GET /api/jobs`: running (with `client_ref`), queued, served for a peer, connecting to a peer; done, sent to a peer, failed. */
 export const JOBS = jobsE3 as JobsData;
 /** E4 audit events: `peer_lost`, `peer_disconnected` by the user, `peer_rejected` held. Oldest first. */
 export const AUDIT_E4 = auditE4.events as AuditEvent[];

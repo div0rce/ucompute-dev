@@ -442,6 +442,7 @@ To the right, one **token-rate sparkline** with three series: on this computer (
 | `state` | Word | Tone |
 |---|---|---|
 | queued | Waiting for a slot | neutral, clock |
+| connecting | Connecting to the device (added 2026-10-22; a service from before it reports this as `queued` with a `peer:` target, which reads the same) | active |
 | loading | Loading model | active |
 | running | Running | active |
 | done | Done (`finish_reason` in the detail; served rows with outcome `ended` read the same) | ok |
@@ -881,7 +882,7 @@ The essential ones are E1 through E5. The rules for every addition:
 | `model_id` | string |
 | `target` | `"local"` \| `"peer:<hex>"` |
 | `origin` | `"local"` \| `"peer:<hex>"` |
-| `state` | `queued` \| `loading` \| `running` \| `done` \| `error` \| `cancelled` |
+| `state` | `queued` \| `connecting` \| `loading` \| `running` \| `done` \| `error` \| `cancelled` (an unknown state is shown as "State not known to this app" and kept with the active jobs, never as an outcome) |
 | `created_at_utc`, `started_at_utc?`, `first_token_at_utc?`, `finished_at_utc?` | timestamps |
 | `queue_ms?`, `load_ms?`, `ttft_ms?`, `prompt_ms?`, `decode_ms?`, `duration_ms?` | durations |
 | `prompt_tokens?`, `completion_tokens?`, `decode_tokens_per_second?` | numbers. **`completion_tokens` is live on active rows** (counted per chunk by the drop-guard), final on finished rows. |
@@ -891,6 +892,7 @@ The essential ones are E1 through E5. The rules for every addition:
 
 All the states are real:
 - `queued` = waiting in `Admission::acquire`
+- `connecting` = a request to a paired device, until it is sent on the connection (added 2026-10-22)
 - `loading` = inside `ensure_loaded`
 - `running` = generating
 

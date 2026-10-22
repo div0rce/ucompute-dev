@@ -11,7 +11,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/models has no serious or critical violations", async () => {
+  it("#/models has no axe violations", async () => {
     const { container } = await scenario("models");
     expect(await screen.findByRole("heading", { level: 1, name: "Models" })).toBeTruthy();
     await screen.findByText(/TinyStories 15M/);

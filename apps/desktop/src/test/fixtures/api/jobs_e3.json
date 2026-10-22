@@ -77,6 +77,32 @@
       "error_code": null,
       "request_id": "5b0d8c1e-77aa-4d2b-8f00-1c2d3e4f5a6b",
       "device_actual": "Metal0 (Apple M2)"
+    },
+    {
+      "id": "chatcmpl-2b3c4d5e",
+      "client_ref": null,
+      "kind": "chat",
+      "model_id": "qwen2.5-1.5b-instruct-q4_k_m",
+      "target": "peer:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "origin": "local",
+      "state": "connecting",
+      "created_at_utc": "2026-10-22T10:33:03Z",
+      "started_at_utc": null,
+      "first_token_at_utc": null,
+      "finished_at_utc": null,
+      "queue_ms": null,
+      "load_ms": null,
+      "ttft_ms": null,
+      "prompt_ms": null,
+      "decode_ms": null,
+      "duration_ms": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "decode_tokens_per_second": null,
+      "finish_reason": null,
+      "error_code": null,
+      "request_id": null,
+      "device_actual": null
     }
   ],
   "recent": [

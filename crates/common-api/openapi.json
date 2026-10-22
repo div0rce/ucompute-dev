@@ -307,7 +307,7 @@
       "get": {
         "tags": ["common"],
         "summary": "Requests running and recently finished",
-        "description": "Every chat, completion and embeddings request this daemon runs or sends to a paired device, and every request it serves for one (`kind: served_for_peer`), from the moment its handler starts (before admission, so a request waiting for a slot shows as `queued`) until it ends; then the last 256 finished, newest first. In memory only: cleared when the service restarts. Ids, counts, codes and durations only, never prompt or completion text.",
+        "description": "Every chat, completion and embeddings request this daemon runs or sends to a paired device, and every request it serves for one (`kind: served_for_peer`), from the moment its handler starts (before admission, so a request waiting for a slot shows as `queued`, and one to a paired device as `connecting` until it is sent) until it ends; then the last 256 finished, newest first. In memory only: cleared when the service restarts. Ids, counts, codes and durations only, never prompt or completion text.",
         "responses": { "200": { "description": "Jobs", "content": { "application/json": { "schema": { "type": "object", "properties": { "active": { "type": "array", "items": { "$ref": "#/components/schemas/Job" }, "description": "Oldest first." }, "recent": { "type": "array", "items": { "$ref": "#/components/schemas/Job" }, "maxItems": 256, "description": "Newest first." } }, "required": ["active", "recent"] } } } } }
       }
     },
@@ -485,7 +485,7 @@
           "model_id": { "type": "string" },
           "target": { "type": "string", "description": "`local` or `peer:<hex>`: where it runs." },
           "origin": { "type": "string", "description": "`local` or `peer:<hex>`: who asked." },
-          "state": { "type": "string", "enum": ["queued", "loading", "running", "done", "error", "cancelled"], "description": "`queued` waiting for an engine slot, or for a request to a paired device (no slot here) reaching that device until it is sent, `loading` in the model step, `running` generating (or sent to the device); `cancelled` when the requester went away or stopped it (`error_code` `cancelled` or `client_gone`)." },
+          "state": { "type": "string", "enum": ["queued", "connecting", "loading", "running", "done", "error", "cancelled"], "description": "`queued` waiting for an engine slot, `connecting` a request to a paired device (no slot or load here) while this device reaches it, through the dial until the request is sent on the connection, `loading` in the model step, `running` generating (or sent to the device); `cancelled` when the requester went away or stopped it (`error_code` `cancelled` or `client_gone`). Daemons before `connecting` report that phase as `queued` with a `peer:` target; a client should read an unknown state as not known, never as an outcome." },
           "created_at_utc": { "type": "string" }, "started_at_utc": { "type": ["string", "null"] }, "first_token_at_utc": { "type": ["string", "null"] }, "finished_at_utc": { "type": ["string", "null"] },
           "queue_ms": { "type": ["integer", "null"] }, "load_ms": { "type": ["integer", "null"] }, "ttft_ms": { "type": ["integer", "null"] }, "prompt_ms": { "type": ["number", "null"] }, "decode_ms": { "type": ["number", "null"] }, "duration_ms": { "type": ["integer", "null"] },
           "prompt_tokens": { "type": ["integer", "null"] },

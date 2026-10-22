@@ -19,19 +19,26 @@ import { EmptyState, KV, ScopeBar, StateBadge, ToolButton, Unavailable, type Ton
 import { frameState, SectionFrame } from "../../ui/SectionFrame";
 import { Sparkline } from "../../ui/Sparkline";
 
-const ACTIVE = new Set<Job["state"]>(["queued", "loading", "running"]);
-export const isActive = (j: Job) => ACTIVE.has(j.state);
+/** The states that mean a job has ended. Anything else, including a state added by a newer service,
+ * is not known to have ended, so it stays with the active jobs (never shown as an outcome). */
+const FINISHED = new Set<string>(["done", "error", "cancelled"]);
+export const isActive = (j: Job) => !FINISHED.has(j.state);
+const knownState = (j: Job) => FINISHED.has(j.state) || ["queued", "connecting", "loading", "running"].includes(j.state);
 
-/** The State word (plan §2.4). `rank` is the State sort: running, loading, queued, error, cancelled, done. */
+const CONNECTING = { word: "Connecting to the device", tone: "active", icon: "loader", rank: 2 } as const;
+
+/** The State word (plan §2.4). `rank` is the State sort: running, loading, connecting and queued, error, cancelled, done. */
 export function jobState(j: Job): { word: string; tone: Tone; icon: IconName; rank: number; detail?: string } {
   switch (j.state) {
     case "running":
       return { word: "Running", tone: "active", icon: "play", rank: 0 };
     case "loading":
       return { word: "Loading model", tone: "active", icon: "loader", rank: 1 };
+    case "connecting":
+      return CONNECTING;
     case "queued":
-      // A request to another device never takes a slot here: until it is sent, the service is reaching that device.
-      return j.target.startsWith("peer:") ? { word: "Connecting to the device", tone: "active", icon: "loader", rank: 2 } : { word: "Waiting for a slot", tone: "neutral", icon: "clock", rank: 2 };
+      // A service from before `connecting` reports a request to another device (which takes no slot here) as queued while it reaches that device.
+      return j.target.startsWith("peer:") ? CONNECTING : { word: "Waiting for a slot", tone: "neutral", icon: "clock", rank: 2 };
     case "error": {
       const e = mapError(j.error_code ?? "internal", "");
       return { word: `Failed: ${e.title}`, tone: "danger", icon: "circle-x", rank: 3, detail: e.next_step };
@@ -42,6 +49,9 @@ export function jobState(j: Job): { word: string; tone: Tone; icon: IconName; ra
         : { word: "Stopped", tone: "neutral", icon: "square", rank: 4 };
     case "done":
       return { word: "Done", tone: "ok", icon: "circle-check", rank: 5, detail: j.finish_reason ? `Finish reason: ${j.finish_reason}` : undefined };
+    default:
+      // A state added by a newer service: shown as reported, never guessed (and never a crash).
+      return { word: `State not known to this app: ${String((j as Job).state)}`, tone: "neutral", icon: "circle-alert", rank: 2 };
   }
 }
 
@@ -66,7 +76,7 @@ const KIND: Record<Job["kind"], string> = { chat: "Chat", completion: "Completio
 
 /**
  * Job rows, columns and actions, shared with the Dashboard's "Running now" block. Rows: active by state order
- * (running, loading, queued; registry order within), then finished, newest first whatever their outcome (plan §2.4):
+ * (running, loading, connecting and queued; registry order within), then finished, newest first whatever their outcome (plan §2.4):
  * the tables keep this order until the user sorts. Live tok/s on an active row is Δtokens/Δt between this hook's last
  * two job reads.
  */
@@ -150,7 +160,7 @@ export function useJobs() {
   ];
 
   /** Why Stop is not possible on `j` (null = it is). */
-  const stopReason = (j: Job | null) => (!j ? "Select a job first" : !isActive(j) ? "It has finished" : !ownStream(j) ? "Only requests started in this app can be stopped" : null);
+  const stopReason = (j: Job | null) => (!j ? "Select a job first" : !isActive(j) ? "It has finished" : !knownState(j) ? "Its state is not known to this app" : !ownStream(j) ? "Only requests started in this app can be stopped" : null);
   const stop = (j: Job) => ownStream(j)?.stop();
   // Chat's `?reply=` names a reply by its job id, or by its client ref when no chunk (and so no id) arrived.
   const openChat = (j: Job) => go("chat", null, { reply: messages.some((m) => m.job_id === j.id) ? j.id : (j.client_ref ?? j.id) });

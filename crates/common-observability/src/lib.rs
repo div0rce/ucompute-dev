@@ -351,9 +351,12 @@ pub mod jobs {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum JobState {
-        /// Waiting for an engine slot (local admission); for a request to a paired device, which
-        /// takes no slot here, reaching that device until the request is sent (then `Running`).
+        /// Waiting for an engine slot (local admission).
         Queued,
+        /// A request to a paired device (no slot or load here): reaching that device, from the
+        /// request's arrival through the dial until the request is sent on the connection (then
+        /// `Running`). Daemons before this state reported that as `Queued`.
+        Connecting,
         /// In the model step (a load, or finding the loaded model).
         Loading,
         /// Generating, or sent to a paired device.
@@ -448,8 +451,9 @@ pub mod jobs {
             self.0.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
-        /// Register a request as `queued`. The handle moves it on and finishes it, at the latest
-        /// when dropped (`cancelled`: the request went away without an outcome).
+        /// Register a request as `queued`, or `connecting` when it goes to a paired device
+        /// (`peer:` target). The handle moves it on and finishes it, at the latest when dropped
+        /// (`cancelled`: the request went away without an outcome).
         pub fn start(
             self: &Arc<Self>,
             id: String,
@@ -459,6 +463,11 @@ pub mod jobs {
             origin: String,
             client_ref: Option<String>,
         ) -> JobHandle {
+            let state = if target.starts_with("peer:") {
+                JobState::Connecting
+            } else {
+                JobState::Queued
+            };
             let mut job = Job {
                 id,
                 client_ref,
@@ -467,7 +476,7 @@ pub mod jobs {
                 model_id: model_id.chars().take(200).collect(),
                 target,
                 origin,
-                state: JobState::Queued,
+                state,
                 created_at_utc: utc_ms(SystemTime::now()),
                 started_at_utc: None,
                 first_token_at_utc: None,

@@ -119,7 +119,7 @@ describe("Windows Firewall consent step", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("the notice, its failure and its place by the pairing code have no serious or critical axe violations", async () => {
+  it("the notice, its failure and its place by the pairing code have no axe violations", async () => {
     const user = userEvent.setup();
     windowsApp(BLOCKED, () => Promise.reject("cancelled"));
     installFakeDaemon({ network: NETWORK_ON });

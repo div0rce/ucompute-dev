@@ -7,13 +7,15 @@ import { refreshStatus } from "../daemon";
 import { chatHistory, daemon, lastError, privacy } from "../state/stores";
 import { installFakeDaemon, LOADED, NETWORK_ON, PEER, PRIVACY, STRANGER } from "./mocks";
 
-/** Fails on serious or critical violations. Contrast needs a real layout engine (checked in the real-browser pass). */
+/**
+ * Fails on any violation, moderate ones (heading-order) too: the plan's gate is 0. Contrast and label-in-name need a
+ * real layout engine (checked in the real-browser pass).
+ */
 export async function scan(container: HTMLElement) {
   const result = await axe.run(container, {
     rules: { "color-contrast": { enabled: false } },
   });
-  const serious = result.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
-  expect(serious.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.target.join(" ")).join(", ")})`)).toEqual([]);
+  expect(result.violations.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.target.join(" ")).join(", ")})`)).toEqual([]);
   expect(result.passes.length, "axe actually ran").toBeGreaterThan(5);
   return result;
 }

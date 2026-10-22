@@ -233,7 +233,8 @@ export interface Mesh {
   revocations: Revocation[];
 }
 
-export type JobState = "queued" | "loading" | "running" | "done" | "error" | "cancelled";
+/** `connecting`: a request to a paired device while the service reaches it, until it is sent (services from before it report that as `queued` with a `peer:` target). */
+export type JobState = "queued" | "connecting" | "loading" | "running" | "done" | "error" | "cancelled";
 export type JobKind = "chat" | "completion" | "embeddings" | "served_for_peer";
 
 /** E3 `GET /api/jobs` row. Ids, counts and durations only, never prompt or reply text. */
@@ -377,12 +378,16 @@ export interface ReqOpts {
   timeoutMs?: number;
 }
 
-let baseUrl = "http://127.0.0.1:8192";
-let token: string | null = null;
+// Dev only: a hot update of this file makes a new module instance, which must keep the daemon `configure` chose
+// (`?daemon=`), not fall back to the default one (another daemon's data, and writes, in this page).
+const kept = import.meta.hot?.data as { baseUrl?: string; token?: string | null } | undefined;
+let baseUrl = kept?.baseUrl ?? "http://127.0.0.1:8192";
+let token: string | null = kept?.token ?? null;
 
 export function configure(opts: { baseUrl?: string; token?: string | null }): void {
   if (opts.baseUrl) baseUrl = opts.baseUrl.replace(/\/$/, "");
   if (opts.token !== undefined) token = opts.token;
+  if (kept) Object.assign(kept, { baseUrl, token });
 }
 export function getBaseUrl(): string {
   return baseUrl;

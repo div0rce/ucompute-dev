@@ -10,7 +10,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/settings (every page) has no serious or critical violations", async () => {
+  it("#/settings (every page) has no axe violations", async () => {
     const { container } = await scenario("settings/execution");
     expect(await screen.findByRole("heading", { level: 1, name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Settings pages" })).toBeTruthy();
@@ -25,7 +25,7 @@ describe("axe accessibility scan", () => {
   }, 30000);
 
   // Privacy in trusted-devices mode with the disclosure open (the acknowledge checkbox visible).
-  it("#/privacy has no serious or critical violations", async () => {
+  it("#/privacy has no axe violations", async () => {
     const { fake, container } = await scenario("privacy");
     expect(await screen.findByRole("heading", { level: 2, name: "Privacy" })).toBeTruthy();
     // The disclosure only appears when leaving local-only, so start there and pick trusted devices.

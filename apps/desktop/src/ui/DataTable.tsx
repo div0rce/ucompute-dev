@@ -253,13 +253,13 @@ export function DataTable<R>(p: DataTableProps<R>) {
               return (
                 <th key={c.id} role="columnheader" scope="col" aria-sort={sorted} className={c.align === "end" ? "num" : undefined}>
                   {c.sort ? (
-                    <button type="button" tabIndex={active ? 0 : -1} data-active={active || undefined} onClick={() => sortBy(c.id)} onFocus={() => setCursor({ row: "header", col: ci })}>
-                      {c.header}
+                    <button type="button" tabIndex={active ? 0 : -1} data-active={active || undefined} title={c.header} onClick={() => sortBy(c.id)} onFocus={() => setCursor({ row: "header", col: ci })}>
+                      <span className="th-label">{c.header}</span>
                       {sorted && <Icon name={sorted === "ascending" ? "arrow-up" : "arrow-down"} />}
                     </button>
                   ) : (
-                    <span tabIndex={active ? 0 : -1} data-active={active || undefined}>
-                      {c.header}
+                    <span tabIndex={active ? 0 : -1} data-active={active || undefined} title={c.header}>
+                      <span className="th-label">{c.header}</span>
                     </span>
                   )}
                 </th>

@@ -221,10 +221,13 @@ function RunningNow() {
         <p className="dash-note">Job list not reported by this service version.{q ? ` In use ${q.inflight}/${q.max_concurrent} · Waiting ${q.queued}.` : ""}</p>
       </Block>
     );
-  const rows = [...j.rows.filter(isActive), ...j.rows.filter((x) => !isActive(x)).slice(0, RECENT)];
+  const active = j.rows.filter(isActive);
+  const rows = [...active, ...j.rows.filter((x) => !isActive(x)).slice(0, RECENT)];
   const picked = rows.find((x) => x.id === sel) ?? null;
   return (
     <Block title="Running now" to={href("jobs")} actions={<ToolButton icon="stop" label="Stop" onClick={() => picked && j.stop(picked)} disabledReason={j.stopReason(picked)} />}>
+      {/* Only finished rows below: the title alone would claim they are running. */}
+      {rows.length > 0 && !active.length && <p className="dash-note">Nothing is running. Recently finished:</p>}
       <DataTable
         id="dashboard.jobs"
         label="Running now"

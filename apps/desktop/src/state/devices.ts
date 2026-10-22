@@ -164,6 +164,8 @@ function peerRunThere(p: Peer, i: DeviceInput): Word {
   if (OUTCOME_REFUSED.has(last.outcome)) return { word: "Refused last request (its permissions)", tone: "warn", detail: `${mapError(last.outcome, "").title} ${when}` };
   if (last.outcome === "overloaded") return { word: "Refused last request (busy or over quota)", tone: "warn", detail: when };
   if (last.outcome === "done") return { word: "Can send · last request done", tone: "ok", detail: when };
+  // A Stop is not a failure of the device.
+  if (last.outcome === "cancelled") return { word: "Can send · last request stopped", tone: "ok", detail: when };
   return { word: `Can send · last request failed: ${mapError(last.outcome, "").title}`, tone: "warn", detail: when };
 }
 

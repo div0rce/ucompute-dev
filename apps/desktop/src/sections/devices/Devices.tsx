@@ -202,7 +202,8 @@ export default function Devices() {
         actions={
           <ToolButton
             icon="link"
-            label={session && session.expiresAt > now ? `Pairing open · ${mmss(session.expiresAt - now)}` : "Pair a device…"}
+            label={session && session.expiresAt > now ? "Pairing open" : "Pair a device…"}
+            detail={session && session.expiresAt > now ? mmss(session.expiresAt - now) : undefined}
             disabledReason={up ? null : "The background service is not running"}
             onClick={() => select(loc.id, params({ pair: "1", confirm: null }))}
           />

@@ -1,5 +1,5 @@
 // F-10-11 for the Dashboard (owner A): every block with realistic data (attention with a last problem, the computers,
-// running and finished jobs, recent activity) has no serious or critical axe violations.
+// running and finished jobs, recent activity) has no axe violations.
 import { act, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { refresh } from "../../state/live";
@@ -10,7 +10,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/dashboard (and its #/home alias) has no serious or critical violations", async () => {
+  it("#/dashboard (and its #/home alias) has no axe violations", async () => {
     const { fake, container } = await scenario("home");
     expect(await screen.findByRole("heading", { level: 1, name: "Dashboard" })).toBeTruthy();
     await screen.findByRole("grid", { name: "Computers" });

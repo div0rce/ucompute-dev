@@ -178,6 +178,8 @@ describe("plan §2.2 tables, rule by rule", () => {
     expect(run({ audit: [finished("overloaded")] })).toMatchObject({ word: "Refused last request (busy or over quota)", tone: "warn" });
     expect(run({ audit: [finished("done")] })).toMatchObject({ word: "Can send · last request done", tone: "ok" });
     expect(run({ audit: [finished("timeout")] })).toMatchObject({ word: "Can send · last request failed: The model took too long to respond.", tone: "warn" });
+    // The user's own Stop is not a failure of the device.
+    expect(run({ audit: [finished("cancelled")] })).toMatchObject({ word: "Can send · last request stopped", tone: "ok" });
     expect(run({ audit: [] })).toMatchObject({ word: "Can send", tone: "neutral", note: "Its own permissions, serving setting and load are not reported." });
     // A sent (not finished) request and a served one are not outcomes of this computer's requests.
     const sent: AuditEvent = { ts_utc: "2026-10-22T10:30:20Z", kind: "remote_request", peer_id: p.id, fields: { role: "client", phase: "sent" } };

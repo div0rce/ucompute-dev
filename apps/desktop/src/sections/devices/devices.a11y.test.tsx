@@ -13,7 +13,7 @@ beforeEach(resetStores);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("axe accessibility scan", () => {
-  it("#/hardware (this computer's Hardware tab) has no serious or critical violations", async () => {
+  it("#/hardware (this computer's Hardware tab) has no axe violations", async () => {
     const { container } = await scenario("hardware");
     expect(await screen.findByRole("heading", { level: 1, name: "Devices" })).toBeTruthy();
     expect((await screen.findByRole("tab", { name: "Hardware" })).getAttribute("aria-selected")).toBe("true");
@@ -22,7 +22,7 @@ describe("axe accessibility scan", () => {
   }, 20000);
 
   // Networking on, a paired device, a group, a stranger nearby and a pairing code showing.
-  it("#/peers with the Pair dialog showing a code has no serious or critical violations", async () => {
+  it("#/peers with the Pair dialog showing a code has no axe violations", async () => {
     const user = userEvent.setup();
     const { container } = await scenario("peers");
     expect(await screen.findByRole("heading", { level: 1, name: "Devices" })).toBeTruthy();

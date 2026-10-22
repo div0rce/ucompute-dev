@@ -217,8 +217,10 @@ describe("Devices: pairing and trust", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Pair a device" })).toBeNull());
     expect(window.location.hash).toBe("#/devices");
-    // The toolbar says the window is still open, with its countdown, and reopens it.
-    const resume = await within(toolbar()).findByRole("button", { name: /^Pairing open · \d:\d\d$/ });
+    // The toolbar says the window is still open, with its countdown, and reopens it. The countdown is not part of the
+    // name: focus returns here on Esc, and a name that changes every second would be announced again and again.
+    const resume = await within(toolbar()).findByRole("button", { name: "Pairing open" });
+    expect(resume.textContent).toMatch(/^Pairing open · \d:\d\d$/);
     await user.click(resume);
     d = await screen.findByRole("dialog", { name: "Pair a device" });
     expect(within(within(d).getByRole("group", { name: "Pairing code" })).getByText("482 913")).toBeTruthy();

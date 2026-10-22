@@ -305,3 +305,5 @@ loopback API only, ids/counts/codes/durations only (same no-text rule as the aud
 | Pairing outcome | `/api/pair/status` | 1 s while a code is shown |
 | Downloads | pull SSE held in an app-level store | stream |
 | Firewall (Windows) | Tauri `firewall_status` | on Devices mount and after allow |
+
+> Update 2026-10-22: `GET /api/jobs` rows also carry state `connecting` (a request to a paired device until it is sent on the connection); see the plan section 4 E3.

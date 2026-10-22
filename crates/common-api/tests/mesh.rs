@@ -2955,11 +2955,11 @@ async fn an_unreadable_manifest_does_not_fail_the_peer_list() {
     a.stop().await;
 }
 
-/// A request to a paired device stays `queued` (not started, no request id) while this device is
-/// still reaching it: it takes no slot or load here, so the desktop reads such a row (a `peer:`
-/// target) as "Connecting to the device", never "Waiting for a slot" or "Loading model".
+/// A request to a paired device reads `connecting` (not started, no request id) while this device
+/// is still dialling it: it takes no slot or load here, so it is never `queued` ("Waiting for a
+/// slot") or `loading`.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_request_to_a_device_being_dialled_is_queued_single_host() {
+async fn a_request_to_a_device_being_dialled_is_connecting_single_host() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = cfg();
     config.network.idle_timeout_ms = 1000;
@@ -3003,7 +3003,7 @@ async fn a_request_to_a_device_being_dialled_is_queued_single_host() {
             &job["request_id"]
         ),
         (
-            Some("queued"),
+            Some("connecting"),
             json!(format!("peer:{}", x.to_hex())),
             &Value::Null,
             &Value::Null

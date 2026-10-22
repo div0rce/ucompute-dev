@@ -94,16 +94,18 @@ describe("Running now", () => {
     const stop = vi.fn();
     ownStreams.set({ [JOBS.active[0].client_ref!]: { stop } });
     await open({ network: NETWORK_ON, peers: PEERS_E1.peers, jobs: { active: JOBS.active, recent } });
-    await waitFor(() => expect(dataRows("Running now")).toHaveLength(3 + 5));
+    await waitFor(() => expect(dataRows("Running now")).toHaveLength(4 + 5));
     const rows = dataRows("Running now");
     // The Jobs table's own columns (C's useJobs), Wait and TTFT hidden here.
-    expect(rows.slice(0, 3).map((r) => [text(cell(r, "State")), text(cell(r, "Requested by"))])).toEqual([
+    expect(rows.slice(0, 4).map((r) => [text(cell(r, "State")), text(cell(r, "Requested by"))])).toEqual([
       ["Running", "This app"],
       ["Running", "Studio Mac"],
       ["Waiting for a slot", "This computer (another API client or not matched)"],
+      ["Connecting to the device", "This computer (another API client or not matched)"],
     ]);
     expect(within(grid("Running now")).queryByRole("columnheader", { name: "TTFT" })).toBeNull();
-    expect(rows.slice(3).map((r) => text(cell(r, "State")))).toEqual(Array(5).fill("Done"));
+    expect(rows.slice(4).map((r) => text(cell(r, "State")))).toEqual(Array(5).fill("Done"));
+    expect(screen.queryByText("Nothing is running. Recently finished:")).toBeNull();
     expect(text(cell(rows[0], "Tokens"))).toBe("37so far");
 
     const stopBtn = screen.getByRole("button", { name: "Stop" });
@@ -123,6 +125,12 @@ describe("Running now", () => {
     await open({ jobs: "unsupported" });
     expect(await screen.findByText("Job list not reported by this service version. In use 0/1 · Waiting 0.")).toBeTruthy();
     expect(screen.queryByRole("grid", { name: "Running now" })).toBeNull();
+  });
+
+  it("only finished rows: says nothing is running above them, so the title does not claim they run", async () => {
+    await open({ jobs: { active: [], recent: JOBS.recent } });
+    await waitFor(() => expect(dataRows("Running now").length).toBeGreaterThan(0));
+    expect(screen.getByText("Nothing is running. Recently finished:")).toBeTruthy();
   });
 
   it("nothing running says where requests come from", async () => {

@@ -263,6 +263,33 @@ async fn jobs_match_the_desktop_fixture_fake() {
     srv.stop().await;
 }
 
+/// Job states: what the registry serializes is what `openapi.json` lists, and every state the
+/// desktop fixture uses is one of them, `connecting` included (the fixture's row for a request to a
+/// device being dialled; a real one is produced in `mesh.rs`, SINGLE-HOST).
+#[test]
+fn job_states_match_openapi_and_the_desktop_fixture() {
+    use common_observability::jobs::JobState::*;
+    let doc: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let documented = doc["components"]["schemas"]["Job"]["properties"]["state"]["enum"].clone();
+    let served: Vec<Value> = [Queued, Connecting, Loading, Running, Done, Error, Cancelled]
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap())
+        .collect();
+    assert_eq!(documented, Value::Array(served));
+    let f = fixture("jobs_e3");
+    let rows: Vec<&Value> = ["active", "recent"]
+        .iter()
+        .flat_map(|k| f[k].as_array().unwrap())
+        .collect();
+    for j in &rows {
+        assert!(documented.as_array().unwrap().contains(&j["state"]), "{}", j["state"]);
+    }
+    assert!(
+        rows.iter().any(|j| j["state"] == "connecting"),
+        "jobs_e3 has a connecting row"
+    );
+}
+
 /// Loopback peer endpoint on an ephemeral port, no mDNS.
 fn net_cfg() -> ApiConfig {
     ApiConfig {

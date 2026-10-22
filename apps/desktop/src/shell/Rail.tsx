@@ -58,7 +58,7 @@ export function Rail({ current }: { current: Section }) {
           const b = badges[s];
           return (
             <li key={s}>
-              <a className="rail-item" href={href(s)} aria-current={current === s ? "page" : undefined} aria-label={meta.label} aria-describedby={b ? `rail-badge-${s}` : undefined}>
+              <a className="rail-item" href={href(s)} aria-current={current === s ? "page" : undefined} aria-describedby={b ? `rail-badge-${s}` : undefined}>
                 <Icon name={meta.icon} />
                 <span className="rail-label">{meta.label}</span>
                 {b && (
