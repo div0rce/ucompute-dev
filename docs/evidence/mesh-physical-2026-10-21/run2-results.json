@@ -1,0 +1,214 @@
+{
+  "a": {
+    "connections": 1,
+    "device_name": "mous",
+    "dial_addr": "192.168.1.176:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8983-9a1e-e341"
+  },
+  "b": {
+    "connections": 1,
+    "device_name": "Kyle\u2019s MacBook Pro",
+    "dial_addr": "192.168.1.115:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8004-8246-a87f"
+  },
+  "steps": [
+    {
+      "step": "pair A shows the code, B joins: pairing window opens",
+      "ok": false,
+      "t": "2026-10-21T22:57:29Z",
+      "status": 409,
+      "response": {
+        "error": {
+          "code": "overloaded",
+          "hint": "GET /api/pair/status",
+          "message": "a pairing session is already open; wait for it to finish or expire",
+          "param": null,
+          "type": "rate_limit_error"
+        }
+      }
+    },
+    {
+      "step": "pair B shows the code, A joins: wrong code refused, right code pairs",
+      "ok": false,
+      "t": "2026-10-21T22:57:37Z",
+      "pair_addr": "192.168.1.115:61578",
+      "wrong": [
+        401,
+        "nothing answered at 192.168.1.115:61578",
+        4011.7
+      ],
+      "right": [
+        401,
+        {
+          "error": {
+            "code": "pairing_failed",
+            "hint": "a firewall on the other device may block its pairing port (UDP 61578); on Windows, allow Common under Peers on that device",
+            "message": "nothing answered at 192.168.1.115:61578",
+            "param": null,
+            "type": "authentication_error"
+          }
+        },
+        4003.2
+      ]
+    },
+    {
+      "step": "pair: connected again after re-pairing, named by host name",
+      "ok": true,
+      "t": "2026-10-21T22:57:37Z",
+      "seconds": 0.02,
+      "a_calls_b": "Kyle",
+      "b_calls_a": "Mous"
+    },
+    {
+      "step": "offline: a switched-off paired device costs at most one audit line per state change (E4)",
+      "ok": true,
+      "t": "2026-10-21T23:00:07Z",
+      "audit_lines": 0,
+      "watched_s": 150,
+      "last_error": {
+        "addr": "172.20.10.6:8193",
+        "at_utc": "2026-10-21T22:58:00Z",
+        "code": "peer_lost",
+        "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193",
+        "message": "no answer from 172.20.10.6:8193 within 4 s"
+      },
+      "health": "disconnected"
+    },
+    {
+      "step": "quit: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-21T23:00:09Z",
+      "seconds": 0.26,
+      "health": "disconnected",
+      "cmd_output": ""
+    },
+    {
+      "step": "quit: A drops B from nearby within seconds (goodbye sent on quit, E6)",
+      "ok": true,
+      "t": "2026-10-21T23:00:09Z",
+      "seconds": 1.04
+    },
+    {
+      "step": "quit: B's daemon and engine processes end",
+      "ok": true,
+      "t": "2026-10-21T23:00:10Z",
+      "seconds": 0.54,
+      "procs": "0"
+    },
+    {
+      "step": "quit: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-21T23:00:13Z",
+      "last_error": {
+        "addr": "192.168.1.115:8193",
+        "at_utc": "2026-10-21T23:00:12Z",
+        "code": "peer_lost",
+        "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193",
+        "message": "no answer from 192.168.1.115:8193 within 4 s"
+      }
+    },
+    {
+      "step": "quit: connecting at a dead hint fails with a reason and saves nothing",
+      "ok": true,
+      "t": "2026-10-21T23:00:21Z",
+      "status": 502,
+      "code": "peer_lost",
+      "ms": 8033.7,
+      "message": "no answer from 192.168.1.115:8193 within 4 s",
+      "pinned": "192.168.1.115:8193"
+    },
+    {
+      "step": "quit: one audit line for B while it is away, not one per redial (E4)",
+      "ok": true,
+      "t": "2026-10-21T23:02:51Z",
+      "audit_lines": 0,
+      "watched_s": 164,
+      "lines": []
+    },
+    {
+      "step": "quit: B restarted, A reconnects (backoff reset by discovery)",
+      "ok": false,
+      "t": "2026-10-21T23:05:06Z",
+      "seconds_after_start": null,
+      "seen_nearby_after": null
+    },
+    {
+      "step": "crash: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-21T23:06:22Z",
+      "seconds": 0.0,
+      "health": "disconnected",
+      "cmd_output": "ssh: connect to host 192.168.1.115 port 22: Operation timed out"
+    },
+    {
+      "step": "crash: B's signed record may stay cached, but A never shows it as connected",
+      "ok": true,
+      "t": "2026-10-21T23:06:22Z",
+      "cached_record": null,
+      "health": "disconnected"
+    },
+    {
+      "step": "crash: B's daemon and engine processes end",
+      "ok": false,
+      "t": "2026-10-21T23:07:09Z",
+      "seconds": null,
+      "procs": "ssh: connect to host 192.168.1.115 port 22: Operation timed out"
+    },
+    {
+      "step": "crash: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-21T23:07:09Z",
+      "last_error": {
+        "addr": "192.168.1.115:8193",
+        "at_utc": "2026-10-21T23:05:05Z",
+        "code": "peer_lost",
+        "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193",
+        "message": "no answer from 192.168.1.115:8193 within 4 s"
+      }
+    },
+    {
+      "step": "crash: one audit line for B while it is away, not one per redial (E4)",
+      "ok": true,
+      "t": "2026-10-21T23:09:39Z",
+      "audit_lines": 0,
+      "watched_s": 212,
+      "lines": []
+    },
+    {
+      "step": "crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)",
+      "ok": true,
+      "t": "2026-10-21T23:09:39Z",
+      "seconds_after_watch": 0.0,
+      "seconds_since_crash": 212
+    },
+    {
+      "step": "crash: B restarted, A reconnects (backoff reset by discovery)",
+      "ok": false,
+      "t": "2026-10-21T23:11:54Z",
+      "seconds_after_start": null,
+      "seen_nearby_after": null
+    }
+  ]
+}

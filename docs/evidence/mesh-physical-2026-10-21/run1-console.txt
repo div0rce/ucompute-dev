@@ -1,0 +1,23 @@
+A mous 8983-9a1e-e341 192.168.1.176:8193  |  B Kyle’s MacBook Pro 8004-8246-a87f 192.168.1.115:8193
+PASS state: each daemon reports its own host name {"names": {"A": "mous", "B": "Kyle\u2019s MacBook Pro"}, "dial_addr": {"A": "192.168.1.176:8193", "B": "192.168.1.115:8193"}}
+PASS state: A sees the other with 1-2 routable addresses, best first {"entry": {"addr": "192.168.1.115:8193", "addrs": ["192.168.1.115:8193"], "id": "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6", "pair_port": null, "pairing": false, "proto": "1.0", "seen_utc": "2026-10-21T22:55:21Z", "trusted": true}}
+PASS state: B sees the other with 1-2 routable addresses, best first {"entry": {"addr": "192.168.1.176:8193", "addrs": ["192.168.1.176:8193"], "id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf", "pair_port": null, "pairing": false, "proto": "1.0", "seen_utc": "2026-10-21T22:55:21Z", "trusted": true}}
+PASS state: last seen advances while connected (E5) {"before": "2026-10-21T22:55:25Z", "after": "2026-10-21T22:56:25Z"}
+PASS manual: an unpaired id is refused before any packet (requirement 8) {"status": 403, "ms": 9.2, "b_new_audit": []}
+PASS manual: a hint with no Common device falls through to the pinned address and is not saved {"status": 200, "ms": 0.6, "hint": "192.168.1.1:8193", "pinned": "192.168.1.115:8193"}
+PASS manual: the address shown on B connects A to B (requirement 5) {"status": 200, "ms": 0.5, "addr": "192.168.1.115:8193"}
+PASS manual: no peer was added on either side {}
+Traceback (most recent call last):
+  File "/Users/nasr/repos/common/tests/distributed/two_machine/discovery_two_machine.py", line 295, in <module>
+    main()
+    ~~~~^^
+  File "/Users/nasr/repos/common/tests/distributed/two_machine/discovery_two_machine.py", line 287, in main
+    STEPS[name](A, B, ida, idb, na, nb, a)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nasr/repos/common/tests/distributed/two_machine/discovery_two_machine.py", line 181, in s_pair
+    pair(A, B, "A shows the code, B joins")
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nasr/repos/common/tests/distributed/two_machine/discovery_two_machine.py", line 173, in pair
+    code, addr = start["code"], start.get("pair_addr")
+                 ~~~~~^^^^^^^^
+KeyError: 'code'

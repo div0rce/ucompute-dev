@@ -1,0 +1,20 @@
+A mous 8983-9a1e-e341 192.168.1.176:8193  |  B Kyle’s MacBook Pro 8004-8246-a87f 192.168.1.115:8193
+FAIL pair A shows the code, B joins: pairing window opens {"status": 409, "response": {"error": {"code": "overloaded", "hint": "GET /api/pair/status", "message": "a pairing session is already open; wait for it to finish or expire", "param": null, "type": "rate_limit_error"}}}
+FAIL pair B shows the code, A joins: wrong code refused, right code pairs {"pair_addr": "192.168.1.115:61578", "wrong": [401, "nothing answered at 192.168.1.115:61578", 4011.7], "right": [401, {"error": {"code": "pairing_failed", "hint": "a firewall on the other device may block its pairing port (UDP 61578); on Windows, allow Common under Peers on that device", "message": "nothing answered at 192.168.1.115:61578", "param": null, "type": "authentication_error"}}, 4003.2]}
+PASS pair: connected again after re-pairing, named by host name {"seconds": 0.02, "a_calls_b": "Kyle", "b_calls_a": "Mous"}
+PASS offline: a switched-off paired device costs at most one audit line per state change (E4) {"audit_lines": 0, "watched_s": 150, "last_error": {"addr": "172.20.10.6:8193", "at_utc": "2026-10-21T22:58:00Z", "code": "peer_lost", "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193", "message": "no answer from 172.20.10.6:8193 within 4 s"}, "health": "disconnected"}
+PASS quit: A shows B as not connected {"seconds": 0.26, "health": "disconnected", "cmd_output": ""}
+PASS quit: A drops B from nearby within seconds (goodbye sent on quit, E6) {"seconds": 1.04}
+PASS quit: B's daemon and engine processes end {"seconds": 0.54, "procs": "0"}
+PASS quit: A explains why B is unreachable {"last_error": {"addr": "192.168.1.115:8193", "at_utc": "2026-10-21T23:00:12Z", "code": "peer_lost", "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193", "message": "no answer from 192.168.1.115:8193 within 4 s"}}
+PASS quit: connecting at a dead hint fails with a reason and saves nothing {"status": 502, "code": "peer_lost", "ms": 8033.7, "message": "no answer from 192.168.1.115:8193 within 4 s", "pinned": "192.168.1.115:8193"}
+PASS quit: one audit line for B while it is away, not one per redial (E4) {"audit_lines": 0, "watched_s": 164, "lines": []}
+FAIL quit: B restarted, A reconnects (backoff reset by discovery) {"seconds_after_start": null, "seen_nearby_after": null}
+PASS crash: A shows B as not connected {"seconds": 0.0, "health": "disconnected", "cmd_output": "ssh: connect to host 192.168.1.115 port 22: Operation timed out"}
+PASS crash: B's signed record may stay cached, but A never shows it as connected {"cached_record": null, "health": "disconnected"}
+FAIL crash: B's daemon and engine processes end {"seconds": null, "procs": "ssh: connect to host 192.168.1.115 port 22: Operation timed out"}
+PASS crash: A explains why B is unreachable {"last_error": {"addr": "192.168.1.115:8193", "at_utc": "2026-10-21T23:05:05Z", "code": "peer_lost", "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193", "message": "no answer from 192.168.1.115:8193 within 4 s"}}
+PASS crash: one audit line for B while it is away, not one per redial (E4) {"audit_lines": 0, "watched_s": 212, "lines": []}
+PASS crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement) {"seconds_after_watch": 0.0, "seconds_since_crash": 212}
+FAIL crash: B restarted, A reconnects (backoff reset by discovery) {"seconds_after_start": null, "seen_nearby_after": null}
+FAILED: pair A shows the code, B joins: pairing window opens, pair B shows the code, A joins: wrong code refused, right code pairs, quit: B restarted, A reconnects (backoff reset by discovery), crash: B's daemon and engine processes end, crash: B restarted, A reconnects (backoff reset by discovery)

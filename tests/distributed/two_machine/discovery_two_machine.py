@@ -166,11 +166,10 @@ def pair(src_show, src_join, label):
     if s != 200:
         step(f"pair {label}: pairing window opens", False, status=s, response=start)
         return
+    # One window: a wrong code first (the window stays open, up to 5 failures), then the right one.
     code, addr = start["code"], start.get("pair_addr")
     wrong = str((int(code) + 1) % 1_000_000).zfill(6)
     s1, v1, ms1 = call(src_join, "POST", "/api/pair/join", {"addr": addr, "code": wrong})
-    s1b, start, _ = call(src_show, "POST", "/api/pair/start", {})
-    code, addr = start["code"], start.get("pair_addr")
     s2, v2, ms2 = call(src_join, "POST", "/api/pair/join", {"addr": addr, "code": code})
     step(f"pair {label}: wrong code refused, right code pairs",
          s1 >= 400 and (v1.get("error") or {}).get("code") == "pairing_failed" and s2 == 200,
@@ -207,6 +206,16 @@ def lost_and_back(A, B, ida, idb, a, how, cmd):
     err = wait(lambda: (peer(A, idb) or {}).get("last_error"), 60, 1)
     p = peer(A, idb) or {}
     step(f"{how}: A explains why B is unreachable", err is not None and p.get("last_error"), last_error=p.get("last_error"))
+    if how == "quit":
+        # B is down, so this dial really happens: the hint and the pinned address both fail, the error
+        # says why, and the pinned address is not replaced by the hint.
+        pinned = (peer(A, idb) or {}).get("last_addr")
+        s, v, ms = call(A, "POST", f"/api/peers/{idb}/connect", {"addr": a.bogus_addr}, timeout=90)
+        code = (v.get("error") or {}).get("code") if isinstance(v, dict) else None
+        step("quit: connecting at a dead hint fails with a reason and saves nothing", s >= 400 and code in
+             ("peer_lost", "timeout", "peer_unauthorized") and (peer(A, idb) or {}).get("last_addr") == pinned,
+             status=s, code=code, ms=ms, message=(v.get("error") or {}).get("message") if isinstance(v, dict) else v,
+             pinned=pinned)
     time.sleep(a.watch)
     rej = rejected(A, idb)[rej0:]
     step(f"{how}: one audit line for B while it is away, not one per redial (E4)", len(rej) <= 1,
