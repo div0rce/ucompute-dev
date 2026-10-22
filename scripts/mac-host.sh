@@ -34,6 +34,15 @@ case "${1:-}" in
     cd "$(dirname "$0")/.."
     # shellcheck disable=SC2086
     git archive --format=tar HEAD | ssh $SSH_OPTS "$USER_@$HOST" "mkdir -p src/common && tar -xf - -C src/common"
+    # Delete files HEAD does not track (a stale deleted source breaks the build); keep build outputs.
+    # shellcheck disable=SC2086
+    git ls-files | ssh $SSH_OPTS "$USER_@$HOST" 'cd src/common && sort > /tmp/common-sync-manifest &&
+      find . -type f -not -path "./target/*" -not -path "./.common/*" -not -path "*/node_modules/*" \
+        -not -path "./apps/desktop/src-tauri/binaries/*" -not -path "./apps/desktop/src-tauri/gen/*" -not -path "./apps/desktop/dist/*" |
+      sed "s|^\./||" | sort | comm -23 - /tmp/common-sync-manifest > /tmp/common-sync-stale &&
+      n=$(wc -l < /tmp/common-sync-stale) && [ "$(wc -l < /tmp/common-sync-manifest)" -ge 50 ] &&
+      if [ "$n" -gt 200 ]; then echo "refusing to delete $n files"; exit 1; fi &&
+      while IFS= read -r f; do rm -f -- "$f" && echo "removed stale $f"; done < /tmp/common-sync-stale'
     echo "synced $(git rev-parse --short HEAD) to $HOST:~/src/common (uncommitted changes are not copied)"
     ;;
   *)

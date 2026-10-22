@@ -33,12 +33,19 @@ case "${1:-}" in
   sync)
     cd "$(dirname "$0")/.."
     dest="C:/Users/$USER_/src/common"
-    # Extract over the existing tree so target/ and node_modules/ survive (incremental builds); a file
-    # deleted on the Mac stays on the laptop until the folder is removed by hand.
+    # Extract over the existing tree so target/ and node_modules/ survive (incremental builds), then
+    # delete every file HEAD does not track (a stale file, e.g. a deleted source, breaks the build).
+    # Kept: target/, node_modules/, .common/ and the build's own outputs (staged sidecar, dist).
+    tmp=$(mktemp -d)
+    git ls-files > "$tmp/.sync-manifest"
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "$USER_@$HOST" "if not exist C:\\Users\\$USER_\\src\\common mkdir C:\\Users\\$USER_\\src\\common"
     # shellcheck disable=SC2086
-    git archive --format=tar HEAD | ssh $SSH_OPTS "$USER_@$HOST" "tar -xf - -C $dest"
+    git archive --format=tar --add-file="$tmp/.sync-manifest" HEAD | ssh $SSH_OPTS "$USER_@$HOST" "tar -xf - -C $dest"
+    rm -rf "$tmp"
+    # The cleanup is a tracked script (no inline escaping); it refuses to delete when paths look wrong.
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "$USER_@$HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $dest/scripts/windows-sync-clean.ps1 -Root $dest ${SYNC_DRY_RUN:+-DryRun}"
     echo "synced $(git rev-parse --short HEAD) to $HOST:$dest (uncommitted changes are not copied)"
     ;;
   *)
