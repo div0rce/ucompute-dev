@@ -500,3 +500,21 @@ AB_EXIT=0
 - Installed in /Applications, the previous app kept as `/Applications/Common.app.prev`; the installed daemon's sha256 starts `afe3ea225a1f2b5b` and the shell's `7c608f0ac6a58f0c`, as in the DMG. The owner's device identity (8983-9a1e-e341) and pairings are unchanged.
 - Not covered: the startup race with another daemon on port 8192 (the packaged-app race check of fix round 5 stays deferred), Windows, and every two-machine step.
 - Artifacts: `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json` (the verifier's output; its paths name a scratch work directory that was not kept).
+
+## 2026-10-23 — Core Lab local-versus-remote calibration executed (TWO-MACHINE: this Mac + sentinel, home Wi-Fi)
+
+Engineering executed the Core Lab's pre-registered calibration (ucompute-core-lab `calibration/RUNBOOK.md`,
+`tools/calibrate.py`, lab main 4602c98 with sentinel recorded as substitute host B before any data) and handed the raw
+run to the lab. Common does not analyse it here; the lab's report governs the result.
+
+- Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce LAB=/Users/nasr/repos/ucompute-core-lab NETWORK=home-wifi
+  tests/distributed/two_machine/run_calibration_linux.sh` (starts sentinel's daemon, tunnels its API to 18304, saves
+  both daemons' state, pairs them, adds a group allowing remote inference on both sides, runs the lab's offline
+  self-check then `calibrate.py run --network home-wifi --a http://127.0.0.1:8192 --b http://127.0.0.1:18304
+  --set-trusted-group`, and restores both sides).
+- Hosts: A = this Mac's installed app from ffe1a47 (Metal); B = sentinel's `common serve` built from c811a90 (mesh code
+  identical to ffe1a47; llama.cpp b11609 Ubuntu CPU, D-024). Both machines otherwise idle (load about 2 and 0.6).
+- Result: exit 0; 26 points, 24 valid; the two invalid points (qwen2.5-0.5b, 836-token prompt, 256 tokens) stopped early
+  (median 188 of 256 tokens), as the pre-registration's early-stop rule defines. Raw data and report: lab
+  `calibration/runs/20261023T234605Z-home-wifi`. Both daemons restored (`state.py`, the temporary pairing removed).
+- Not evidence of pooling: every request ran whole on one device (Mode B).
