@@ -2,7 +2,7 @@
 // `GET /api/jobs`. Real states only: no queue position, no reorder, no priority, and Stop only on this app's own
 // streams (there is no cancel-by-id route, N1). Owner C.
 import "./jobs.css";
-import { useRef, useState, type CSSProperties } from "react";
+import { useContext, useRef, useState, type CSSProperties } from "react";
 import { shortLabel, type Group, type Job, type Model, type Peer } from "../../api/client";
 import { mapError } from "../../api/errors";
 import { ago, clock, humanBytes, num } from "../../format";
@@ -16,7 +16,7 @@ import { ErrorNotice } from "../../ui/ErrorNotice";
 import type { IconName } from "../../ui/icons";
 import { Inspector, openInspector } from "../../ui/Inspector";
 import { EmptyState, KV, ScopeBar, StateBadge, ToolButton, Unavailable, type Tone } from "../../ui/primitives";
-import { frameState, SectionFrame } from "../../ui/SectionFrame";
+import { FrameStale, frameState, SectionFrame } from "../../ui/SectionFrame";
 import { Sparkline } from "../../ui/Sparkline";
 
 /** The states that mean a job has ended. Anything else, including a state added by a newer service,
@@ -328,12 +328,15 @@ type JobsCtx = ReturnType<typeof useJobs>;
 
 function Overview({ job, x }: { job: Job; x: JobsCtx }) {
   const s = jobState(job);
+  // Busy or stale: an active job may have finished since, so its state and counts are not shown as live (the table
+  // blanks the same columns). A finished job's values no longer change.
+  const nr = useContext(FrameStale) && isActive(job) ? <Unavailable reason="not refreshed" /> : null;
   return (
     <>
       {job.state === "error" && <ErrorNotice error={mapError(job.error_code ?? "internal", job.error_code ?? "")} />}
       <KV
         items={[
-          { k: "State", v: <StateBadge tone={s.tone} icon={s.icon} label={s.word} /> },
+          { k: "State", v: nr ?? <StateBadge tone={s.tone} icon={s.icon} label={s.word} /> },
           { k: "Model", v: x.modelName(job.model_id), note: job.model_id },
           { k: "Runs on", v: x.runsOn(job), note: peerOf(job.target) ? "GPU/CPU not reported" : undefined },
           { k: "Requested by", v: x.requestedBy(job) },
@@ -349,8 +352,8 @@ function Overview({ job, x }: { job: Job; x: JobsCtx }) {
           { k: "Decode", v: ms(job.decode_ms) },
           { k: "Duration", v: ms(job.duration_ms) },
           { k: "Prompt tokens", v: num(job.prompt_tokens) },
-          { k: "Completion tokens", v: num(job.completion_tokens), note: isActive(job) ? "so far" : undefined },
-          { k: "Tokens per second", v: num(x.rate(job), 1), note: isActive(job) ? "so far" : undefined },
+          { k: "Completion tokens", v: nr ?? num(job.completion_tokens), note: isActive(job) && !nr ? "so far" : undefined },
+          { k: "Tokens per second", v: nr ?? num(x.rate(job), 1), note: isActive(job) && !nr ? "so far" : undefined },
           { k: "Finish reason", v: job.finish_reason ?? "—" },
           { k: "Error code", v: job.error_code ?? "—" },
           { k: "Job ID", v: <span className="mono">{job.id}</span> },

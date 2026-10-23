@@ -24,7 +24,7 @@ export function resetStores() {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
 }
 
 /**

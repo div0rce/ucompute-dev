@@ -48,6 +48,21 @@ export function stop(): void {
 export const clearError = () => session.set((s) => ({ ...s, error: null }));
 
 /**
+ * The messages sent with a prompt to `target`. This computer gets the whole conversation (it is stored here already). A
+ * paired device gets only the trailing run of messages already exchanged with that same device, ending with the new one:
+ * nothing written for this computer (including under Local only) or for another device ever leaves with it. Messages
+ * stored before user messages recorded their destination count as this computer's.
+ */
+export function contextFor(messages: StoredMessage[], target: Target): StoredMessage[] {
+  if (target === "local") return messages;
+  let i = messages.length;
+  while (i > 0 && messages[i - 1].target === target) i--;
+  // Older replies carry a target while their questions do not: a run never starts with a reply.
+  while (messages[i]?.role === "assistant") i++;
+  return messages.slice(i);
+}
+
+/**
  * Sends `text` as the next user message and streams the reply. The client ref is registered in `ownStreams` before
  * the request is sent; it goes out as `X-Common-Client-Ref` only to a service that reports `status.engine` (E2 and
  * later allow the header in CORS; an older one would refuse the preflight).
@@ -56,9 +71,10 @@ export async function send(text: string, model: string, target: Target): Promise
   if (session.get().streaming) return;
   const ref = crypto.randomUUID();
   const clientRef = daemon.get().status?.engine ? ref : undefined;
-  const user: StoredMessage = { role: "user", content: text, ...(clientRef ? { client_ref: clientRef } : {}) };
-  const history = [...chatHistory.get().messages, user];
-  chatHistory.set({ messages: history });
+  const user: StoredMessage = { role: "user", content: text, target, ...(clientRef ? { client_ref: clientRef } : {}) };
+  const all = [...chatHistory.get().messages, user];
+  chatHistory.set({ messages: all });
+  const history = contextFor(all, target);
   const ac = new AbortController();
   ownStreams.set((s) => ({ ...s, [ref]: { stop: () => ac.abort() } }));
   session.set({ streaming: { ref, text: "", target, model }, error: null });

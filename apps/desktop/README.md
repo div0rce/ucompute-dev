@@ -1,83 +1,132 @@
-# Common desktop
+# UCompute desktop app (formerly Common desktop)
 
-The desktop app is a thin shell around the Common daemon. A Rust daemon (`common serve`) owns models,
+The desktop app is a thin shell around the daemon. A Rust daemon (`common serve`) owns models,
 hardware probing and inference and exposes a local HTTP API on `http://127.0.0.1:8192`. This Tauri 2 +
-React 19 app only renders that API; the Tauri Rust side does two things: it starts the bundled daemon
-when none is running (and stops it on exit), and it answers `daemon_info()` with the base URL.
+React 19 app only renders that API; the Tauri Rust side does three things: it starts the bundled daemon
+when none is running (and stops it on exit), it answers `daemon_info()` with the base URL, and on Windows it
+reads and, with the user's consent, adds the daemon's firewall rule (`firewall_status`, `allow_through_firewall`).
 
 All API access lives in `src/api/client.ts`. If the daemon contract changes, that is the one file to edit.
 Plain-language error texts live in `src/api/errors.ts` and are checked against
 `crates/common-core/src/error.rs` by `src/api/errors.test.ts`.
 
-## Devices and privacy (M3)
+## The app (UI 2.0, 1860196)
 
-Two views talk to the peer-networking API from ADR-0003; both default to the safest state and say so.
+A computing-network control center (`docs/design/desktop-ui-2-plan.md`): a rail with seven sections
+(Mod+1 … Mod+7), contextual toolbars, sortable dense tables (APG grid with cell focus and a column chooser), a
+resizable inspector with tabs, and a status bar fed only by real API fields. Window and rail say "UCompute",
+the product's name (D-021; Common is its former name); bundle, installer and data paths stay "Common" for now
+(`Common.app`, `common` data folders), as D-021 keeps code identifiers unchanged. Routes are `#/<section>[/<id>][?params]`; the old
+routes stay as aliases: `#/home` → Dashboard, `#/peers` → Devices, `#/hardware` → this device's Hardware tab,
+`#/performance` → Jobs, `#/diagnostics` → Activity, `#/privacy` → Settings › Privacy.
 
-- **Peers** (`#/peers`, F-10-05): the networking switch (off by default; `GET/PUT /api/network`), this device's
-  id as 8 groups of 8 hex plus its `xxxx-xxxx-xxxx` label, "Pair this device" (shows the six-digit code large,
-  the `pair_addr` to type into the other device's Join form (just the port on daemons without it), the QR
-  payload as text, a countdown, and polls `GET /api/pair/status` until `result` holds `{peer}` or
-  `{error}`), "Join a device" (address + code, or the pasted `common-pair:v1:...` text alone; a wrong code shows
-  the `pairing_failed` text, a lockout shows `pairing_locked`), the paired list with connection state (the
-  daemon's `connected`, or `health` when a daemon reports heartbeats), groups, revoke and remove (both confirmed
-  inline), household groups and their two policy switches (`GET /api/groups`; `PUT /api/groups` upserts one
-  group and returns the list), and devices seen on the network but not trusted, whose only action is "Pair"
-  (it prefills the join form with the host and `pair_port` of the advertised pairing window). This device's own
-  id (`GET /api/network` `peer_id`) is never listed there, even if mDNS reports its own advert. The code field
-  ignores spaces, so a pasted `482 913` works. No QR image is drawn; the payload is shown as text.
-  - The name other devices see defaults to the daemon's `device_name` (macOS Computer Name, else hostname /
-    `COMPUTERNAME`); the field only
-    overrides it, and `pair/start` / `pair/join` send `name` only when one is set. A stored "This Mac" (the old
-    hard-coded default) counts as unset.
-  - This device shows `dial_addr`, the `ip:port` another device can be given when discovery does not work.
-  - Each paired device shows where it is: the addresses mDNS sees now ("Seen on this network"), else its pinned
-    `last_addr` ("Last known"), else "Not known"; and, while not connected, why the last dial failed (`last_error`:
-    the daemon's message and hint, e.g. no answer within the idle timeout, a firewall on UDP 8193).
-  - **Connect** (paired devices only, networking on, not connected) opens an inline form: empty retries the
-    addresses the daemon knows, an address tries that first (`POST /api/peers/{id}/connect` `{}` or `{addr}`). The
-    address is only a hint: whatever answers must present the key pinned at pairing, so another device at that
-    address is refused (`peer_unauthorized`) and nothing changes. Unpaired devices never get this action.
-  - With nothing nearby the view says why: networking off, discovery off on this computer, or a network that blocks
-    devices from finding each other (many campus and office Wi-Fi networks), with pairing by address as the way on.
-  - Paired-device state, from `GET /api/peers` only: Connected / Not responding (`connected`, `health`), Connecting
-    (this view's own dial), Unreachable (`last_error`, which outranks the sticky `health: reconnecting`),
-    Reconnecting, Offline (mDNS runs here and does not see it), else Not connected. A nearby record never makes a
-    device connected or ready. "Can run prompts from this computer" needs an open connection, one of its groups
-    allowing prompts and Privacy not local-only; otherwise the row says which of those is missing.
-  - Windows only: the pairing window listens on a random UDP port, which Windows Firewall drops without a rule.
-    With networking on and no rule, Peers (and the pairing code) shows "Allow on private networks"; the click runs
-    `netsh advfirewall firewall add rule name="Common (paired devices)" dir=in action=allow program=<common.exe next
-    to the app> protocol=UDP profile=private` through the Windows elevation prompt (Tauri commands
-    `firewall_status` and `allow_through_firewall`, `src-tauri/src/firewall.rs`). Nothing is added without that
-    prompt, and never for the Public or Domain profile. `firewall_status` also names connected networks Windows
-    treats as Public (PowerShell `Get-NetConnectionProfile`, read-only): there the rule does not apply, so the notice
-    stays, without a button, and says to set the network to Private in Windows Settings if the user trusts it. A join
-    where nothing answered shows the daemon's hint (a firewall on the other device) instead of "check the code".
-  - Connect: a `peer_unauthorized` refusal says "The device that answered did not prove it is {name}, or {name} no
-    longer trusts this computer. Nothing was trusted or saved." The daemon reports an alert sent before the device
-    showed its pinned key as that, never as `peer_revoked`.
-- **Privacy** (`#/privacy`, F-10-10): local only / trusted devices / public (disabled, "coming later"). Leaving
-  local-only shows the disclosure returned by `GET /api/privacy` and requires the acknowledge checkbox before
-  `PUT /api/privacy {mode, acknowledged}`. The current mode is the pill under the app name on every screen.
-- **Run on**: Chat and Home show a device selector only when the mode is not local-only; a chat request then
-  carries `"target": "peer:<id>"` and the reply footer says "Ran on <device>". In local-only mode the field is
-  never sent, so the wire shape of a local request is unchanged. A run on a paired device needs no model loaded
-  here: the chat offers every model `GET /api/models` lists (the ids this daemon can name for a remote run; no
-  route lists a peer's models) and the peer loads it on demand. When the peer does not have it, its
-  `model_not_downloaded` arrives inside the stream; the client turns any in-stream error object into the typed
-  error, and the chat says "<device> does not have <model>" instead of saving an empty reply.
-- **Diagnostics** shows the audit tail (`GET /api/audit`, last 100 events, displayed most recent first: ids,
-  sizes, reasons, never prompts) and "Copy diagnostics" copies the daemon's redacted bundle from
-  `GET /api/diagnostics` when that endpoint exists, falling back to status + hardware when the daemon answers
-  404 (the current one has no such route).
+Data honesty, everywhere: a store keeps its last good data and shows "Not updated since …" instead of
+presenting it as live (tables, inspectors, privacy mode); a slow service reads "Busy (not answering)", not "Not
+running"; a value never read reads "Not known" or "—", never a definite empty; a section whose stores were never read
+while the service is busy shows "Loading…", not its empty state (and no busy banner); a store whose last read
+failed is read again within 5 s if it is always read or already polled; inspector and Run panel live values
+(Models State and Locations, Chat's loaded model, Devices Performance) read "not refreshed" while the service is
+busy or stale; a failed privacy read counts as not known (Devices Permissions, readiness and "Can run there";
+Settings › Privacy keeps its controls mounted but inert and reads "Current mode: not known while the background
+service is not running."); a cached mDNS record never makes a device connected; every performance figure says
+what was measured, where and over which window. No credits,
+Swarm or Cloud controls exist (D-019).
 
-The fake daemon in `src/test/mocks.ts` serves every one of these endpoints with the response shapes of
-`crates/common-api/src/mesh.rs` (a peer is a stored `PeerRecord` plus `short_label`, `connected` and `groups`;
-a discovered device has `id`, `addr`, `addrs`, `pairing`, `pair_port`, `proto`, `trusted`, `seen_utc` and no label;
-`/api/peers/{id}/connect` dials hint, discovered, pinned against `answersAt` and `impostors`), so
-the flows are tested end to end in jsdom (`src/test/peers.test.tsx`, `src/test/privacy.test.tsx`,
-`src/test/devices.test.tsx`). Everything
-here runs on one machine against a fake; no test claims two physical devices paired.
+- **Dashboard** (`#/dashboard`): Needs attention (including the Windows firewall notice in short form), Get
+  started, Computers, Running now and Recent activity, each linking to its section.
+- **Devices** (`#/devices[/<id>]`, F-10-05): one table of this computer, paired, nearby and revoked devices
+  (scopes All, Connected, Not connected, Nearby, Revoked; a filter), the **Networking** switch (off by default;
+  `GET/PUT /api/network`) and **Pair a device…**, which opens the Pair dialog: **Show a code** (`POST
+  /api/pair/start`: the six-digit code, the `pair_addr` to type on the other device, the QR payload as text and a
+  countdown; polls `GET /api/pair/status`) or **Enter a code** (address and code, or the pasted
+  `common-pair:v1:…` text alone; a wrong code shows the `pairing_failed` text, a lockout `pairing_locked`; spaces
+  in the code are ignored). A nearby device's only action is Pair with it, which prefills the address. This
+  device's own id is never listed as nearby.
+  - Selection actions: **Connect** (paired, networking on, not connected; `POST /api/peers/{id}/connect` `{}`
+    or `{addr}`), **Disconnect** (connected; `POST /api/peers/{id}/disconnect`, absent on daemons without
+    `held`), Remove (unpair, confirmed). Revoke is in the Overview tab's Danger section (confirmed).
+  - Inspector tabs: Overview (state, "Can run there", "Can use this computer", ids, groups, software from the
+    signed capabilities), Hardware (`common hardware --json` here; the device's signed report for a peer),
+    Models, Performance, Connection (state, `remote_addr`, direction, open since, RTT, bytes and rates, lost
+    packets, known addresses with where each came from, `last_error`, the Connect form, Disconnect, the
+    firewall notice), Permissions (group membership), Activity (this device's audit lines).
+  - Device state comes from `GET /api/peers` only: Connected / Not responding (`connected`, `health`),
+    Connecting (this view's own dial), Unreachable (`last_error`, with the daemon's message and hint), Reconnecting,
+    Offline (mDNS runs here and does not see it), Disconnected by you (`held`), Disconnected by <device>
+    (`last_error.code` `peer_held`; the holder must be a protocol minor 1 build, see below), else Not connected. A device this computer disconnected reads "Can use
+    this computer: No · disconnected by you", until you connect again, turn networking off and on, or the
+    service restarts.
+  - Connect: the address is only a hint. Whatever answers must present the key pinned at pairing, so another
+    device at that address is refused (`peer_unauthorized`: "The device that answered did not prove it is
+    {name}, or {name} no longer trusts this computer. Nothing was trusted or saved.") and nothing changes.
+    A refusal reached before the device has proved its key on the control stream reads the same way, because it
+    cannot be told from one forged on the path: a device that revoked this computer, or one held by a minor-0
+    build (every build committed so far), shows `peer_unauthorized` on a new dial, not `peer_revoked` or
+    "Disconnected by <device>".
+    Unpaired devices never get this action. With nothing nearby the view says why: networking off, discovery off
+    on this computer, or a network that stops devices finding each other (many campus and office Wi-Fi
+    networks), with pairing by address as the way on.
+- **Models** (`#/models[/<id>]`): the catalog and store with memory fit (`GET /api/models`), download with
+  the licence shown first, load, unload, delete.
+- **Jobs** (`#/jobs[/<id>]`): `GET /api/jobs`, requests running here, sent to a paired device or served for
+  one, with live token counts and timings; never prompt or reply text. An unknown state is kept with the
+  active jobs, never filed as finished.
+- **Chat** (`#/chat`): the **Destination** select (This computer, or a paired device that can run prompts;
+  shown only when the privacy mode is not local-only) and the **Model** select. A run on a paired device needs no
+  model loaded here: every model `GET /api/models` lists is offered and the device loads it on demand; a
+  missing model reads "<device> does not have <model>". In local-only mode `target` is never sent, so a local
+  request's wire shape is unchanged. A paired device receives only the trailing run of messages already
+  exchanged with that same device, plus the new prompt: nothing written under Local only, for this computer or
+  for another device is sent to it (`contextFor` in `src/sections/chat/session.ts`); this computer gets the
+  whole stored conversation. The chat says so ("{device} gets only the messages exchanged with it since you
+  last used another destination; earlier messages are not sent with this prompt."), and that hint is the
+  composer's accessible description. The conversation is stored only in this app (`localStorage` `common.chat`).
+- **Activity** (`#/activity[/<key>]`): the audit tail (`GET /api/audit`: ids, sizes, reasons, never
+  prompts) and **Copy diagnostics** (the daemon's redacted bundle from `GET /api/diagnostics` when that route
+  exists, else status and hardware).
+- **Settings** (`#/settings[/<page>]`): General, Execution, Network (Networking, the name other devices see,
+  discovery, listening and dial addresses, the firewall notice), Sharing & permissions (run requests for
+  paired devices, quotas, groups: `GET /api/groups`, `PUT /api/groups` upserts one), Privacy, Security,
+  Storage. Privacy (F-10-10): Local only / Trusted devices; leaving local-only shows the disclosure from `GET
+  /api/privacy` and needs "I understand" before `PUT /api/privacy {mode, acknowledged}`; there is no Public
+  control (no backend exists). It also says what is kept where and offers "Delete chat history on this
+  computer".
+- **Status bar**: service state, engine and model (`GET /api/status` `engine`), devices, transfer rate,
+  privacy mode and free disk, each from an API field and marked when stale. Service and Network rate are
+  named groups ("Service: Running", "Network rate"); items do not remount when a tip appears; the engine's
+  loading seconds are hidden from screen readers and given in the tip. While a pairing window is open it shows an Attention item named "Pairing open"; its countdown is
+  visible but hidden from screen readers.
+
+The name other devices see defaults to the daemon's `device_name` (macOS Computer Name, else hostname /
+`COMPUTERNAME`); the Settings field only overrides it, and `pair/start` / `pair/join` send `name` only when one
+is set. A stored "This Mac" (the old hard-coded default) counts as unset.
+
+**Windows firewall notice** (`src/ui/FirewallNotice.tsx`; Tauri commands `firewall_status` and
+`allow_through_firewall`, `src-tauri/src/firewall.rs`). Pairing started on Windows listens on a random UDP
+port, which Windows Firewall drops without a rule. With networking on and no matching rule found, Devices, the
+Pair dialog, the Connection tab, Settings › Network and the Dashboard show "Allow on private networks". The
+click runs, through the Windows elevation prompt, `netsh advfirewall firewall delete rule name="Common (paired
+devices)" program=<common.exe next to the app>` and then `… add rule name="Common (paired devices)" dir=in
+action=allow program=<that path> protocol=UDP profile=private enable=yes`: only this program's own rule is
+replaced, so other Windows accounts' rules of the same name stay. Nothing is added without that prompt, and
+never for the Public or Domain profile. The status is one read-only PowerShell query (`Get-NetFirewallRule
+-DisplayName` with its port and application filters, `Get-NetConnectionProfile`; non-localized values, UTF-8):
+a read that fails or stops early shows nothing, never "no rule". Connected networks Windows treats as Public
+are named (set them to Private in Windows Settings if you trust them), and so are domain networks (their
+administrator decides). Both reads keep their errors (`-ErrorAction SilentlyContinue -ErrorVariable`) and the script throws any error
+that is not a not-found (`CmdletizationQuery_NotFound*`) before its `end` marker, so a failed read never reads as
+"no rule"; only the script text is unit-tested, it has not yet run under PowerShell on Windows. When the app
+adopted a daemon it did not start, or the daemon it started has exited, it neither checks nor adds a rule (the
+adopted message; Allow refuses). After Allow succeeds, focus moves to the outcome.
+A join where nothing answered shows the daemon's hint (a firewall on the other device) instead of "check the
+code".
+
+The fake daemon in `src/test/mocks.ts` serves every endpoint the app uses with the response shapes of the
+daemon (contract fixtures for the UI 2.0 additions in `src/test/fixtures/api/`, checked against the real
+daemon by `crates/common-api/tests/ui_fixtures.rs`); `/api/peers/{id}/connect` dials hint, discovered and
+pinned addresses against `answersAt` and `impostors`. The flows are tested end to end in jsdom per section
+(`src/sections/*/*.test.tsx`) and across sections (`src/test/`). Everything here runs on one machine against
+a fake; no test claims two physical devices paired.
 
 ## Development loop
 
@@ -128,12 +177,12 @@ Then `pnpm dev` and open two tabs on the dev server, one per daemon:
 
 Use `localhost:1420`, not `127.0.0.1:1420`: the daemon only accepts browser requests from the origins in its
 `cors_origins` list. `?daemon=` accepts only `http://127.0.0.1:<port>` or `http://localhost:<port>`; anything
-else is ignored and the tab uses the default daemon. Diagnostics shows which daemon a tab talks to. Production
+else is ignored and the tab uses the default daemon. Settings › General shows which daemon a tab talks to (marked development only). Production
 builds ignore the parameter entirely (`import.meta.env.DEV` is false and the code is compiled out).
 
-To pair: turn networking on in both tabs, press "Pair this device" in tab A, then in tab B type the address shown
-under A's code into Address and the six digits into Code (or press "Pair" next to A under "Nearby, not paired"
-when mDNS sees it). Both tabs share one origin, so they share `localStorage` (device name, chat history): each tab
+To pair: turn Networking on in both tabs (Devices toolbar), press "Pair a device…" › "Show a code" in tab A,
+then in tab B open "Pair a device…" › "Enter a code" and type the address shown under A's code and the six
+digits (or select A in B's Nearby scope and press "Pair with" when mDNS sees it). Both tabs share one origin, so they share `localStorage` (device name, chat history): each tab
 keeps what it loaded, and a reload picks up the last write from either, so set the device name in each tab after
 loading it.
 
@@ -144,6 +193,22 @@ pnpm test         # vitest: API client, error-table sync with error.rs, axe scan
 pnpm build        # tsc + vite build -> dist/
 cargo check -p common-desktop   # from the repo root; the Tauri shell
 ```
+
+Screen-reader-level checks of a running app (what a screen reader would read; none of them is a check with
+the screen reader's own announcements except the NVDA run):
+
+```sh
+swift scripts/macos-ax-dump.swift [process, default common-desktop] [max depth, default 40] [link title] > ax.txt
+```
+
+Prints the macOS accessibility tree VoiceOver reads (role, subrole, title, label, value, help, role
+description, FOCUSED, disabled) and ends with `AX_DONE <n> elements`. With a link title (a rail section such as
+`Devices`) it first presses that link (the AXPress VoiceOver's VO-Space sends) and waits a second. The calling
+process must already be trusted for Accessibility (System Settings › Privacy & Security › Accessibility); the
+script never asks and exits 2 when it is not. On Windows, `scripts/windows-uia-dump.ps1` prints the UI
+Automation tree NVDA and Narrator read, and `scripts/windows-nvda-run.ps1` captures NVDA 2026.2's own speech
+silently; both are described, with their limits, in `docs/environment/windows-test-host.md`. Neither Windows
+script has run on the laptop yet.
 
 ## Packaging
 
@@ -192,12 +257,17 @@ again, and that nothing is left running. The webview CSP only allows `connect-sr
 ```
 src/api/client.ts      typed client for every endpoint, SSE parser, bearer-token support
 src/api/errors.ts      error code -> plain-language title + next step (mirrors error.rs)
-src/state/             tiny stores: settings (localStorage), daemon status, chat history, session runs, privacy mode, run target
-src/views/             Home, Models, Chat, Hardware, Performance, Settings, Diagnostics, Peers, Privacy
-src/components/        FitBar (memory fit), ErrorNotice, RunOn (device selector), Groups, Later (placeholder for M3/M7 views)
-src/test/              fake daemon (fetch mock), axe scan, keyboard-only flows, pairing and privacy flows
-src-tauri/src/lib.rs   sidecar spawn and graceful stop, health probe, quit on SIGTERM, daemon_info command
+src/router.ts          the seven sections, `#/` routes and the old routes as aliases
+src/shell/             rail, status bar, attention items, menu, shortcuts, announcer, dev-only axe hook
+src/sections/          one folder per section: dashboard, devices (table, inspector tabs, Pair dialog), models, jobs, chat, activity, settings
+src/ui/                design system: tokens, DataTable, Inspector, Dialog, SectionFrame, FirewallNotice, Groups, icons (Lucide subset, ISC)
+src/state/             polled live stores (status, network, peers, jobs, privacy …), settings and chat history (localStorage), device rows
+src/components/        FitBar (memory fit)
+src/test/              fake daemon (fetch mock), contract fixtures, axe scan, keyboard-only flows, pairing and privacy flows
+src-tauri/src/lib.rs   sidecar spawn and graceful stop, health probe, quit on SIGTERM, daemon_info and firewall commands
+src-tauri/src/firewall.rs   Windows Firewall status (PowerShell read) and the consent-gated rule
 src-tauri/daemon-args.txt   the daemon's command line (single source of truth)
 scripts/build-sidecar.mjs   build + stage + check the sidecar (run by `tauri build`)
 scripts/verify_packaged_app.py   end-to-end check of a built .app/.dmg
+scripts/verify_windows_app.ps1   the same for the Windows NSIS installer
 ```

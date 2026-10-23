@@ -135,7 +135,7 @@ const fetchers: Record<Key, (o: ReqOpts) => Promise<unknown>> = {
   },
   audit: (o) => into(audit, api.audit(AUDIT_N, o)),
   metrics: (o) => into(metrics, api.metrics(o)),
-  privacy: async (o) => privacy.set(await api.privacy(o)),
+  privacy: (o) => into(privacy, api.privacy(o)),
   ready: async (o) => {
     const r = await api.ready(o);
     ready.set((s) => ({ loadingStreak: r.status === "not_ready" && r.reason === "a model is loading" ? s.loadingStreak + 1 : 0 }));

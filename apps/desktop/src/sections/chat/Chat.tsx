@@ -1,5 +1,5 @@
 import "./chat.css";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api, type Model, type Target } from "../../api/client";
 import { explain, type MappedError } from "../../api/errors";
 import { refreshStatus } from "../../daemon";
@@ -8,7 +8,7 @@ import { href, useLocation } from "../../router";
 import { announce } from "../../shell/announcer";
 import { useDeviceRows, type DeviceRow, type Word } from "../../state/devices";
 import { groups, hardware, mesh, models, network, refreshFresh, useNeed } from "../../state/live";
-import { chatHistory, daemon, lastError, privacy, runTarget, settings } from "../../state/stores";
+import { chatHistory, daemon, lastError, privacy, runTarget, settings, statusNotLive } from "../../state/stores";
 import { setInspector, ui } from "../../state/ui";
 import { Dialog } from "../../ui/Dialog";
 import { ErrorNotice } from "../../ui/ErrorNotice";
@@ -17,7 +17,7 @@ import { TOGGLE_EVENT } from "../../ui/Inspector";
 import { KV, StateBadge, ToolButton, Unavailable } from "../../ui/primitives";
 import { frameState, SectionFrame } from "../../ui/SectionFrame";
 import { DestinationPicker, destinations } from "./DestinationPicker";
-import { clearError, send, session, stop, targetName, type Reply } from "./session";
+import { clearError, contextFor, send, session, stop, targetName, type Reply } from "./session";
 
 const ICON: Record<Word["tone"], IconName> = { ok: "circle-check", active: "loader", warn: "circle-alert", danger: "circle-x", neutral: "clock" };
 const badge = (w: Word | null | undefined) => (w ? <StateBadge tone={w.tone} icon={ICON[w.tone]} label={w.word} note={w.note} detail={w.detail} /> : <Unavailable reason="not reported" />);
@@ -91,7 +91,7 @@ export default function Chat() {
   const selfHw = hardware.use().data;
   const rows = useDeviceRows();
   const panelHidden = !!ui.use().inspectors.chat?.collapsed;
-  const localOnly = (privacy.use()?.mode ?? "local_only") === "local_only";
+  const localOnly = (privacy.use().data?.mode ?? "local_only") === "local_only";
   const chosen = runTarget.use();
   // Local-only is enforced here too, not only by hiding the picker.
   const target: Target = localOnly ? "local" : chosen;
@@ -113,6 +113,7 @@ export default function Chat() {
   const [confirmNew, setConfirmNew] = useState(false);
   const [notice, setNotice] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const contextHint = useId();
 
   const nameOf = (id: string) => catalog?.find((m) => m.id === id)?.name ?? id;
   const peerRow = remote ? rows.find((r) => r.key === target.slice("peer:".length)) : undefined;
@@ -122,7 +123,9 @@ export default function Chat() {
   const downloaded: Pick<Model, "id" | "name">[] = (catalog ?? []).filter((m) => m.downloaded);
   if (loaded && !downloaded.some((m) => m.id === loaded.model_id)) downloaded.unshift({ id: loaded.model_id, name: nameOf(loaded.model_id) });
   const localModel = downloaded.some((m) => m.id === pick) ? pick : (loaded?.model_id ?? downloaded[0]?.id ?? "");
-  const needsLoad = !remote && !!localModel && loaded?.model_id !== localModel;
+  // No status read yet (starting, or busy since the app opened): whether a model is loaded is not known.
+  const statusUnread = !d.status;
+  const needsLoad = !remote && !statusUnread && !!localModel && loaded?.model_id !== localModel;
 
   // Peer: what it reported when the connection opened first (E1); without E1 every model this service knows.
   const all = catalog ?? [];
@@ -145,11 +148,13 @@ export default function Chat() {
           ? remoteModel
             ? "Write a message. Enter sends, Shift+Enter adds a line."
             : "Pick a model first"
-          : !loaded
-            ? "Load a model first"
-            : needsLoad
-              ? "Load the selected model first"
-              : "Write a message. Enter sends, Shift+Enter adds a line.";
+          : statusUnread
+            ? "Waiting for the background service's status"
+            : !loaded
+              ? "Load a model first"
+              : needsLoad
+                ? "Load the selected model first"
+                : "Write a message. Enter sends, Shift+Enter adds a line.";
 
   useEffect(() => {
     if (paramModel) setPick(paramModel);
@@ -231,7 +236,9 @@ export default function Chat() {
   const t = lastReply?.timings;
   const emptyText = localOnly
     ? "Messages stay on this computer. Nothing you type is sent anywhere else."
-    : "Messages are saved on this computer. A prompt is sent to another device only when you pick one under Destination.";
+    : "Messages are saved on this computer. A prompt is sent to another device only when you pick one under Destination, and that device gets only the messages exchanged with it since you last used another destination.";
+  // What `contextFor` leaves out: everything before the trailing run with this device (it may have had some of it).
+  const partialContext = remote && contextFor(messages, target).length < messages.length;
   const nothingDownloaded = !remote && catalog !== null && !loaded && downloaded.length === 0;
 
   const controls = (
@@ -308,6 +315,12 @@ export default function Chat() {
         <p className="chat-hint">
           Prompts run on {destName}, which loads the model you pick if it has it. Nothing needs to be loaded on this computer.
           {unreported && <span className="note">{nameOf(remoteModel)} may not be on that device.</span>}
+        </p>
+      )}
+      {/* Also the composer's description: it appears as the Destination changes, away from the focus. */}
+      {partialContext && (
+        <p className="chat-hint" id={contextHint}>
+          {destName} gets only the messages exchanged with it since you last used another destination; earlier messages are not sent with this prompt.
         </p>
       )}
       {notice && (
@@ -393,6 +406,7 @@ export default function Chat() {
                   }
                 }}
                 placeholder={placeholder}
+                aria-describedby={partialContext ? contextHint : undefined}
                 disabled={!canSend}
                 rows={2}
               />
@@ -428,7 +442,13 @@ export default function Chat() {
                   { k: "Hardware", v: hardwareOf(destRow, selfHw) },
                   ...(remote
                     ? [{ k: "RTT", v: unknown || (peerRow?.link ? `${num(peerRow.link.rtt_ms, 1)} ms` : <Unavailable reason={peerRow?.link === undefined ? "Not reported by this service version." : "Not connected."} />) }]
-                    : [{ k: "Loaded model", v: loaded ? `${nameOf(loaded.model_id)} · ${loaded.device_actual}` : "No model loaded" }]),
+                    : [
+                        {
+                          k: "Loaded model",
+                          // A kept status (busy, or a read that failed) is not current: busy is most often another model loading.
+                          v: statusUnread ? <Unavailable reason="status not read yet" /> : statusNotLive(d) ? <Unavailable reason="not refreshed" /> : loaded ? `${nameOf(loaded.model_id)} · ${loaded.device_actual}` : "No model loaded",
+                        },
+                      ]),
                 ]}
               />
               <h3>Last reply</h3>

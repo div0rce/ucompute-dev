@@ -22,7 +22,7 @@ beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   runTarget.set("local");
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
 });
@@ -135,6 +135,49 @@ describe("status bar", () => {
     expect(item("Listening · no devices connected").className).toContain("tone-neutral");
   });
 
+  it("a device list not read yet never reads as no devices connected", () => {
+    daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
+    network.set(live(NETWORK_ON));
+    mesh.set({ data: null, at: null, error: null });
+    render(<StatusBar />);
+    expect(item("Listening · devices —").className).toContain("tone-neutral");
+    expect(bar().textContent).not.toMatch(/no devices/);
+  });
+
+  it("privacy mode: only while the service runs, and marked not updated after a failed read", () => {
+    daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
+    privacy.set(live(TRUSTED));
+    render(<StatusBar />);
+    const link = (name: string) => within(bar()).getByRole("link", { name });
+    expect(link("Privacy mode: Trusted devices").textContent).toBe("Trusted devices");
+    act(() => privacy.set((p) => ({ ...p, error: mapError("internal", "store unreadable") })));
+    expect(link("Privacy mode: Trusted devices").textContent).toBe("Trusted devicesnot updated");
+    act(() => daemon.set((d) => ({ ...d, reachable: false })));
+    expect(link("Privacy mode: unknown").textContent).toBe("Privacy mode unknown");
+  });
+
+  it("an item whose tip comes and goes is not remounted: the focused privacy link keeps focus", () => {
+    daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
+    privacy.set(live(TRUSTED));
+    render(<StatusBar />);
+    const link = within(bar()).getByRole("link", { name: "Privacy mode: Trusted devices" });
+    link.focus();
+    act(() => privacy.set((p) => ({ ...p, error: mapError("internal", "store unreadable") })));
+    expect(link.isConnected && document.activeElement === link).toBe(true);
+    act(() => privacy.set(live(TRUSTED)));
+    act(() => daemon.set((d) => ({ ...d, reachable: false })));
+    expect(link.isConnected && document.activeElement === link).toBe(true);
+  });
+
+  it("focusable text items have stable names: Service by its state, Network rate without the changing rates", () => {
+    daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
+    render(<StatusBar />);
+    const service = within(bar()).getByRole("group", { name: "Service: Running" });
+    expect(service.tabIndex).toBe(0);
+    expect(document.getElementById(service.getAttribute("aria-describedby")!)!.textContent).toMatch(/^Service 0\.1\.0, up/);
+    expect(within(bar()).getByRole("group", { name: "Network rate" }).tabIndex).toBe(0);
+  });
+
   it("network rate: < 1 KB/s for keep-alive traffic, unknown across a connection id change, — without E1", () => {
     daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
     const now = Date.now();
@@ -178,7 +221,10 @@ describe("status bar", () => {
     await refreshStatus();
     await refresh("models");
     const { unmount } = render(<StatusBar />);
-    expect(item(/^Loading /).textContent).toBe(`Loading ${MODELS[0].name} · 12 s`);
+    expect(item(`Loading ${MODELS[0].name}`).textContent).toBe(`Loading ${MODELS[0].name} · 12 s`);
+    // The seconds change every poll: hidden from the link's name, given in its tip.
+    const link = within(bar()).getByRole("link", { name: `Loading ${MODELS[0].name}` });
+    expect(document.getElementById(link.getAttribute("aria-describedby")!)!.textContent).toBe("Loading for 12 s.");
     unmount();
     fake.e2 = false;
     await refreshStatus();
@@ -205,14 +251,14 @@ describe("status bar never shows more than the service reported", () => {
     expect(within(bar()).queryByText(/device connected/)).toBeNull();
     expect(item("Networking —").className).toContain("tone-neutral");
     expect(within(bar()).getByText("Engine —")).toBeTruthy();
-    // Engine and Mesh both say why.
-    expect(within(bar()).getAllByText("Not known while the service is not running.")).toHaveLength(2);
+    // Engine, Mesh and Privacy all say why.
+    expect(within(bar()).getAllByText("Not known while the service is not running.")).toHaveLength(3);
     expect(item("Received").textContent).toBe("Received — Sent —");
     act(() => daemon.set({ reachable: null, responding: true, version: null, status: null, spawned: false }));
     rerender(<StatusBar />);
     expect(item("Starting").className).toContain("tone-active");
     expect(within(bar()).getByText("Engine —")).toBeTruthy();
-    expect(within(bar()).getAllByText("Not known until the service answers.")).toHaveLength(2);
+    expect(within(bar()).getAllByText("Not known until the service answers.")).toHaveLength(3);
   });
 
   it("a failed refresh keeps the last text, drops its colour and says it is not updated, with the time", () => {
@@ -278,7 +324,9 @@ describe("attention and the announcer", () => {
     fake.pairing.session = { code: "482913", port: 51234, pair_addr: "192.168.1.10:51234", qr_payload: "common-pair:v1:x", expires_at: Math.floor(Date.now() / 1000) + 102 };
     pairing.set({ code: "482913", addr: "192.168.1.10:51234", payload: "common-pair:v1:x", expiresAt: Date.now() + 102_000 });
     render(<StatusBar />);
-    const btn = within(bar()).getByRole("button", { name: /^Pairing open · 1:4\d$/ });
+    // The countdown is visible but not part of the button's name, which would otherwise change every second.
+    const btn = within(bar()).getByRole("button", { name: "Pairing open" });
+    expect(btn.textContent).toMatch(/^Pairing open · 1:4\d$/);
     act(() => btn.click());
     expect(window.location.hash).toBe("#/devices?pair=1");
   });

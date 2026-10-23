@@ -257,7 +257,11 @@ function Sharing() {
 
 function PrivacyPage() {
   const d = daemon.use();
-  const current = privacy.use();
+  const privLive = privacy.use();
+  // Only what the running service reported is shown as current. The controls stay (inert) while it is down or starting,
+  // so the one with focus is not removed and the status line below announces the change.
+  const live = d.reachable === true;
+  const current = privLive.data;
   const { messages } = chatHistory.use();
   const streaming = !!session.use().streaming;
   const [pick, setPick] = useState<PrivacyMode | null>(null);
@@ -268,17 +272,20 @@ function PrivacyPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const mode = current?.mode ?? "local_only";
-  const selected = pick ?? mode;
-  const changed = selected !== mode;
+  // No mode checked while it is not known, unless the user picked one.
+  const selected = pick ?? (live ? mode : null);
+  const changed = selected !== null && selected !== mode;
   const needsAck = changed && selected !== "local_only";
+  const inert = live ? undefined : ("true" as const);
+  const choose = (m: PrivacyMode) => live && (setPick(m), setSaved(""));
 
   async function apply() {
-    if (!changed || (needsAck && !ack)) return;
+    if (!live || !selected || !changed || (needsAck && !ack)) return;
     setSaving(true);
     setError(null);
     try {
       const p = await api.setPrivacy({ mode: selected, acknowledged: needsAck ? ack : false });
-      privacy.set(p);
+      privacy.set({ data: p, at: Date.now(), error: null });
       setPick(null);
       setAck(false);
       setSaved(`Switched to ${MODE_LABEL[p.mode].toLowerCase()}.`);
@@ -291,25 +298,32 @@ function PrivacyPage() {
 
   return (
     <>
-      {d.reachable === false && <p className="empty">The mode is available once the background service is running.</p>}
+      {d.reachable === false && !current && <p className="empty">The mode is available once the background service is running.</p>}
       {error && <ErrorNotice error={error} onDismiss={() => setError(null)} />}
       {current && (
         <>
           <p className="settings-current" role="status">
-            Current mode: {MODE_LABEL[mode]}. {mode === "local_only" ? "Nothing leaves this computer." : "Requests may run on a paired device when you pick one."}
+            {live ? (
+              <>
+                Current mode: {MODE_LABEL[mode]}. {mode === "local_only" ? "Nothing leaves this computer." : "Requests may run on a paired device when you pick one."}
+                {privLive.error && <span className="note"> Not updated since {clock(privLive.at)}.</span>}
+              </>
+            ) : (
+              `Current mode: not known ${d.reachable === false ? "while the background service is not running" : "until the background service answers"}.`
+            )}
           </p>
           <fieldset className="settings-fieldset">
             <legend>Mode</legend>
             <div className="settings-modes" role="radiogroup" aria-label="Privacy mode">
               <label className="settings-mode">
-                <input type="radio" name="privacy" value="local_only" checked={selected === "local_only"} onChange={() => (setPick("local_only"), setSaved(""))} />
+                <input type="radio" name="privacy" value="local_only" checked={selected === "local_only"} aria-disabled={inert} onChange={() => choose("local_only")} />
                 <span>
                   <strong>Local only</strong>
                   <span className="note">Everything runs on this computer. The network is never used for prompts or replies.</span>
                 </span>
               </label>
               <label className="settings-mode">
-                <input type="radio" name="privacy" value="trusted_group" checked={selected === "trusted_group"} onChange={() => (setPick("trusted_group"), setSaved(""))} />
+                <input type="radio" name="privacy" value="trusted_group" checked={selected === "trusted_group"} aria-disabled={inert} onChange={() => choose("trusted_group")} />
                 <span>
                   <strong>Trusted devices</strong>
                   <span className="note">
@@ -324,14 +338,14 @@ function PrivacyPage() {
               <p className="notice-title">Before you switch</p>
               <p className="prose">{current.disclosure}</p>
               <label className="check settings-ack">
-                <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />I understand that a device I send a prompt to can see that prompt and its reply.
+                <input type="checkbox" checked={ack} aria-disabled={inert} onChange={(e) => live && setAck(e.target.checked)} />I understand that a device I send a prompt to can see that prompt and its reply.
               </label>
             </div>
           )}
           {changed && (
             <div className="settings-actions">
-              <button type="button" className="btn btn-primary" onClick={() => void apply()} disabled={saving || (needsAck && !ack)}>
-                {saving ? "Switching" : `Switch to ${MODE_LABEL[selected].toLowerCase()}`}
+              <button type="button" className="btn btn-primary" onClick={() => void apply()} disabled={saving || (needsAck && !ack)} aria-disabled={inert}>
+                {saving ? "Switching" : `Switch to ${MODE_LABEL[selected ?? mode].toLowerCase()}`}
               </button>
               <button type="button" className="btn" onClick={() => (setPick(null), setAck(false))} disabled={saving}>
                 Cancel

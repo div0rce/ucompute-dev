@@ -12,7 +12,7 @@ import { daemon, privacy } from "../../state/stores";
 import { setInspector, setTable, ui } from "../../state/ui";
 import { popupMenu, type MenuItem } from "../../ui/contextMenu";
 import { firewall } from "../../ui/FirewallNotice";
-import { apiError, AUDIT_E4, hang, HARDWARE, installFakeDaemon, JOBS, JOIN_CODE, NETWORK, NETWORK_ON, PEER, PEER_E1, PEERS_E1, PEERS_E5, PRIVACY, QR_PAYLOAD, STRANGER } from "../../test/mocks";
+import { apiError, AUDIT_E4, hang, HARDWARE, installFakeDaemon, JOBS, JOIN_CODE, LOADED, NETWORK, NETWORK_ON, PEER, PEER_E1, PEERS_E1, PEERS_E5, PRIVACY, QR_PAYLOAD, STRANGER } from "../../test/mocks";
 import { calls, cellText, grid, inspector, renderDevices, rowOf, selectionActions, toolbar } from "./fixtures";
 import { deviceColumns, dialAddrError, setNetworking } from "./table";
 
@@ -20,7 +20,7 @@ vi.mock("../../ui/contextMenu", async (orig) => ({ ...(await orig<typeof import(
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -49,7 +49,7 @@ describe("columns: unknown is '—' with its reason, never a guess", () => {
   it("Free memory: this computer with its probe age; a peer is '—', not reported live, even with a start-time snapshot", () => {
     const [self, peer] = rows([PEER_E1]);
     expect(show("free", self)).toEqual(["4.0 GB", "probed 1 min. ago"]);
-    expect(show("free", peer)).toEqual(["—", "Not reported live (needs N2)"]);
+    expect(show("free", peer)).toEqual(["—", "Not reported live"]);
     expect(col("free").live).toBe(true);
   });
 
@@ -221,6 +221,62 @@ describe("Devices section", () => {
     const form = await screen.findByRole("form", { name: "Connect to Studio Mac" });
     expect((within(form).getByRole("button", { name: "Connect" }) as HTMLButtonElement).disabled).toBe(true);
     expect(form.textContent).toMatch(/Service busy; not updated since/);
+  });
+
+  it("while the service is busy, the inspector shows the live values as not refreshed too, never the frozen connection", async () => {
+    const user = userEvent.setup();
+    installFakeDaemon({ network: NETWORK_ON, peers: [PEER_E1] });
+    renderDevices(`#/devices/${PEER_E1.id}`);
+    const value = (k: string) => within(inspector()).getByText(k, { selector: "dt" }).nextElementSibling!.textContent;
+    await waitFor(() => expect(value("State")).toBe("Connected"));
+    act(() => daemon.set((d) => ({ ...d, responding: false, at: Date.now() })));
+    await screen.findByText(/Service running, busy/);
+    expect(value("State")).toBe("— not refreshed");
+    expect(value("Can run there")).toBe("— not refreshed");
+    expect(value("Last seen")).toBe("— not refreshed");
+    await user.click(within(inspector()).getByRole("tab", { name: "Connection" }));
+    expect(value("State")).toBe("— not refreshed");
+    expect(value("Connection")).toBe("— not refreshed");
+    expect(within(inspector()).queryByText("Round trip")).toBeNull();
+    // Live again: the values come back.
+    act(() => daemon.set((d) => ({ ...d, responding: true })));
+    expect(within(inspector()).getByText("Round trip")).toBeTruthy();
+  });
+
+  it("Performance never reads an unread status as No model loaded, nor a kept one as current", async () => {
+    const fake = installFakeDaemon({ routes: { "GET /api/status": () => apiError("internal", "status unreadable", 500) } });
+    fake.loaded = LOADED;
+    await refreshStatus();
+    renderDevices("#/devices/self?tab=performance");
+    const block = async () => (await within(inspector()).findByText("Loaded model, measured here")).nextElementSibling!.textContent;
+    expect(await block()).toBe("— status not read yet");
+    delete fake.routes["GET /api/status"];
+    await act(() => refreshStatus());
+    expect(await block()).toMatch(/^Model/);
+    act(() => daemon.set((d) => ({ ...d, responding: false })));
+    expect(await block()).toBe("— not refreshed");
+  });
+
+  it("this computer's Connection tab counts no devices before the device list was read", async () => {
+    installFakeDaemon({ network: { ...NETWORK_ON, connections: 2 }, routes: { "GET /api/peers": ({ init }) => hang(init) } });
+    renderDevices("#/devices/self?tab=connection");
+    const value = async (k: string) => (await within(inspector()).findByText(k, { selector: "dt" })).nextElementSibling!.textContent;
+    expect(await value("Devices connected")).toBe("— not read yet");
+  });
+
+  it("a failed privacy read is not shown as the current mode, nor used for Can run there", async () => {
+    const user = userEvent.setup();
+    const home = [{ name: "home", members: [PEER.id], policy: { allow_remote_inference: true, allow_pooled_inference: false } }];
+    const fake = installFakeDaemon({ ...E1, groups: home, privacy: { ...PRIVACY, mode: "trusted_group" } });
+    renderDevices(`#/devices/${PEER.id}`);
+    const value = (k: string) => within(inspector()).getByText(k, { selector: "dt" }).nextElementSibling!.textContent;
+    await waitFor(() => expect(value("Can run there")).toMatch(/^Can send/));
+    fake.routes["GET /api/privacy"] = () => apiError("internal", "store unreadable", 500);
+    await act(() => refresh("privacy"));
+    expect(value("Can run there")).toMatch(/^—Not known until this computer's groups and privacy mode are read\./);
+    await user.click(await rowOf("This computer"));
+    await user.click(within(inspector()).getByRole("tab", { name: "Permissions" }));
+    expect(value("Privacy mode")).toBe("— not refreshed");
   });
 
   it("the Address column can be shown; the self row gives the address other devices dial", async () => {

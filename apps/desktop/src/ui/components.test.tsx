@@ -152,6 +152,9 @@ describe("frameState and SectionFrame", () => {
     expect(frameState({ ...UP, reachable: null })).toBe("connecting");
     expect(frameState({ ...UP, reachable: false })).toBe("down");
     expect(frameState({ ...UP, responding: false }, live([1], 1500))).toEqual({ busy: { since: 1500 } });
+    // Busy before a store was ever read: nothing to keep, so its empty state ("Nothing is running") is not shown.
+    expect(frameState({ ...UP, responding: false }, live([1], 1500), live(null, null))).toBe("loading");
+    expect(frameState({ ...UP, responding: false }, live(null, null, mapError("slow", "no answer")))).toBe("loading");
     const err = mapError("slow", "no answer");
     expect(frameState(UP, live([1], 1500, err))).toEqual({ stale: { since: 1500, error: err } });
     expect(frameState(UP, live(null, null))).toBe("loading");

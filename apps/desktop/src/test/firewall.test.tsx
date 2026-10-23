@@ -31,7 +31,7 @@ const openPair = async (user: ReturnType<typeof userEvent.setup>) => {
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
   invoke.mockReset();
 });
@@ -53,9 +53,12 @@ describe("Windows Firewall consent step", () => {
     expect(allowCalls()).toBe(0);
 
     await user.click(button);
-    expect((await screen.findByText("Allowed on private networks.")).getAttribute("role")).toBe("status");
+    const done = await screen.findByText("Allowed on private networks.");
+    expect(done.getAttribute("role")).toBe("status");
     expect(allowCalls()).toBe(1);
     expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
+    // The focused button is gone: the outcome takes focus instead of the document.
+    await waitFor(() => expect(document.activeElement).toBe(done));
   });
 
   it("on a network Windows treats as Public the rule does not help, so the notice says so instead of going away", async () => {
@@ -93,6 +96,37 @@ describe("Windows Firewall consent step", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Windows did not add the rule (netsh could not add the rule (exit code 1))."));
     expect(screen.queryByText("Allowed on private networks.")).toBeNull();
     expect(allowCalls()).toBe(2);
+  });
+
+  it("a service this app did not start is not checked and no rule is offered for the bundled program instead", async () => {
+    windowsApp({ ...BLOCKED, adopted: true });
+    installFakeDaemon({ network: NETWORK_ON });
+    renderDevices();
+    expect(await screen.findByText("The running background service was not started by this app, so the app cannot check or add its Windows Firewall rule.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
+    expect(screen.queryByText(/No Windows Firewall rule/)).toBeNull();
+  });
+
+  it("a domain network is named too, pointing at the administrator rather than at Private", async () => {
+    windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\Common\\common.exe", domain_networks: ["corp.example"] });
+    installFakeDaemon({ network: NETWORK_ON });
+    renderDevices();
+    expect(await screen.findByText("Windows Firewall may still block other devices on this network.")).toBeTruthy();
+    expect(screen.getByText(/^Windows treats corp\.example as a domain network, where this rule does not apply either/).textContent).toMatch(/Ask your administrator/);
+    expect(screen.queryByText(/set it to Private/)).toBeNull();
+  });
+
+  it("a firewall read that failed claims nothing: no warning, no offer", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "firewall_status") throw "could not read the firewall rules: blocked";
+    });
+    installFakeDaemon({ network: NETWORK_ON });
+    renderDevices();
+    await screen.findByRole("grid", { name: "Devices" });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("firewall_status"));
+    expect(screen.queryByText(/No Windows Firewall rule/)).toBeNull();
+    expect(screen.queryByRole("button", { name: ALLOW })).toBeNull();
   });
 
   it("stays out of the way with networking off, with the rule in place, off Windows and outside the app", async () => {

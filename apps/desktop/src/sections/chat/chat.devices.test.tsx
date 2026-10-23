@@ -17,7 +17,7 @@ beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   runTarget.set("local");
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
 });
@@ -30,6 +30,11 @@ const posts = (fake: ReturnType<typeof installFakeDaemon>, path: string) =>
     .filter(([u, init]) => String(u).endsWith(path) && (init as RequestInit)?.method === "POST")
     .map(([, init]) => JSON.parse(String((init as RequestInit).body ?? "{}")));
 const chatBody = (fake: ReturnType<typeof installFakeDaemon>) => posts(fake, "/v1/chat/completions").at(-1);
+const described = (el: Element) =>
+  (el.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ");
 
 describe("E1: no macOS wording on other systems", () => {
   it("names this computer neutrally where it is the target or the fit", async () => {
@@ -135,6 +140,68 @@ describe("E2: a paired device runs prompts without a model loaded here", () => {
     expect(box).toHaveProperty("disabled", true);
     expect(box.getAttribute("placeholder")).toBe("Load a model first");
     expect(await screen.findByRole("button", { name: "Load model" })).toBeTruthy();
+  });
+});
+
+describe("a picked device gets only the messages exchanged with it", () => {
+  it("never sends what was written under Local only or for this computer, and says so", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon({ network: NETWORK_ON, peers: [PEER], groups: HOME, privacy: TRUSTED });
+    fake.loaded = LOADED;
+    // Written under Local only: one message from before destinations were recorded, one exchange with this computer.
+    chatHistory.set({
+      messages: [
+        { role: "user", content: "private note" },
+        { role: "user", content: "private question", target: "local" },
+        { role: "assistant", content: "private answer", target: "local" },
+      ],
+    });
+    await refreshStatus();
+    window.location.hash = "#/chat";
+    render(<App poll={false} />);
+    await screen.findByRole("option", { name: /^Studio Mac · / });
+    const destination = screen.getByRole("combobox", { name: "Destination" });
+    await user.selectOptions(destination, `peer:${PEER.id}`);
+    const hint = "Studio Mac gets only the messages exchanged with it since you last used another destination; earlier messages are not sent with this prompt.";
+    expect(screen.getByText(hint)).toBeTruthy();
+    const box = screen.getByRole("textbox", { name: "Message" });
+    // A screen reader hears it at the composer: it appeared beside the picker, away from the focus.
+    expect(described(box)).toBe(hint);
+    await waitFor(() => expect(box).toHaveProperty("disabled", false));
+    const sent = () => chatBody(fake).messages.map((m: { content: string }) => m.content);
+    const done = (n: number) => waitFor(() => expect(chatHistory.get().messages).toHaveLength(n));
+
+    await user.type(box, "Hi{Enter}");
+    await done(5);
+    expect(chatBody(fake).messages).toEqual([{ role: "user", content: "Hi" }]);
+    await user.type(box, "More{Enter}");
+    await done(7);
+    expect(sent()).toEqual(["Hi", "Hello, world.", "More"]);
+
+    // This computer gets the whole conversation: it is stored here already.
+    await user.selectOptions(destination, "local");
+    await user.type(box, "Back{Enter}");
+    await done(9);
+    expect(sent()).toHaveLength(8);
+    // Back to the device: the exchange with this computer in between is not sent, and neither is its own earlier one,
+    // which the note says (it does not claim the device keeps them).
+    await user.selectOptions(destination, `peer:${PEER.id}`);
+    expect(described(box)).toBe(hint);
+    await user.type(box, "Again{Enter}");
+    await done(11);
+    expect(sent()).toEqual(["Again"]);
+  });
+
+  it("a conversation stored before questions recorded their destination sends no orphaned reply", async () => {
+    const { contextFor } = await import("./session");
+    const peer = `peer:${PEER.id}` as const;
+    const old = [
+      { role: "user" as const, content: "q1" },
+      { role: "assistant" as const, content: "a1", target: peer },
+      { role: "user" as const, content: "q2", target: peer },
+    ];
+    expect(contextFor(old, peer).map((m) => m.content)).toEqual(["q2"]);
+    expect(contextFor(old, "local").map((m) => m.content)).toEqual(["q1", "a1", "q2"]);
   });
 });
 

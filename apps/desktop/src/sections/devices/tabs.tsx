@@ -1,6 +1,6 @@
 // Devices inspector tabs (plan §2.2 "Inspector tabs and fields"). Every value says where it comes from and when it was
 // measured; what this computer does not know reads "Not reported", never a guess.
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useContext, useEffect, useRef, useState, type FormEvent } from "react";
 import { shortLabel, type AuditEvent, type Hardware, type Job, type Peer } from "../../api/client";
 import { mapError } from "../../api/errors";
 import { ago, humanBytes, humanDuration, num, plural } from "../../format";
@@ -8,7 +8,7 @@ import { href, select, useLocation } from "../../router";
 import { MODE_LABEL } from "../../shell/StatusBar";
 import { dialErrorText, lastOutcome, live, promptReadiness, type DeviceRow } from "../../state/devices";
 import { audit, dialing, groups as groupsStore, hardware, jobs, mesh, models, network, refreshFresh, samples } from "../../state/live";
-import { daemon, privacy } from "../../state/stores";
+import { daemon, privacy, statusNotLive } from "../../state/stores";
 import { DataTable } from "../../ui/DataTable";
 import { activityColumns, useActivityRows, useNames } from "../activity/Activity";
 import { ErrorNotice } from "../../ui/ErrorNotice";
@@ -16,7 +16,7 @@ import { firewall, FirewallNotice } from "../../ui/FirewallNotice";
 import { GroupMembership } from "../../ui/Groups";
 import type { InspectorTab } from "../../ui/Inspector";
 import { KV, Unavailable } from "../../ui/primitives";
-import { frameState } from "../../ui/SectionFrame";
+import { FrameStale, frameState } from "../../ui/SectionFrame";
 import {
   canPairWith,
   capsGap,
@@ -40,6 +40,9 @@ import {
 
 /** Why the inspector's own actions wait (busy or stale rows), as the toolbar's (`frozenWhy`); null while live. */
 const useFrozen = (): string | null => frozenWhy(frameState(daemon.use(), network.use(), mesh.use()));
+
+/** In place of a live value while the rows are busy or stale, as the table's `live` columns. */
+const NOT_REFRESHED = <Unavailable reason="not refreshed" />;
 
 /** Raw value first (what `common hardware --json` prints), human form second. */
 const bytes = (n: number | null | undefined) => (n == null ? "Not reported" : `${n.toLocaleString()} bytes (${humanBytes(n)})`);
@@ -118,6 +121,7 @@ function Overview({ r }: { r: DeviceRow }) {
 
 function SelfOverview({ r }: { r: DeviceRow }) {
   const d = daemon.use();
+  const stale = useContext(FrameStale);
   return (
     <>
       <KV
@@ -125,8 +129,8 @@ function SelfOverview({ r }: { r: DeviceRow }) {
           { k: "Name", v: <>{r.name} <a href={href("settings", "network")}>Change in Settings › Network</a></> },
           { k: "Device ID", v: <IdValue id={r.id} /> },
           { k: "Short label", v: r.shortLabel || "—" },
-          { k: "State", v: <StateCell r={r} />, note: r.state.detail },
-          { k: "Can run here", v: <RunCell w={r.runThere} />, note: [r.runThere?.note, r.runThere?.detail].filter(Boolean).join(" · ") || undefined },
+          { k: "State", v: stale ? NOT_REFRESHED : <StateCell r={r} />, note: stale ? undefined : r.state.detail },
+          { k: "Can run here", v: stale ? NOT_REFRESHED : <RunCell w={r.runThere} />, note: stale ? undefined : [r.runThere?.note, r.runThere?.detail].filter(Boolean).join(" · ") || undefined },
           { k: "Service version", v: d.version ?? "—" },
           { k: "Running for", v: d.status ? humanDuration(d.status.uptime_seconds) : "—" },
           { k: "Started by this app", v: d.spawned ? "Yes" : "No (started outside this app)" },
@@ -148,13 +152,16 @@ function lastAnswer(id: string, events: AuditEvent[] | null): string {
 
 function PeerOverview({ r, p }: { r: DeviceRow; p: Peer }) {
   const g = groupsStore.use().data;
-  const mode = privacy.use()?.mode;
+  const priv = privacy.use();
+  // A failed privacy read keeps the last mode, which is not current: not known either.
+  const mode = priv.error ? undefined : priv.data?.mode;
   const events = audit.use().data;
   const loc = useLocation();
   const caps = r.caps;
   // Groups or Privacy not read yet: what is missing is not known, so nothing is claimed missing.
   const ready = g && mode ? promptReadiness(p, g, mode === "local_only") : { ok: false, text: "Not known until this computer's groups and privacy mode are read." };
   const frozen = useFrozen();
+  const stale = useContext(FrameStale);
   const confirming = loc.params.get("confirm") === "revoke" && !frozen;
   const back = () => select(r.key, { tab: "overview" });
   return (
@@ -165,7 +172,9 @@ function PeerOverview({ r, p }: { r: DeviceRow; p: Peer }) {
           { k: "Trust", v: "Trusted (paired)" },
           {
             k: "State",
-            v: (
+            v: stale ? (
+              NOT_REFRESHED
+            ) : (
               <>
                 <StateCell r={r} />
                 {r.state.detail && <span className="detail">{r.state.detail}</span>}
@@ -181,7 +190,9 @@ function PeerOverview({ r, p }: { r: DeviceRow; p: Peer }) {
           },
           {
             k: "Can run there",
-            v: (
+            v: stale ? (
+              NOT_REFRESHED
+            ) : (
               <>
                 <RunCell w={r.runThere} />
                 <span className="detail">{ready.text}</span>
@@ -194,7 +205,7 @@ function PeerOverview({ r, p }: { r: DeviceRow; p: Peer }) {
           { k: "Device ID", v: <IdValue id={p.id} /> },
           { k: "Short label", v: p.short_label },
           { k: "Paired", v: new Date(p.paired_at_utc).toLocaleString() },
-          { k: "Last seen", v: live(p) ? "Now" : p.last_seen_utc ? when(p.last_seen_utc) : "Never" },
+          { k: "Last seen", v: stale ? NOT_REFRESHED : live(p) ? "Now" : p.last_seen_utc ? when(p.last_seen_utc) : "Never" },
           { k: "Groups", v: p.groups.join(", ") || "None" },
           {
             k: "Software",
@@ -528,7 +539,14 @@ function Performance({ r }: { r: DeviceRow }) {
     return (
       <>
         <h3>Loaded model, measured here</h3>
-        {l ? (
+        {/* The status names the loaded model: none read is not "no model", and a kept one is not current. */}
+        {!d.status ? (
+          <p>
+            <Unavailable reason="status not read yet" />
+          </p>
+        ) : statusNotLive(d) ? (
+          <p>{NOT_REFRESHED}</p>
+        ) : l ? (
           <KV
             items={[
               { k: "Model", v: l.model_id },
@@ -639,9 +657,9 @@ export const NETWORK_HELP = (listen: string | null | undefined, mdns: boolean) =
 function SelfConnection() {
   const net = network.use().data;
   const fw = firewall.use();
-  const peers = mesh.use().data?.peers ?? [];
+  const stale = useContext(FrameStale);
+  const peers = mesh.use().data?.peers;
   if (!net) return <p className="muted">Reading the network state…</p>;
-  const connected = peers.filter(live).length;
   return (
     <>
       <KV
@@ -650,9 +668,10 @@ function SelfConnection() {
           { k: "Listening on", v: net.listen_addr ? <code>{net.listen_addr}</code> : "Not listening" },
           { k: "Address for other devices", v: net.dial_addr ? <code>{net.dial_addr}</code> : "—", note: net.dial_addr ? "A paired device that cannot find this one on the network can connect to it at this address." : undefined },
           { k: "Discovery (mDNS)", v: yes(net.mdns) },
-          { k: "Devices connected", v: `${plural(connected, "device")} · ${plural(net.connections, "connection")}` },
+          // The device list not read yet is not "0 devices".
+          { k: "Devices connected", v: stale ? NOT_REFRESHED : !peers ? <Unavailable reason="not read yet" /> : `${plural(peers.filter(live).length, "device")} · ${plural(net.connections, "connection")}` },
           { k: "Runs requests for paired devices", v: yes(net.serve_peers) },
-          { k: "Windows Firewall", v: !fw ? "Not read" : !fw.supported ? "Not applicable on this system" : fw.allowed ? "Rule for the service found" : "No rule for the service found" },
+          { k: "Windows Firewall", v: !fw ? "Not read" : !fw.supported ? "Not applicable on this system" : fw.adopted ? "Not checked: the running service was not started by this app" : fw.allowed ? "Rule for the service found" : "No rule for the service found" },
         ]}
       />
       <p className="small muted prose tab-foot">{NETWORK_HELP(net.listen_addr, net.mdns)}</p>
@@ -663,6 +682,7 @@ function SelfConnection() {
 
 function PeerConnection({ r, p }: { r: DeviceRow; p: Peer }) {
   const frozen = useFrozen();
+  const stale = useContext(FrameStale);
   const conn = samples.use().conn;
   const net = network.use().data;
   const link = r.link;
@@ -674,8 +694,10 @@ function PeerConnection({ r, p }: { r: DeviceRow; p: Peer }) {
     <>
       <KV
         items={[
-          { k: "State", v: <StateCell r={r} />, note: r.state.detail },
-          ...(link
+          { k: "State", v: stale ? NOT_REFRESHED : <StateCell r={r} />, note: stale ? undefined : r.state.detail },
+          ...(stale
+            ? [{ k: "Connection", v: NOT_REFRESHED }]
+            : link
             ? [
                 { k: "Address", v: <code>{link.remote_addr}</code>, note: "connected" },
                 { k: "Direction", v: link.direction === "outbound" ? "Outbound (this computer dialled)" : `Inbound (${r.name} dialled)` },
@@ -778,7 +800,8 @@ function ConnectForm({ r, p, networkOn }: { r: DeviceRow; p: Peer; networkOn: bo
 
 function Permissions({ r }: { r: DeviceRow }) {
   const net = network.use().data;
-  const mode = privacy.use()?.mode;
+  const priv = privacy.use();
+  const mode = priv.data?.mode;
   const events = audit.use().data;
   if (r.trust === "self")
     return (
@@ -794,7 +817,7 @@ function Permissions({ r }: { r: DeviceRow }) {
               note: "Set in the service configuration; applies after restart.",
             },
             { k: "Engine slots for devices", v: net ? num(net.peer_slots) : "—" },
-            { k: "Privacy mode", v: mode ? MODE_LABEL[mode] : "—" },
+            { k: "Privacy mode", v: priv.error ? NOT_REFRESHED : mode ? MODE_LABEL[mode] : "—" },
           ]}
         />
         <p className="tab-foot">

@@ -102,6 +102,14 @@ struct Daemon {
     spawned: bool,
 }
 
+impl Daemon {
+    /// The service on the port is the bundled daemon this app started: spawned, and not exited since. Once it exited
+    /// (crashed, or lost the port to another daemon), whatever serves is not ours (see [`stop_daemon`]).
+    fn ours(&self) -> bool {
+        self.spawned && !self.exited.load(Ordering::SeqCst)
+    }
+}
+
 /// Ask the daemon to stop, wait for it, and only then kill it. Stopping gracefully unloads the model,
 /// stops the llama.cpp engine and sends the mDNS goodbye, so other devices drop this one at once
 /// instead of listing it as nearby for minutes. A plain `kill()` (SIGKILL / TerminateProcess) did
@@ -216,19 +224,24 @@ fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
     }
 }
 
-/// Windows Firewall state for the bundled daemon; `supported: false` elsewhere. Read-only.
+/// Windows Firewall state for the bundled daemon; `supported: false` elsewhere, `adopted` when the
+/// serving daemon is not the one this app started (or that one exited). Read-only; `Err` when the
+/// rules could not be read.
 #[tauri::command]
-async fn firewall_status() -> firewall::Status {
-    tauri::async_runtime::spawn_blocking(firewall::status)
+async fn firewall_status(state: tauri::State<'_, Daemon>) -> Result<firewall::Status, String> {
+    let ours = state.ours();
+    tauri::async_runtime::spawn_blocking(move || firewall::status_for(ours))
         .await
-        .unwrap_or_default()
+        .map_err(|e| e.to_string())?
 }
 
 /// Adds the rule through the Windows elevation prompt (the user's click there is the consent);
-/// `Err("cancelled")` when the user declines it.
+/// `Err("cancelled")` when the user declines it. Refused for a daemon this app did not start, or
+/// once the one it started exited.
 #[tauri::command]
-async fn allow_through_firewall() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(firewall::allow)
+async fn allow_through_firewall(state: tauri::State<'_, Daemon>) -> Result<(), String> {
+    let ours = state.ours();
+    tauri::async_runtime::spawn_blocking(move || firewall::allow_for(ours))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -353,6 +366,22 @@ mod tests {
             String::from_utf8(req).unwrap()
         });
         (addr, t)
+    }
+
+    /// The finding: the firewall commands read the startup-only `spawned`, so after the app's own
+    /// daemon exited (and another took the port) they still checked and added the bundled path's rule.
+    #[test]
+    fn a_daemon_that_exited_is_no_longer_ours() {
+        let daemon = |spawned| Daemon {
+            child: Mutex::new(None),
+            exited: Arc::new(AtomicBool::new(false)),
+            spawned,
+        };
+        let d = daemon(true);
+        assert!(d.ours());
+        d.exited.store(true, Ordering::SeqCst);
+        assert!(!d.ours());
+        assert!(!daemon(false).ours(), "adopted");
     }
 
     /// The Windows quit path: POST /api/shutdown to the loopback daemon; only a 202 counts as

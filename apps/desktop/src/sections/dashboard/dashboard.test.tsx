@@ -19,7 +19,7 @@ beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
 });
 afterEach(() => {
@@ -62,7 +62,7 @@ describe("Computers", () => {
     // Its last dial was lost and it is not announced nearby: not "Offline", not a warning.
     expect(text(cell(rows[1], "State"))).toBe("Not seen nearby");
     expect(cell(rows[1], "State").querySelector(".tone-warn")).toBeNull();
-    expect(text(cell(rows[1], "Free memory"))).toBe("—Not reported live (needs N2)");
+    expect(text(cell(rows[1], "Free memory"))).toBe("—Not reported live");
     expect(text(cell(rows[2], "Last seen"))).toBe("Now");
     await user.dblClick(cell(rows[2], "Name"));
     expect(window.location.hash).toBe(`#/devices/${PEER.id}`);

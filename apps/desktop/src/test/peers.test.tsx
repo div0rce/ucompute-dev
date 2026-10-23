@@ -15,7 +15,7 @@ import { installFakeDaemon, JOIN_CODE, NETWORK, NETWORK_ON, PAIR_ADDR, PEER, QR_
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
 });
 afterEach(() => vi.unstubAllGlobals());
 

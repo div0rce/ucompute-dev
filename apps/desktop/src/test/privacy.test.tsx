@@ -1,17 +1,18 @@
 // F-10-10: leaving local-only needs the disclosure acknowledged; the destination picker only exists outside local-only.
 // Owner D. Privacy is Settings › Privacy (`#/privacy` is its alias).
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { refreshStatus } from "../daemon";
 import { chatHistory, daemon, privacy, runTarget } from "../state/stores";
-import { installFakeDaemon, LOADED, NETWORK_ON, PEER, PRIVACY } from "./mocks";
+import { refresh } from "../state/live";
+import { apiError, installFakeDaemon, LOADED, NETWORK_ON, PEER, PRIVACY } from "./mocks";
 
 beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
   chatHistory.set({ messages: [] });
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   runTarget.set("local");
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -53,6 +54,49 @@ describe("Settings › Privacy", () => {
     await user.click(screen.getByRole("button", { name: "Switch to local only" }));
     await waitFor(() => expect(fake.privacy.mode).toBe("local_only"));
     expect(screen.getByRole("link", { name: "Privacy mode: Local only" })).toBeTruthy();
+  });
+
+  it("never shows the last mode read as current once a read fails or the service stops", async () => {
+    const fake = installFakeDaemon();
+    await refreshStatus();
+    window.location.hash = "#/privacy";
+    render(<App poll={false} />);
+    const current = await screen.findByText(/Current mode: Local only\./);
+    expect(current.textContent).not.toMatch(/Not updated/);
+    fake.routes["GET /api/privacy"] = () => apiError("internal", "store unreadable", 500);
+    await act(() => refresh("privacy"));
+    expect(current.textContent).toMatch(/Not updated since \d\d:\d\d:\d\d\./);
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    await act(() => refreshStatus());
+    expect(current.textContent).toBe("Current mode: not known while the background service is not running.");
+    // The controls stay, inert and with no mode checked, so a focused one is not removed (next case).
+    const group = screen.getByRole("radiogroup", { name: "Privacy mode" });
+    expect(within(group).getAllByRole("radio").map((r) => [(r as HTMLInputElement).checked, r.getAttribute("aria-disabled")])).toEqual([
+      [false, "true"],
+      [false, "true"],
+    ]);
+  });
+
+  it("a focused control stays while the service restarts; it does nothing until the service is back", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon();
+    await refreshStatus();
+    window.location.hash = "#/privacy";
+    render(<App poll={false} />);
+    await user.click(await screen.findByRole("radio", { name: /Trusted devices/ }));
+    const ack = screen.getByRole("checkbox", { name: /I understand/ }) as HTMLInputElement;
+    ack.focus();
+    act(() => daemon.set((d) => ({ ...d, reachable: false })));
+    expect(document.activeElement).toBe(ack);
+    expect(ack.getAttribute("aria-disabled")).toBe("true");
+    await user.click(ack);
+    expect(ack.checked).toBe(false);
+    expect(puts(fake)).toHaveLength(0);
+    act(() => daemon.set((d) => ({ ...d, reachable: true })));
+    expect(document.activeElement).toBe(ack);
+    expect(ack.getAttribute("aria-disabled")).toBeNull();
+    await user.click(ack);
+    expect(ack.checked).toBe(true);
   });
 
   // Deliberate change (plan §5.4): the disabled "Public compute" radio is gone; no backend exists (D-019), so there is no

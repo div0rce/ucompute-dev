@@ -42,9 +42,13 @@ export interface FirewallStatus {
   rule_program: string | null;
   /** Connected networks Windows treats as Public, where that rule does not apply. Absent from an older app shell. */
   public_networks?: string[];
+  /** Connected domain networks, where that rule does not apply either; their administrator decides. Absent from an older app shell. */
+  domain_networks?: string[];
+  /** The serving daemon was not started by this app: its rule is neither checked nor added. Absent from an older app shell. */
+  adopted?: boolean;
 }
 
-/** Unsupported outside the desktop app and on systems other than Windows. */
+/** Unsupported outside the desktop app and on systems other than Windows. Rejects when the rules could not be read. */
 export async function firewallStatus(): Promise<FirewallStatus> {
   if (!inTauri()) return { supported: false, allowed: false, rule_program: null, public_networks: [] };
   const { invoke } = await import("@tauri-apps/api/core");

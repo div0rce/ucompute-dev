@@ -14,7 +14,8 @@ import { ActionsDisabled, EmptyState, ToolButton } from "./primitives";
  * What a section can show (plan §2 shared states). `busy`: the service answers `/health` but a poll timed out, so rows
  * stay, dimmed. `stale`: a store's refresh failed, last data kept. `failed`: a store's first read failed, so there is
  * no data at all: the body names the failure instead of claiming the list is empty. Only `down` (connection refused
- * and no `/health`) empties tables. `loading`: a store has not answered yet.
+ * and no `/health`) empties tables. `loading`: a store has not answered yet, busy or not (a busy service that was never
+ * read has no rows to keep, and its empty state would be a guess).
  */
 export type FrameState =
   | "ok"
@@ -31,7 +32,7 @@ export function frameState(daemon: DaemonState, ...stores: Live<unknown>[]): Fra
   if (daemon.reachable === false) return "down";
   const ats = stores.map((s) => s.at).filter((a): a is number => a != null);
   const since = ats.length ? Math.min(...ats) : (daemon.at ?? null);
-  if (daemon.responding === false) return { busy: { since } };
+  if (daemon.responding === false) return stores.some((s) => s.data === null) ? "loading" : { busy: { since } };
   const never = stores.find((s) => s.error && s.data === null);
   if (never?.error) return { failed: never.error };
   const failed = stores.find((s) => s.error);
@@ -40,7 +41,10 @@ export function frameState(daemon: DaemonState, ...stores: Live<unknown>[]): Fra
   return "ok";
 }
 
-/** True while rows are shown but not live (busy or stale): DataTable dims rows and blanks `live` columns. */
+/**
+ * True while rows are shown but not live (busy or stale): DataTable dims rows and blanks `live` columns, and the
+ * inspector shows its live values as not refreshed.
+ */
 export const FrameStale = createContext(false);
 
 export interface FilterProps {
@@ -207,10 +211,12 @@ export function SectionFrame({ title, controls, actions, selectionActions, more,
       )}
       {banner}
       <div className="frame-body">
-        <div className="frame-main" data-region="table">
-          <FrameStale.Provider value={!!(busy || stale)}>{body}</FrameStale.Provider>
-        </div>
-        {state !== "down" && !failed && inspector}
+        <FrameStale.Provider value={!!(busy || stale)}>
+          <div className="frame-main" data-region="table">
+            {body}
+          </div>
+          {state !== "down" && !failed && inspector}
+        </FrameStale.Provider>
       </div>
     </section>
   );

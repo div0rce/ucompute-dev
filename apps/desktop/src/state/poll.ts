@@ -2,17 +2,32 @@
 // single-flight (live.ts), so a slow service never piles requests up. Nothing but status polls while the service is
 // not reachable.
 import { refreshStatus } from "../daemon";
-import { isNeeded, jobs, mesh, network, pulls, refresh, refreshMany, type Key } from "./live";
-import { daemon } from "./stores";
+import { audit, groups, hardware, isNeeded, jobs, mesh, metrics, models, network, pulls, refresh, refreshMany, type Key } from "./live";
+import { daemon, privacy } from "./stores";
 
 /** Refreshed whenever the service becomes reachable and polled at their base cadence regardless of the view. */
 export const ALWAYS: readonly Key[] = ["network", "mesh", "privacy", "groups", "hardware", "models", "jobs", "audit"];
 
 type PollKey = Key | "status";
 const KEYS: readonly PollKey[] = ["status", "ready", "network", "mesh", "privacy", "groups", "hardware", "models", "jobs", "metrics", "audit"];
+const LIVE = { network, mesh, privacy, groups, hardware, models, jobs, metrics, audit };
 
-/** Milliseconds between refreshes of `key` now; null = not polled (refreshed on need or after actions only). */
+/** How soon a store whose last read failed is read again, whatever its own cadence. */
+export const RETRY_MS = 5000;
+
+/**
+ * Milliseconds between refreshes of `key` now; null = not polled (refreshed on need or after actions only). A failed
+ * read (a timeout while busy, a transient 500) of a store that is polled or always read is retried within `RETRY_MS`:
+ * nothing else re-reads it while the service answers, so it stayed "Not updated since" (Models: until the user left
+ * the section or pressed Mod+R).
+ */
 export function intervalFor(key: PollKey): number | null {
+  const every = cadence(key);
+  const failed = key !== "status" && key !== "ready" && !!LIVE[key].get().error && (every != null || ALWAYS.includes(key));
+  return failed ? Math.min(every ?? RETRY_MS, RETRY_MS) : every;
+}
+
+function cadence(key: PollKey): number | null {
   const d = daemon.get();
   switch (key) {
     case "status":

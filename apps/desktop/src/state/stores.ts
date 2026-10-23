@@ -1,5 +1,6 @@
 import type { Device, Privacy, Status, Target, Timings, Usage } from "../api/client";
 import type { MappedError } from "../api/errors";
+import type { Live } from "./live";
 import { createStore } from "./store";
 
 export interface Settings {
@@ -29,6 +30,8 @@ export interface DaemonState {
   statusError?: MappedError | null;
 }
 export const daemon = createStore<DaemonState>({ reachable: null, version: null, status: null, spawned: false, responding: true, at: null });
+/** The kept `status` is the last good one, not live: a status poll timed out (busy) or answered with an HTTP error. */
+export const statusNotLive = (d: DaemonState) => d.responding === false || !!d.statusError;
 
 export interface StoredMessage {
   role: "user" | "assistant";
@@ -37,7 +40,7 @@ export interface StoredMessage {
   usage?: Usage | null;
   timings?: Timings | null;
   stopped?: boolean;
-  /** Where the reply ran; absent for replies from before peers existed. */
+  /** Where a user message was sent or a reply ran; absent from older messages (see chat `contextFor`). */
   target?: Target;
   /** Display name of the device for a peer target, captured at send time. */
   ran_on?: string;
@@ -53,8 +56,8 @@ export const chatHistory = createStore<{ messages: StoredMessage[] }>({ messages
 
 export const lastError = createStore<MappedError | null>(null);
 
-/** Current privacy mode from the daemon; null until fetched. Shown in the app header and gates the peer selector. */
-export const privacy = createStore<Privacy | null>(null);
+/** Current privacy mode from the daemon, polled like the live stores: a failed read keeps the last mode and sets `error`. */
+export const privacy = createStore<Live<Privacy>>({ data: null, at: null, error: null });
 
 /** Where the next request runs. Session-only: forgetting it on restart is the safe default. */
 export const runTarget = createStore<Target>("local");

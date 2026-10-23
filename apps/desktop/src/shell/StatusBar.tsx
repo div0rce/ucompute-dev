@@ -4,7 +4,7 @@ import { byteRate, clock, humanBytes, humanDuration, plural } from "../format";
 import { go, href } from "../router";
 import { live, useDeviceRows } from "../state/devices";
 import { hardware, jobs, mesh, models, netRate, network, ready, samples } from "../state/live";
-import { daemon, privacy } from "../state/stores";
+import { daemon, privacy, statusNotLive } from "../state/stores";
 import { Icon, type IconName } from "../ui/icons";
 import type { Tone } from "../ui/primitives";
 import { Tip } from "../ui/Tip";
@@ -13,8 +13,10 @@ import { useAttention } from "./attention";
 export const MODE_LABEL: Record<PrivacyMode, string> = { local_only: "Local only", trusted_group: "Trusted devices" };
 
 /**
- * One status bar item: a link or button when it has a destination, else text (focusable only to reach its Tip).
- * `drop` is the narrow-window drop order (1 drops first: Disk, Network rate, Sharing, Slots); undropped items stay.
+ * One status bar item: a link or button when it has a destination, else text (focusable only to reach its Tip, then a
+ * group named by `label`: a generic element takes no name from its content). Keep `label` stable: a focused item whose
+ * name changes is read again. `drop` is the narrow-window drop order (1 drops first: Disk, Network rate, Sharing,
+ * Slots); undropped items stay.
  */
 function Item({ tone = "neutral", icon, dot, tip, drop, to, onClick, label, stale, children }: { tone?: Tone; icon?: IconName; dot?: boolean; tip?: string; drop?: 1 | 2 | 3 | 4; to?: string; onClick?: () => void; label?: string; stale?: string | null; children: ReactNode }) {
   // A value that was not refreshed is never shown as live: no state colour, a visible "not updated" and the time in the tip.
@@ -37,11 +39,12 @@ function Item({ tone = "neutral", icon, dot, tip, drop, to, onClick, label, stal
       {inner}
     </button>
   ) : (
-    <span className={cls} tabIndex={tip ? 0 : undefined}>
+    <span className={cls} {...(tip ? { tabIndex: 0, role: "group", "aria-label": label } : {})}>
       {inner}
     </span>
   );
-  return tip ? <Tip text={tip}>{el}</Tip> : el;
+  // Always inside Tip: a control whose tip comes and goes (a failed read, the service stopping) is not remounted.
+  return <Tip text={tip ?? null}>{el}</Tip>;
 }
 
 /** `<footer aria-label="Status">` (plan §1.2). Never a live region; the shell announcer speaks transitions. */
@@ -51,7 +54,7 @@ export function StatusBar() {
   const meshLive = mesh.use();
   const jobsLive = jobs.use();
   const conn = samples.use().conn;
-  const mode = privacy.use()?.mode;
+  const privLive = privacy.use();
   const hw = hardware.use();
   const disk = hw.data?.disk_free_bytes;
   const loadingStreak = ready.use().loadingStreak;
@@ -74,10 +77,12 @@ export function StatusBar() {
   const m = up ? meshLive.data : null;
   const j = up ? jobsLive.data : null;
   // A status poll that timed out (busy) or answered with an HTTP error leaves the last good status: not live.
-  const statusStale = up && (d.responding === false || d.statusError) ? notUpdated(d.at) : null;
+  const statusStale = up && statusNotLive(d) ? notUpdated(d.at) : null;
   const meshFailed = [netLive, meshLive].find((x) => x.error);
   const meshStale = up && meshFailed ? notUpdated(meshFailed.at) : null;
   const s = up ? d.status : null;
+  const mode = up ? privLive.data?.mode : undefined;
+  const privacyStale = up && privLive.error ? notUpdated(privLive.at) : null;
 
   // 1. Attention
   const first = attention[0];
@@ -89,6 +94,7 @@ export function StatusBar() {
       tip={attention.length > 1 ? `${attention.length} items need attention; the Dashboard lists them all.` : first.action?.label}
     >
       {first.text}
+      {first.detail && <span aria-hidden="true"> · {first.detail}</span>}
       {attention.length > 1 ? ` · +${attention.length - 1}` : ""}
     </Item>
   );
@@ -111,8 +117,12 @@ export function StatusBar() {
   let engineTone: Tone = "neutral";
   let engineTip: string | undefined = s ? undefined : unknownTip;
   let engineModel = loaded?.model_id ?? null;
+  // The seconds are hidden from speech (and given in the tip): the link's name would change every status poll.
+  let engineSecs: string | null = null;
   if (engine?.state === "loading") {
-    engineText = `Loading ${nameOfModel(engine.loading_model_id)}${engine.loading_for_ms != null ? ` · ${Math.round(engine.loading_for_ms / 1000)} s` : ""}`;
+    engineText = `Loading ${nameOfModel(engine.loading_model_id)}`;
+    engineSecs = engine.loading_for_ms != null ? `${Math.round(engine.loading_for_ms / 1000)} s` : null;
+    engineTip = engineSecs ? `Loading for ${engineSecs}.` : undefined;
     engineTone = "active";
     engineModel = engine.loading_model_id;
   } else if (s && !engine && loadingStreak >= 2) {
@@ -144,7 +154,8 @@ export function StatusBar() {
   else if (!net.listen_addr) {
     meshText = "Not listening";
     meshTone = "warn";
-  } else {
+  } else if (!m) meshText = "Listening · devices —"; // never read: no count is claimed
+  else {
     meshText = connected ? `${plural(connected, "device")} connected` : "Listening · no devices connected";
     if (notResponding) meshText += ` · ${notResponding} not responding`;
     meshTone = notResponding ? "warn" : connected ? "ok" : "neutral";
@@ -178,11 +189,12 @@ export function StatusBar() {
     <footer className="statusbar" aria-label="Status" data-region="statusbar">
       <div className="sb-group">
         {attentionItem}
-        <Item tone={service.tone} dot tip={[statusStale, serviceTip].filter(Boolean).join(" ") || undefined}>
+        <Item tone={service.tone} dot label={`Service: ${service.text}`} tip={[statusStale, serviceTip].filter(Boolean).join(" ") || undefined}>
           {service.text}
         </Item>
         <Item tone={engineTone} icon={loaded?.fallback_reason ? "circle-alert" : undefined} to={href("models", engineModel)} tip={engineTip} stale={statusStale}>
           {engineText}
+          {engineSecs && <span aria-hidden="true"> · {engineSecs}</span>}
         </Item>
         {q && (
           <Item
@@ -211,14 +223,14 @@ export function StatusBar() {
             {sharing.text}
           </Item>
         )}
-        <Item drop={2} tip={rateTip}>
+        <Item drop={2} label="Network rate" tip={rateTip}>
           <Icon name="arrow-down" />
           <span className="visually-hidden">Received </span>
           {rate ? byteRate(rate.rx) : "—"} <Icon name="arrow-up" />
           <span className="visually-hidden">Sent </span>
           {rate ? byteRate(rate.tx) : "—"}
         </Item>
-        <Item icon="shield-check" to={href("settings", "privacy")} label={`Privacy mode: ${modeLabel}`}>
+        <Item icon="shield-check" to={href("settings", "privacy")} label={`Privacy mode: ${modeLabel}`} stale={privacyStale} tip={up ? undefined : unknownTip}>
           {mode ? modeLabel : "Privacy mode unknown"}
         </Item>
         <Item drop={1} icon="hard-drive" to={href("settings", "storage")} tip={disk != null ? `${disk.toLocaleString()} bytes free, measured at ${clock(hw.at)}.` : "Free disk space was not reported by the hardware probe."}>

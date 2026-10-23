@@ -16,7 +16,7 @@ beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   runTarget.set("local");
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
 });

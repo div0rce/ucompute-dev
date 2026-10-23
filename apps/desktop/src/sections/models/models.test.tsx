@@ -7,7 +7,7 @@ import type { Model, Status } from "../../api/client";
 import App from "../../App";
 import { refreshStatus } from "../../daemon";
 import { pulls } from "../../state/live";
-import { settings } from "../../state/stores";
+import { daemon, settings } from "../../state/stores";
 import { resetStores } from "../../test/axe";
 import { apiError, installFakeDaemon, JOBS, LOADED, MODELS, NETWORK_ON, PEER_ID, PEERS_E1, sse, STATUS_E2, type FakeDaemon } from "../../test/mocks";
 import type { MenuItem } from "../../ui/contextMenu";
@@ -194,6 +194,28 @@ describe("Models section", () => {
     await user.click(screen.getByRole("button", { name: "Load once with these settings" }));
     await waitFor(() => expect(fake.loaded).toMatchObject({ model_id: STORIES.id, device_requested: "cpu", n_ctx: 2048 }));
     expect(settings.get()).toMatchObject({ device: "auto", n_ctx: null });
+  });
+
+  it("the inspector's live values are not refreshed while busy; an unread status never reads Downloaded", async () => {
+    const user = userEvent.setup();
+    const fake = installFakeDaemon();
+    fake.loaded = LOADED;
+    await open(fake, `#/models/${QWEN.id}`);
+    await row(/Qwen2\.5/);
+    const details = () => screen.getByRole("region", { name: "Model details" });
+    const kv = (k: string) => [...details().querySelectorAll("dt")].find((d) => d.textContent === k)?.nextElementSibling?.textContent;
+    expect(kv("State")).toBe("Loaded · Metal");
+    // Busy (usually a load of another model): the table blanks its State column, and so does the inspector.
+    act(() => daemon.set((d) => ({ ...d, responding: false })));
+    expect(kv("State")).toBe("— not refreshed");
+    await user.click(within(details()).getByRole("tab", { name: "Locations" }));
+    expect(kv("State")).toBe("— not refreshed");
+    expect(kv("Requests using it")).toBeUndefined();
+    // No status read (a 500): loaded per the catalog, as Overview says; the engine details are not known.
+    act(() => daemon.set((d) => ({ ...d, responding: true, status: null })));
+    expect(kv("State")).toBe("Loaded");
+    expect(kv("Device")).toBe("— status not read yet");
+    expect(within(details()).queryByRole("button", { name: "Load once with these settings" })).toBeNull();
   });
 
   it("no caveat while sharing is off; Esc cancels the confirmation", async () => {

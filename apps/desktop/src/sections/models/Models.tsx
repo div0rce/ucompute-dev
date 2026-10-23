@@ -1,7 +1,7 @@
 // Models (plan §2.3): the catalog with local and paired-device availability, fit, downloads (app-tracked, surviving
 // navigation), load/unload, delete and import. Owner C.
 import "./models.css";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useContext, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, shortLabel, type Device, type Model, type Peer, type Status } from "../../api/client";
 import { explain, type MappedError } from "../../api/errors";
 import { FitBar } from "../../components/FitBar";
@@ -17,7 +17,7 @@ import { ErrorNotice } from "../../ui/ErrorNotice";
 import { Icon, type IconName } from "../../ui/icons";
 import { Inspector, openInspector } from "../../ui/Inspector";
 import { EmptyState, KV, ScopeBar, StateBadge, ToolButton, Unavailable, type Tone } from "../../ui/primitives";
-import { frameState, SectionFrame } from "../../ui/SectionFrame";
+import { FrameStale, frameState, SectionFrame } from "../../ui/SectionFrame";
 import { DownloadDialog, ImportDialog } from "./ModelDialogs";
 import { downloadingCount, MAX_PULLS, refreshModels, startPull } from "./pulls";
 
@@ -476,6 +476,17 @@ export default function Models() {
   );
 }
 
+/** The inspector's State: live like the table's State column, so not refreshed while the frame is busy or stale. */
+function LiveState({ s }: { s: ModelWord }) {
+  if (useContext(FrameStale)) return <Unavailable reason="not refreshed" />;
+  return (
+    <>
+      <StateBadge tone={s.tone} icon={s.icon} label={s.word} />
+      {s.note && <span className="note">{s.note}</span>}
+    </>
+  );
+}
+
 function inspectorTabs(
   m: Model,
   x: { state: ModelWord; status: Status | null; peers: Peer[]; pull?: Pull; loadReason: string | null; onLoad: (o: LoadOpts) => void },
@@ -487,7 +498,7 @@ function inspectorTabs(
       render: () => (
         <KV
           items={[
-            { k: "State", v: <StateBadge tone={x.state.tone} icon={x.state.icon} label={x.state.word} />, note: x.state.note },
+            { k: "State", v: <LiveState s={x.state} /> },
             { k: "ID", v: <span className="mono">{m.id}</span> },
             { k: "Name", v: m.name },
             { k: "Family", v: m.family },
@@ -543,6 +554,10 @@ function inspectorTabs(
 }
 
 function Locations({ m, status, peers, loadReason, onLoad }: { m: Model; status: Status | null; peers: Peer[]; loadReason: string | null; onLoad: (o: LoadOpts) => void }) {
+  // The engine's details come from the status: not shown while it is not refreshed, and not known before it was read
+  // (the catalog only says whether the model is loaded, as Overview does).
+  const stale = useContext(FrameStale);
+  const loaded = isLoaded(m, status);
   const l = status?.loaded?.model_id === m.id ? status.loaded : null;
   const s = settings.use();
   const [device, setDevice] = useState<Device>(s.device);
@@ -554,9 +569,12 @@ function Locations({ m, status, peers, loadReason, onLoad }: { m: Model; status:
       <h3>This computer</h3>
       <KV
         items={[
-          { k: "State", v: l ? "Loaded" : m.downloaded ? "Downloaded" : "Not downloaded" },
-          ...(l
-            ? [
+          { k: "State", v: stale ? <Unavailable reason="not refreshed" /> : loaded ? "Loaded" : m.downloaded ? "Downloaded" : "Not downloaded" },
+          ...(stale || !loaded
+            ? []
+            : !l
+              ? [{ k: "Device", v: <Unavailable reason="status not read yet" /> }]
+              : [
                 { k: "Device", v: l.device_actual, note: l.device_requested !== l.device_actual ? `requested ${l.device_requested}` : undefined },
                 ...(l.fallback_reason ? [{ k: "CPU fallback", v: <span className="tone-warn">{l.fallback_reason}</span> }] : []),
                 { k: "Offloaded layers", v: `${num(l.offloaded_layers)} of ${num(l.total_layers)}` },
@@ -567,11 +585,10 @@ function Locations({ m, status, peers, loadReason, onLoad }: { m: Model; status:
                 { k: "Requests using it", v: l.in_flight == null ? <Unavailable reason="Not reported by this service version" /> : num(l.in_flight) },
                 { k: "Context note", v: l.context_note ?? "None" },
                 { k: "Loaded for", v: loadedFor(l.loaded_for), note: l.loaded_at_utc ? `at ${clock(l.loaded_at_utc)}` : undefined },
-              ]
-            : []),
+              ]),
         ]}
       />
-      {m.downloaded && !l && (
+      {m.downloaded && !loaded && (
         <form
           className="model-load-form"
           onSubmit={(e) => {

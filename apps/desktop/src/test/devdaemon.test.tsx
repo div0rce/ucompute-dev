@@ -11,7 +11,7 @@ const DEFAULT = "http://127.0.0.1:8192";
 
 beforeEach(() => {
   daemon.set({ reachable: null, version: null, status: null, spawned: false });
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
 });
 afterEach(() => {
   vi.unstubAllGlobals();

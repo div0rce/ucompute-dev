@@ -161,8 +161,8 @@ describe("plan §2.2 tables, rule by rule", () => {
   it("groups or privacy not read yet: what depends on them is unknown, never No or Not permitted", () => {
     const one = (over: Partial<DeviceInput>) => row(deviceRows(input({ network: { ...NETWORK_ON, serve_peers: true }, mesh: { peers: [PEER_E1], discovered: [], revocations: [] }, groups: home, ...over })), PEER_E1.id);
     expect(one({ groups: null }).useHere).toEqual({ word: "—", note: "groups not read yet" });
-    expect(one({ groups: null }).runThere).toMatchObject({ word: "—", note: "groups or privacy not read yet" });
-    expect(one({ localOnly: null }).runThere).toMatchObject({ word: "—", note: "groups or privacy not read yet" });
+    expect(one({ groups: null }).runThere).toMatchObject({ word: "—", note: "groups or privacy mode not known" });
+    expect(one({ localOnly: null }).runThere).toMatchObject({ word: "—", note: "groups or privacy mode not known" });
     // Known negatives still come first: networking or sharing off does not depend on groups.
     expect(one({ groups: null, network: NETWORK_ON }).useHere).toEqual({ word: "No · sharing off" });
   });
@@ -214,6 +214,10 @@ describe("plan §2.2 tables, rule by rule", () => {
     expect(use(NETWORK_ON)).toEqual({ word: "No · sharing off" });
     expect(use({ ...NETWORK_ON, serve_peers: true }, [{ ...home[0], policy: { allow_remote_inference: false, allow_pooled_inference: false } }])).toEqual({ word: "No · not in a prompt group" });
     expect(use({ ...NETWORK_ON, serve_peers: true })).toEqual({ word: "Yes", note: "Quotas and free slots still apply." });
+    // E5: a device the user disconnected cannot reach this computer at all.
+    const held = row(deviceRows(input({ network: { ...NETWORK_ON, serve_peers: true }, mesh: { peers: [{ ...PEER, connected: false, held: true }], discovered: [], revocations: [] }, groups: home })), PEER.id);
+    expect(held.state.word).toBe("Disconnected by you");
+    expect(held.useHere).toEqual({ word: "No · disconnected by you", note: "Until you connect again, turn networking off and on, or the service restarts." });
     const rows = deviceRows(input({ network: { ...NETWORK_ON, serve_peers: true }, mesh: { peers: [], discovered: [STRANGER], revocations: PEERS_E1.revocations }, groups: home }));
     expect(rows.map((r) => r.useHere)).toEqual([null, null, null]);
   });

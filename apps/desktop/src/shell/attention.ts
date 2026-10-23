@@ -11,6 +11,8 @@ import { announce } from "./announcer";
 export interface AttentionItem extends AttentionEntry {
   /** Event entries can be dismissed; derived conditions clear when their cause does. */
   dismissable: boolean;
+  /** Shown after `text` but hidden from speech (a countdown), so a control's name does not change every second. */
+  detail?: string;
 }
 
 /** Adds (or replaces, by id) a dismissable entry. D adds "A reply from this app failed: <title>" this way. */
@@ -51,7 +53,7 @@ export function useAttention(): AttentionItem[] {
   const fallback = d.reachable ? d.status?.loaded?.fallback_reason : null;
   if (fallback) items.push({ id: "cpu-fallback", tone: "warn", text: `Running on CPU: ${fallback}`, dismissable: false });
   if (p && p.expiresAt > now)
-    items.push({ id: "pairing", tone: "warn", text: `Pairing open · ${mmss(p.expiresAt - now)}`, action: { label: "Resume pairing", run: () => go("devices", null, { pair: "1" }) }, dismissable: false });
+    items.push({ id: "pairing", tone: "warn", text: "Pairing open", detail: mmss(p.expiresAt - now), action: { label: "Resume pairing", run: () => go("devices", null, { pair: "1" }) }, dismissable: false });
   return [...items, ...entries.map((e) => ({ ...e, dismissable: true }))];
 }
 

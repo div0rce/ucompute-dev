@@ -14,7 +14,7 @@ beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
   chatHistory.set({ messages: [{ role: "user", content: "canary-prompt-7f3a" }, { role: "assistant", content: "canary-reply-9b1c" }] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
 });
 afterEach(() => vi.unstubAllGlobals());
 

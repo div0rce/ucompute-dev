@@ -30,7 +30,7 @@ describe("axe accessibility scan", () => {
     expect(await screen.findByRole("heading", { level: 2, name: "Privacy" })).toBeTruthy();
     // The disclosure only appears when leaving local-only, so start there and pick trusted devices.
     fake.privacy = { ...PRIVACY };
-    privacy.set({ ...PRIVACY });
+    privacy.set({ data: { ...PRIVACY }, at: Date.now(), error: null });
     (await screen.findByRole("radio", { name: /Trusted devices/ })).click();
     await screen.findByRole("checkbox", { name: /I understand/ });
     await scan(container);

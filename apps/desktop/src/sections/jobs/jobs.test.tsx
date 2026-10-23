@@ -7,7 +7,7 @@ import type { Job, JobsData } from "../../api/client";
 import App from "../../App";
 import { refreshStatus } from "../../daemon";
 import { ownStreams, refresh } from "../../state/live";
-import { chatHistory } from "../../state/stores";
+import { chatHistory, daemon } from "../../state/stores";
 import { resetStores } from "../../test/axe";
 import { installFakeDaemon, JOBS, LOADED, NETWORK_ON, PEER, type FakeDaemon } from "../../test/mocks";
 import { isActive, jobState } from "./Jobs";
@@ -236,6 +236,17 @@ describe("Tokens/s caption", () => {
 });
 
 describe("TTFT says what it measured", () => {
+  it("while the service is busy, an active job's state and counts in the inspector read not refreshed, as in the table", async () => {
+    await open(installFakeDaemon({ jobs: JOBS, network: NETWORK_ON, peers: [PEER] }), `#/jobs/${RUNNING.id}`);
+    await grid();
+    const panel = screen.getByRole("region", { name: "Job details" });
+    const value = (k: string) => within(panel).getByText(k, { selector: "dt" }).nextElementSibling!.textContent;
+    expect(value("State")).toMatch(/Running/);
+    act(() => daemon.set((d) => ({ ...d, responding: false, at: Date.now() })));
+    await screen.findByText(/Service running, busy/);
+    for (const k of ["State", "Completion tokens", "Tokens per second"]) expect(value(k)).toBe("— not refreshed");
+  });
+
   it("a job's TTFT is from arrival here (wait and load included), in its column tip and the inspector", async () => {
     const done = JOBS.recent.find((j) => j.ttft_ms != null)!;
     await open(installFakeDaemon({ jobs: JOBS, network: NETWORK_ON, peers: [PEER] }), `#/jobs/${done.id}`);

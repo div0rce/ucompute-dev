@@ -32,6 +32,8 @@ export function canUseThisComputer(p: Peer, network: NetworkState | null, groups
   if (!network) return { word: "—", note: "network state not read yet" };
   if (!network.enabled) return { word: "No · networking off" };
   if (!network.serve_peers) return { word: "No · sharing off" };
+  // The service refuses a held device's connections in both directions (transport `hold`).
+  if (p.held === true) return { word: "No · disconnected by you", note: "Until you connect again, turn networking off and on, or the service restarts." };
   if (!groups) return { word: "—", note: "groups not read yet" };
   if (!groups.some((g) => g.members.includes(p.id) && g.policy.allow_remote_inference)) return { word: "No · not in a prompt group" };
   return { word: "Yes", note: "Quotas and free slots still apply." };
@@ -152,7 +154,7 @@ export function connState(p: Peer, i: Pick<DeviceInput, "network" | "dialing">, 
 function peerRunThere(p: Peer, i: DeviceInput): Word {
   if (!live(p)) return { word: "—", tone: "neutral" };
   // Unknown until both are read: Chat still treats an unknown privacy mode as local only.
-  if (i.groups === null || i.localOnly === null) return { word: "—", tone: "neutral", note: "groups or privacy not read yet" };
+  if (i.groups === null || i.localOnly === null) return { word: "—", tone: "neutral", note: "groups or privacy mode not known" };
   const ready = promptReadiness(p, i.groups, i.localOnly);
   if (!ready.ok) return { word: "Not permitted here", tone: "neutral", detail: ready.text };
   // No known start of this connection: no outcome is known to belong to it, so none is shown (an older one is not).
@@ -307,7 +309,8 @@ export function useDeviceRows(): DeviceRow[] {
     models: mo.data,
     hardware: h.data,
     deviceName: s.device_name,
-    localOnly: pr ? pr.mode === "local_only" : null,
+    // A failed read keeps the last mode, which may no longer be the mode: not known, like one not read yet.
+    localOnly: pr.data && !pr.error ? pr.data.mode === "local_only" : null,
     jobs: j.data,
     audit: a.data,
     dialing: dial,

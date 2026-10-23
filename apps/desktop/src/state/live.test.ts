@@ -2,9 +2,9 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SLOW } from "../api/client";
 import { refreshStatus } from "../daemon";
-import { hang, installFakeDaemon, JOBS, MODELS, NETWORK_ON, PEER, PEER_E1 } from "../test/mocks";
-import { jobs, mesh, models, neededKeys, netRate, network, ready, refresh, refreshMany, samples, setRefreshTimeout, tokenRates, useNeed, type ConnSample } from "./live";
-import { intervalFor, startPoller } from "./poll";
+import { apiError, hang, installFakeDaemon, JOBS, MODELS, NETWORK_ON, PEER, PEER_E1 } from "../test/mocks";
+import { hardware, jobs, mesh, metrics, models, neededKeys, netRate, network, ready, refresh, refreshMany, samples, setRefreshTimeout, tokenRates, useNeed, type ConnSample } from "./live";
+import { intervalFor, RETRY_MS, startPoller } from "./poll";
 import { daemon } from "./stores";
 
 afterEach(() => {
@@ -122,6 +122,33 @@ describe("poll cadence", () => {
     expect(intervalFor("jobs")).toBe(5000);
     expect(intervalFor("metrics")).toBeNull();
     expect(intervalFor("models")).toBeNull();
+  });
+
+  it("a failed read is retried within 5 s whatever the store's cadence, so it does not stay not updated", async () => {
+    const fake = installFakeDaemon();
+    await refreshStatus();
+    await Promise.all([refresh("models"), refresh("hardware"), refresh("metrics")]);
+    fake.routes["GET /api/models"] = () => apiError("internal", "transient", 500);
+    fake.routes["GET /api/hardware"] = () => apiError("internal", "transient", 500);
+    fake.routes["GET /metrics"] = () => apiError("internal", "transient", 500);
+    await Promise.all([refresh("models"), refresh("hardware"), refresh("metrics")]);
+    expect(intervalFor("models")).toBe(RETRY_MS);
+    expect(intervalFor("hardware")).toBe(RETRY_MS);
+    // Not polled at all now (no view needs it) and not an always-read store: a failure does not start polling it.
+    expect(intervalFor("metrics")).toBeNull();
+    delete fake.routes["GET /api/models"];
+    vi.useFakeTimers();
+    try {
+      const stop = startPoller({ tickMs: 100 });
+      await vi.advanceTimersByTimeAsync(RETRY_MS + 200);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(models.get().error).toBeNull();
+    expect(intervalFor("models")).toBeNull();
+    expect(hardware.get().error).not.toBeNull();
+    expect(metrics.get().error).not.toBeNull();
   });
 
   it("jobs: once a minute from a service without /api/jobs (before E3)", async () => {

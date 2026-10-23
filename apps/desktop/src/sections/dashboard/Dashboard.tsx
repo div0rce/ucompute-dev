@@ -71,7 +71,10 @@ function Attention({ rows }: { rows: DeviceRow[] }) {
         {items.map((a) => (
           <li key={a.id} className={`tone-${a.tone}`}>
             <Icon name={a.tone === "danger" ? "circle-x" : "circle-alert"} />
-            <span className="dash-text">{a.text}</span>
+            <span className="dash-text">
+              {a.text}
+              {a.detail && ` · ${a.detail}`}
+            </span>
             {a.action && <Fix label={a.action.label} onClick={a.action.run} />}
             {a.dismissable && <Fix label="Dismiss" onClick={() => dismissAttention(a.id)} />}
           </li>

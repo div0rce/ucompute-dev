@@ -86,7 +86,7 @@ function hardwareCell(r: DeviceRow, c: Ctx): { text: string; note: string | null
 function freeMemory(r: DeviceRow, c: Ctx): { text: string; note: string | null; bytes: number | null } {
   if (r.trust === "self") return c.hw ? { text: humanBytes(c.hw.memory.available_bytes), note: `probed ${ago(c.hwAt, c.now)}`, bytes: c.hw.memory.available_bytes } : { ...dash(null), bytes: null };
   // The start-time snapshot a peer sent is in its Hardware tab, with its caveat; never in a column that reads as live.
-  if (r.trust === "trusted") return { ...dash("Not reported live (needs N2)"), bytes: null };
+  if (r.trust === "trusted") return { ...dash("Not reported live"), bytes: null };
   return { ...dash(null), bytes: null };
 }
 

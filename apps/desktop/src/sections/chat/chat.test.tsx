@@ -19,7 +19,7 @@ beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
   chatHistory.set({ messages: [] });
   lastError.set(null);
-  privacy.set(null);
+  privacy.set({ data: null, at: null, error: null });
   runTarget.set("local");
   settings.set({ device: "auto", n_ctx: null, device_name: "" });
 });
@@ -38,6 +38,36 @@ async function open(fake: ReturnType<typeof installFakeDaemon>, hash = "#/chat")
   void fake;
   return screen.findByRole("textbox", { name: "Message" });
 }
+
+describe("before the first status read", () => {
+  it("nothing says no model is loaded and no Load is offered", async () => {
+    installFakeDaemon({ routes: { "GET /api/status": () => apiError("internal", "status unreadable", 500) } });
+    await refreshStatus();
+    expect(daemon.get()).toMatchObject({ reachable: true, status: null });
+    window.location.hash = "#/chat";
+    render(<App poll={false} />);
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    expect(box.getAttribute("placeholder")).toBe("Waiting for the background service's status");
+    expect(box).toHaveProperty("disabled", true);
+    const panel = screen.getByRole("complementary", { name: "Run details" });
+    expect(within(panel).getByText("Loaded model", { selector: "dt" }).nextElementSibling!.textContent).toBe("— status not read yet");
+    expect(screen.queryByRole("button", { name: /^Load/ })).toBeNull();
+  });
+
+  it("a kept status is not shown as the loaded model while the service is busy or its status read failed", async () => {
+    const fake = installFakeDaemon();
+    fake.loaded = LOADED;
+    await open(fake);
+    const panel = screen.getByRole("complementary", { name: "Run details" });
+    const value = () => within(panel).getByText("Loaded model", { selector: "dt" }).nextElementSibling!.textContent;
+    await waitFor(() => expect(value()).toMatch(/ · Metal$/));
+    // Busy is most often a load of another model: the one being replaced is not shown as current.
+    act(() => daemon.set((d) => ({ ...d, responding: false })));
+    expect(value()).toBe("— not refreshed");
+    act(() => daemon.set((d) => ({ ...d, responding: true, statusError: { code: "internal", title: "t", next_step: "n", detail: "", hint: null } })));
+    expect(value()).toBe("— not refreshed");
+  });
+});
 
 describe("session controller", () => {
   it("keeps streaming on another section and Jobs' Stop (ownStreams) saves the partial reply within 300 ms", async () => {
