@@ -36,6 +36,18 @@
       "sha256": "e64f14b7e44fdc1307c95ef0082209293a16ba35f1615b5b696ec924227b00d4",
       "bytes": 24730844,
       "license": "MIT"
+    },
+    {
+      "name": "llama.cpp",
+      "release": "b11609",
+      "source_commit": "fcac19079",
+      "platform": "linux-x64",
+      "archive": "llama-b11609-bin-ubuntu-x64.tar.gz",
+      "directory": "llama-b11609",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-ubuntu-x64.tar.gz",
+      "sha256": "f95cbb27dd6e377f2ce30f5cfd7ec987af3259c025fc7c98fff62927a16ff528",
+      "bytes": 17732148,
+      "license": "MIT"
     }
   ]
 }

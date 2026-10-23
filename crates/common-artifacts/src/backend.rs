@@ -863,6 +863,21 @@ mod tests {
     }
 
     #[test]
+    fn the_linux_pin_is_the_cpu_build_in_its_release_directory() {
+        // D-024: the Ubuntu CPU build (EXPERIMENTAL platform; the Vulkan and CUDA builds are not pinned).
+        let pins = BackendPins::builtin().unwrap();
+        let p = pins
+            .backends
+            .iter()
+            .find(|b| b.platform == "linux-x64")
+            .expect("no linux-x64 pin");
+        assert_eq!(p.archive, "llama-b11609-bin-ubuntu-x64.tar.gz");
+        assert!(p.directory == "llama-b11609" && p.url.ends_with(&p.archive), "{p:?}");
+        check_pin(p).unwrap();
+        assert_eq!(archive_kind(p).unwrap(), Kind::TarGz);
+    }
+
+    #[test]
     fn windows_pins_point_at_zip_releases_at_the_archive_root() {
         let pins = BackendPins::builtin().unwrap();
         for plat in ["win-x64", "win-arm64"] {
