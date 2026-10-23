@@ -4,7 +4,7 @@ mod common;
 
 use common::{audit_kinds, child_home, child_value, pair, poll_until, spawn_child, start_relay, Peer};
 use common_core::ErrorCode;
-use common_identity::PeerId;
+use common_identity::{PeerId, PeerStore};
 use common_network::health::{supervise, PeerHealth};
 use common_network::proto::{
     control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, RevocationMsg,
@@ -284,16 +284,23 @@ async fn forging_relay(server: std::net::SocketAddr, frame: Vec<u8>) -> (std::ne
 /// trust-3: a close appended on the path to the device's genuine flight (after its pinned key was
 /// shown and its signature and Finished checked) is processed by the dialler in the Initial space,
 /// whose keys anyone on the path has: it proves nothing. Neither a `certificate_revoked` alert nor
-/// a `CLOSE_HELD` reads as `peer_revoked`/`peer_held`, so it can never end a dial walk; it reads
-/// as another device at that address. SINGLE-HOST: an in-process relay on loopback forges it.
+/// a `CLOSE_HELD` reads as `peer_revoked`/`peer_held`, so it can never end a dial walk, and neither
+/// a `CLOSE_PROTOCOL` nor a `no_application_protocol` alert reads as `protocol_incompatible`, so
+/// it cannot stop `health::supervise`; each reads as another device at that address. SINGLE-HOST: an in-process relay on loopback forges it.
 #[tokio::test]
 async fn a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host() {
     let (a, b) = pair();
     let (na, nb) = (a.start().await, b.start().await);
     let held = CLOSE_HELD.to_be_bytes();
+    let protocol = CLOSE_PROTOCOL.to_be_bytes();
     for (what, frame) in [
         ("certificate_revoked", vec![0x1c, 0x41, 44, 0, 0]),
         ("CLOSE_HELD", vec![0x1d, 0x80, held[1], held[2], held[3], 0]),
+        (
+            "CLOSE_PROTOCOL",
+            vec![0x1d, 0x80, protocol[1], protocol[2], protocol[3], 0],
+        ),
+        ("no_application_protocol", vec![0x1c, 0x41, 120, 0, 0]),
     ] {
         let (front, forged) = forging_relay(nb.local_addr().unwrap(), frame).await;
         let e = timeout(Duration::from_secs(10), na.connect(front, b.id()))
@@ -349,7 +356,7 @@ fn caps_frame(me: &common::Peer) -> ControlMessage {
 /// deployed minor-0 builds) gets `CLOSE_HELD` right after its Capabilities, with no frame first
 /// (an `ErrorMsg` where it expects Capabilities would read as a protocol error there); a minor-1
 /// peer gets `ErrorMsg{peer_held}` first, then the revocation exchange, then `CLOSE_HELD`. One
-/// `peer_rejected` line (reason `held`) per hold. Unheld, a minor-0 peer still connects at minor 0.
+/// `peer_rejected` line (reason `held`) per hold, whatever the minor and however often it redials. Unheld, a minor-0 peer still connects at minor 0.
 /// (Pairing carries no protocol minor.)
 #[tokio::test]
 async fn a_held_peer_of_each_minor_reads_the_hold_single_host() {
@@ -358,14 +365,17 @@ async fn a_held_peer_of_each_minor_reads_the_hold_single_host() {
     let addr = nb.local_addr().unwrap();
 
     let old = HELD_EXCHANGE_MINOR - 1;
-    let (_ep, conn, mut send, mut recv, theirs) = raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, old)).await;
-    assert_eq!(theirs.minor, PROTOCOL_MINOR);
-    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
-    let frame = read_frame(&mut recv, MAX_CONTROL_FRAME).await;
-    assert!(!matches!(frame, Ok(Some(_))), "no frame before the close: {frame:?}");
-    let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
-    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_HELD)), "{reason:?}");
-    assert_eq!(map_conn_error(&reason).code, ErrorCode::PeerHeld);
+    // A minor-0 build redials with backoff: each redial is refused the same way, audited once.
+    for _ in 0..2 {
+        let (_ep, conn, mut send, mut recv, theirs) = raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, old)).await;
+        assert_eq!(theirs.minor, PROTOCOL_MINOR);
+        write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+        let frame = read_frame(&mut recv, MAX_CONTROL_FRAME).await;
+        assert!(!matches!(frame, Ok(Some(_))), "no frame before the close: {frame:?}");
+        let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
+        assert_eq!(app_close(&reason), Some(u64::from(CLOSE_HELD)), "{reason:?}");
+        assert_eq!(map_conn_error(&reason).code, ErrorCode::PeerHeld);
+    }
     assert_eq!(
         counts.offers.load(Ordering::SeqCst),
         0,
@@ -389,14 +399,16 @@ async fn a_held_peer_of_each_minor_reads_the_hold_single_host() {
     let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
     assert_eq!(app_close(&reason), Some(u64::from(CLOSE_HELD)), "{reason:?}");
     assert_eq!(counts.offers.load(Ordering::SeqCst), 1);
-    let held: Vec<_> = b
+    // Two minor-0 redials and a minor-1 one: one `peer_rejected` line, reason `held`.
+    let rejected: Vec<_> = b
         .audit
         .tail(50)
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "peer_rejected" && e.fields["reason"] == "held")
+        .filter(|e| e.kind == "peer_rejected")
         .collect();
-    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].fields["reason"], "held", "{rejected:?}");
 
     nb.release(&a.id());
     let (_ep, conn, mut send, mut recv, _) = raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, old)).await;
@@ -481,6 +493,129 @@ async fn a_held_exchange_follows_the_store_single_host() {
         .expect("the revoke closed the held exchange");
     assert_eq!(app_close(&reason), Some(u64::from(CLOSE_REVOKED)), "{reason:?}");
     eprintln!("SINGLE-HOST held exchange closed {:?} after the revoke", t0.elapsed());
+}
+
+/// A revocation frame that fails every check (the receiver must not even get to apply it).
+fn junk_revocation(by: PeerId) -> ControlMessage {
+    Body::Revocation(RevocationMsg {
+        seq: 1,
+        peer_id: vec![9; 32],
+        revoked_by: by.0.to_vec(),
+        at_utc: "2026-10-22T00:00:00Z".into(),
+        signature: vec![0; 64],
+    })
+    .into()
+}
+
+/// The holder's turn of a held exchange in a test: unpairs the holder in the held device's store
+/// (`theirs`), then writes `frames` revocation frames.
+struct UnpairingHook {
+    theirs: Arc<PeerStore>,
+    holder: PeerId,
+    frames: usize,
+}
+
+impl HeldControl for UnpairingHook {
+    fn offer<'a>(&'a self, _: PeerId, control: &'a mut ControlStream) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.theirs.remove(&self.holder).unwrap();
+            for _ in 0..self.frames {
+                write_frame(&mut control.send, &junk_revocation(self.holder))
+                    .await
+                    .unwrap();
+            }
+            true
+        })
+    }
+    fn received<'a>(&'a self, _: &'a Node, _: PeerId, _: ControlMessage) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// F-06-05 on the held side (the connector) of a held exchange, SINGLE-HOST: `a`'s store stops
+/// allowing `b` while `b` holds `a`. (1) Unpaired as `b`'s records arrive: none is applied and the
+/// dial reads `peer_unauthorized`. (2) Unpaired before `a`'s turn: `a` offers nothing.
+#[tokio::test]
+async fn the_held_side_of_a_held_exchange_follows_its_store_single_host() {
+    for frames in [1, 0] {
+        let (a, b) = pair();
+        let nb = b.start().await;
+        nb.set_held_control(Box::new(UnpairingHook {
+            theirs: a.peers.clone(),
+            holder: b.id(),
+            frames,
+        }));
+        nb.hold(&a.id());
+        let na = a.start().await;
+        let counts = Arc::new(Counts::default());
+        na.set_held_control(Box::new(CountingHook(counts.clone())));
+        let e = timeout(Duration::from_secs(5), na.connect(nb.local_addr().unwrap(), b.id()))
+            .await
+            .expect("the exchange ends at once")
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::PeerUnauthorized, "frames={frames}: {e}");
+        assert_eq!(
+            counts.received.load(Ordering::SeqCst),
+            0,
+            "frames={frames}: nothing applied"
+        );
+        assert_eq!(
+            counts.offers.load(Ordering::SeqCst),
+            0,
+            "frames={frames}: nothing offered"
+        );
+    }
+}
+
+/// At the held exchange's 10 s bound the store is asked once more: a holder whose store stopped
+/// allowing the peer meanwhile, with no revoke or unpair reaching its Node (`Node::disconnect`),
+/// closes with the store's refusal (`CLOSE_UNAUTHORIZED`), not `CLOSE_HELD`. SINGLE-HOST.
+#[tokio::test]
+async fn a_held_exchange_ends_with_the_stores_verdict_at_its_bound_single_host() {
+    let (a, b) = pair();
+    let (nb, _counts) = holder(&a, &b).await;
+    let (_ep, conn, mut send, mut recv, _) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR)).await;
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let _ = read_frame(&mut recv, MAX_CONTROL_FRAME).await; // peer_held
+    assert!(read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap().is_none());
+    // The holder waits for a's records, which never come; only its store changes.
+    b.peers.remove(&a.id()).unwrap();
+    let reason = timeout(Duration::from_secs(15), conn.closed())
+        .await
+        .expect("closed at the bound");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_UNAUTHORIZED)), "{reason:?}");
+}
+
+/// Never finishes its turn of a held exchange (a stalling holder) until the exchange's bound.
+struct StallingHook;
+
+impl HeldControl for StallingHook {
+    fn offer<'a>(&'a self, _: PeerId, _: &'a mut ControlStream) -> BoxFuture<'a, bool> {
+        Box::pin(std::future::pending())
+    }
+    fn received<'a>(&'a self, _: &'a Node, _: PeerId, _: ControlMessage) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// A dial cancelled during a held exchange (an HTTP client gone) leaves no connection open: the
+/// Node's list of held exchanges does not keep it alive until a stalling holder closes it (at its
+/// 10 s bound if honest, when its Node stops if not). SINGLE-HOST.
+#[tokio::test]
+async fn a_cancelled_dial_closes_its_held_exchange_single_host() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    nb.set_held_control(Box::new(StallingHook));
+    nb.hold(&a.id());
+    let na = a.start().await;
+    let dial = timeout(Duration::from_secs(1), na.connect(nb.local_addr().unwrap(), b.id())).await;
+    assert!(dial.is_err(), "the holder stalls the exchange past the dial");
+    assert_eq!(na.endpoint.open_connections(), 1, "the exchange had started");
+    let closed = poll_until(Duration::from_secs(3), || na.endpoint.open_connections() == 0)
+        .await
+        .expect("the cancelled dial's connection closed");
+    eprintln!("SINGLE-HOST cancelled held exchange closed {closed:?} after the cancel");
 }
 
 #[tokio::test]
@@ -957,9 +1092,11 @@ async fn partition_detected_and_recovered_single_host() {
     );
 }
 
-/// A supervised peer that revokes this device ends supervision: no reconnect storm.
+/// A supervised peer that revokes this device refuses it before proving its key (a TLS alert
+/// anything on the path could forge), so supervision keeps redialling with backoff (no storm:
+/// 1, 2, 4 … 30 s) and ends when this device's own store refuses the peer.
 #[tokio::test]
-async fn supervise_stops_when_the_peer_refuses() {
+async fn supervise_backs_off_on_a_refusal_and_stops_on_its_own_stores() {
     let (a, b) = pair();
     let nb = b.start().await;
     let accepter = nb.clone();
@@ -975,12 +1112,47 @@ async fn supervise_stops_when_the_peer_refuses() {
         .unwrap();
     b.peers.revoke(&a.id(), &b.identity).unwrap();
     nb.disconnect(&a.id(), "revoked").await;
-    timeout(Duration::from_secs(5), sup)
+    // The redial after 1 s is refused (unproven): still supervised, reconnecting.
+    poll_until(Duration::from_secs(5), || {
+        na.dial_failure(&b.id()).is_some() && na.health(&b.id()) == Some(PeerHealth::Reconnecting)
+    })
+    .await
+    .expect("redialled after the close");
+    assert_eq!(na.dial_failure(&b.id()).unwrap().code, ErrorCode::PeerUnauthorized);
+    assert!(!sup.is_finished(), "an unproven refusal does not end supervision");
+    a.peers.revoke(&b.id(), &a.identity).unwrap();
+    timeout(Duration::from_secs(10), sup)
         .await
-        .expect("supervisor ends after the peer refuses")
+        .expect("supervisor ends once this device's store refuses the peer")
         .unwrap();
     assert_eq!(na.health(&b.id()), Some(PeerHealth::Disconnected));
     assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
+/// A refusal the device did not prove (here a `CLOSE_PROTOCOL` forged on the path after its
+/// genuine flight) does not end supervision: it retries with backoff and connects once the path
+/// stops forging. SINGLE-HOST: an in-process relay on loopback.
+#[tokio::test]
+async fn supervise_retries_after_an_unproven_refusal_single_host() {
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let accepter = nb.clone();
+    tokio::spawn(async move { while accepter.accept().await.is_some() {} });
+    let na = a.start().await;
+    let p = CLOSE_PROTOCOL.to_be_bytes();
+    let (front, forged) = forging_relay(nb.local_addr().unwrap(), vec![0x1d, 0x80, p[1], p[2], p[3], 0]).await;
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counter = connects.clone();
+    let sup = supervise(&na, b.id(), front, move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+    let after = poll_until(Duration::from_secs(8), || connects.load(Ordering::SeqCst) == 1)
+        .await
+        .expect("supervise dialled again after the forged close");
+    assert!(forged.load(Ordering::SeqCst), "the forgery was sent");
+    assert!(!sup.is_finished());
+    sup.abort();
+    eprintln!("SINGLE-HOST supervise connected {after:?} after a forged CLOSE_PROTOCOL");
 }
 
 /// Two daemons' dial loops dial each other at the same moment: within 2 s each side holds exactly

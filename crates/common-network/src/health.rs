@@ -133,8 +133,10 @@ pub(crate) async fn watch(node: Weak<Node>, pc: Arc<PeerConnection>, every: Dura
 /// Keeps `peer` (pinned, reachable at `addr`) connected: connects when no live connection exists,
 /// calls `on_connect` for every new connection (the daemon attaches its serving and control tasks
 /// there), waits for it to end and reconnects with backoff 1, 2, 4 … 30 s, health `Reconnecting`
-/// meanwhile. Ends when the node stops or the peer refuses this device for good (revoked,
-/// unpinned, incompatible); health is then `Disconnected`.
+/// meanwhile. Ends when the node stops, this device's own store refuses the peer (revoked,
+/// unpinned), or the peer refuses this device for good after proving its key (revoked,
+/// incompatible); health is then `Disconnected`. A refusal the peer did not prove reads
+/// `peer_unauthorized` (`transport::unproven`: anything on the path can forge it) and is retried.
 ///
 /// Both sides supervising each other is fine: crossed dials resolve to the one connection
 /// initiated by the lower id (`Node::connect`), and `on_connect` may then see a connection that
@@ -164,10 +166,8 @@ where
                         Some(c)
                     }
                     Err(e)
-                        if matches!(
-                            e.code,
-                            ErrorCode::PeerRevoked | ErrorCode::PeerUnauthorized | ErrorCode::ProtocolIncompatible
-                        ) =>
+                        if matches!(e.code, ErrorCode::PeerRevoked | ErrorCode::ProtocolIncompatible)
+                            || crate::tls::store_verdict(&node.peers, &peer) != crate::tls::Verdict::Allowed =>
                     {
                         tracing::info!(peer = %peer.short_label(), code = %e.code, "peer refuses this device; not reconnecting");
                         node.update_health(&peer, |t| t.state = PeerHealth::Disconnected);

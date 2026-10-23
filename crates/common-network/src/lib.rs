@@ -38,7 +38,8 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL_MINOR: u32 = 1;
 /// From this minor a device that holds its peer (E5, `transport::Node::hold`) answers the peer's
 /// Capabilities with `ErrorMsg{code: "peer_held"}` and the two exchange revocations (ADR-0003 D7)
-/// before the holder closes with `CLOSE_HELD`; with an older peer it closes at once.
+/// before the holder closes with `CLOSE_HELD`; with an older peer it sends its Hello, verifies the
+/// peer's Capabilities, then closes with `CLOSE_HELD` (no `ErrorMsg`, no exchange).
 pub const HELD_EXCHANGE_MINOR: u32 = 1;
 /// Hard bound on one control frame.
 pub const MAX_CONTROL_FRAME: usize = 1 << 20;

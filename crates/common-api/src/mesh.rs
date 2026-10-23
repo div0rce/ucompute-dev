@@ -1060,7 +1060,9 @@ async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revo
         }
     }
     node.disconnect(&r.peer_id, "revoked").await;
-    node.release(&r.peer_id);
+    // On the running Node under the `net` lock, not on `node`: a restart (Sharing change) may have
+    // replaced it and carried the hold over before the revocation was stored.
+    let _ = st.on_node(|n| n.release(&r.peer_id)).await;
     st.audit(
         "peer_revoked",
         Some(&r.peer_id),
@@ -1505,8 +1507,16 @@ pub async fn peer_disconnect(
     Path(id): Path<String>,
 ) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
     let id = st.resolve_peer(&id)?;
-    let rec = paired(&st, &id)?;
-    st.on_node(|n| n.hold(&id)).await?;
+    // Checked and held under `peer_writes` (an unpair or revoke cannot run between) and the `net`
+    // lock (nor a restart): a device unpaired meanwhile is never held.
+    let rec = st
+        .on_node(|n| {
+            let _g = lock(&st.peer_writes);
+            let rec = paired(&st, &id)?;
+            n.hold(&id);
+            Ok::<_, CommonError>(rec)
+        })
+        .await??;
     Ok(axum::Json(rec))
 }
 
@@ -2044,6 +2054,63 @@ mod tests {
         control_received(&st, &node, b.id, revocation_msg(&r)).await;
         assert_eq!(lock(&st.fanout).0.len(), 1);
         assert!(!lock(&st.fanout).due(&r, &c.id, || true), "c sent it here");
+        st.stop_network().await;
+    }
+
+    /// E5: a peer's revocation applied on a Node that a restart (Sharing change) already replaced
+    /// ends the hold on the running Node: the release runs there under the `net` lock, so a device
+    /// no longer paired does not stay held (and start held when it is paired again). Loopback only.
+    #[tokio::test]
+    async fn a_peer_revocation_on_a_replaced_node_ends_the_hold_on_the_running_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = networked_state(dir.path()).await;
+        let old = st.node().await.unwrap();
+        let (b, c) = (DeviceIdentity::generate().unwrap(), DeviceIdentity::generate().unwrap());
+        for id in [b.id, c.id] {
+            pin_id(&st, id);
+        }
+        st.peers
+            .upsert_group(Group {
+                name: "home".into(),
+                members: vec![b.id, c.id],
+                policy: Default::default(),
+            })
+            .unwrap();
+        old.hold(&b.id);
+        st.apply_network().await.unwrap();
+        let running = st.node().await.unwrap();
+        assert!(!Arc::ptr_eq(&old, &running) && running.is_held(&b.id));
+        let at_utc = utc_now();
+        let r = Revocation {
+            seq: 1,
+            peer_id: b.id,
+            revoked_by: c.id,
+            signature: hex::encode(c.sign(&common_identity::revocation_message(1, &b.id, &at_utc))),
+            at_utc,
+        };
+        control_received(&st, &old, c.id, revocation_msg(&r)).await;
+        assert!(st.peers.is_revoked(&b.id));
+        assert!(!running.is_held(&b.id), "the running Node no longer holds it");
+        st.stop_network().await;
+    }
+
+    /// E5: `POST /api/peers/{id}/disconnect` checks the pairing and holds under one lock: a device
+    /// unpaired after the request started but before the hold is refused (403 `peer_unauthorized`)
+    /// and never held. Loopback only.
+    #[tokio::test]
+    async fn a_disconnect_holds_only_a_device_paired_when_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = networked_state(dir.path()).await;
+        let id = DeviceIdentity::generate().unwrap().id;
+        pin_id(&st, id);
+        let net = st.net.lock().await; // a restart or another Node call in progress
+        let node = net.node.clone().unwrap();
+        let req = tokio::spawn(peer_disconnect(State(st.clone()), Path(id.to_hex())));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        st.peers.remove(&id).unwrap(); // unpaired while the request waits
+        drop(net);
+        assert!(req.await.unwrap().is_err());
+        assert!(!node.is_held(&id), "a device not paired is never held");
         st.stop_network().await;
     }
 

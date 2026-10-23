@@ -235,6 +235,15 @@ pub trait HeldControl: Send + Sync {
     fn received<'a>(&'a self, node: &'a Node, peer: PeerId, msg: ControlMessage) -> BoxFuture<'a, ()>;
 }
 
+/// A held exchange's entry in `Node::held_conns` (by `stable_id`), removed on drop.
+struct HeldEntry<'a>(&'a Node, usize);
+
+impl Drop for HeldEntry<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.held_conns).retain(|(_, c)| c.stable_id() != self.1);
+    }
+}
+
 /// Fixed one-minute window over inbound `peer_rejected` audit lines.
 // ponytail: one global window, not per source address; a flooder also crowds out other rejection
 // lines for the rest of that minute (the `suppressed` count says so). Per-source buckets if needed.
@@ -310,33 +319,30 @@ fn no_answer(addr: SocketAddr, idle_timeout_ms: u64) -> CommonError {
 /// `addr` can close the dial with any code, even after the pinned key was shown and its signature
 /// checked (a relay appends the close to the device's genuine flight). So no close received (TLS
 /// alert or application code) is `expected`'s verdict here. This device's own verifier's is:
-/// `shown` says it judged `expected`'s key, else the device at `addr` showed another key. An
-/// application close before `connected` (this side's TLS handshake done) is not even Common's
-/// (it closes with one only after its handshake). An unproven refusal reads as another device at
-/// `addr` (`peer_unauthorized`), never as revoked or held, so it never ends a dial walk
-/// (`AppState::peer_connection_via` in the daemon).
-fn unproven(c: &ConnectionError, shown: bool, connected: bool, addr: SocketAddr, expected: &PeerId) -> CommonError {
+/// `shown` says it judged `expected`'s key, else the device at `addr` showed another key. Every
+/// unproven close but a plain loss (a refusal, or a diagnosis such as `protocol_incompatible`)
+/// reads as another device at `addr` (`peer_unauthorized`): never as revoked or held, so it never
+/// ends a dial walk (`AppState::peer_connection_via` in the daemon), and never as incompatible,
+/// so it never stops `health::supervise`.
+fn unproven(c: &ConnectionError, shown: bool, addr: SocketAddr, expected: &PeerId) -> CommonError {
     let e = map_conn_error(c);
-    let refusal = matches!(
-        e.code,
-        ErrorCode::PeerRevoked | ErrorCode::PeerUnauthorized | ErrorCode::PeerHeld
-    );
-    let proven = match c {
-        ConnectionError::TransportError(_) => shown || !refusal,
-        ConnectionError::ApplicationClosed(_) if !connected => e.code == ErrorCode::PeerLost,
-        _ => !refusal,
-    };
+    // A local transport error after this side's verifier judged the shown key is its own verdict.
+    let proven = e.code == ErrorCode::PeerLost || (shown && matches!(c, ConnectionError::TransportError(_)));
     if proven {
         return e;
     }
     tracing::debug!(%addr, code = %e.code, message = %e.message, "refusal before the device proved its key");
+    let mut hint = String::from(
+        "nothing was trusted or saved; check the address that device shows for itself (Devices in its desktop app)",
+    );
+    if e.code == ErrorCode::ProtocolIncompatible {
+        hint.push_str("; if it is that device, update Common on both devices");
+    }
     CommonError::new(
         ErrorCode::PeerUnauthorized,
         format!("the device at {addr} did not prove it is {}", expected.short_label()),
     )
-    .with_hint(
-        "nothing was trusted or saved; check the address that device shows for itself (Devices in its desktop app)",
-    )
+    .with_hint(hint)
 }
 
 /// A quinn connection error as a typed `CommonError`. TLS alerts carry the verifier's verdict
@@ -777,7 +783,7 @@ impl Node {
         .unwrap_or_else(|_| Err(CommonError::new(ErrorCode::Timeout, "control handshake timed out")));
         r.map_err(|e| {
             let e = match conn.close_reason() {
-                Some(reason) if !proven => unproven(&reason, true, true, conn.remote_address(), &peer),
+                Some(reason) if !proven => unproven(&reason, true, conn.remote_address(), &peer),
                 Some(reason) => map_conn_error(&reason),
                 None => e,
             };
@@ -1019,9 +1025,12 @@ impl Node {
     /// is due at the peer and ends its stream; the held side reads to that end, then writes its own
     /// and ends its stream; the holder reads to that end, then closes. Each side's records are read
     /// before the close that drops unread data. Bounded by [`HANDSHAKE_TIMEOUT`]. The store is
-    /// asked again before this side writes and before each frame read is applied, and a revoke or
-    /// unpair meanwhile closes the connection ([`Node::close_peer`]), as on a registered one
-    /// (F-06-05): `Err` is the store's refusal, and the caller closes with it.
+    /// asked again before this side writes, before each frame read is applied and once more at the
+    /// end (the bound included), and a revoke or unpair meanwhile closes the connection
+    /// ([`Node::close_peer`]), as on a registered one (F-06-05): `Err` is the store's refusal, and
+    /// the caller closes with it. The exchange's entry in `held_conns` goes when it ends or its
+    /// future is dropped (a dial whose HTTP client went away), so that entry never keeps the
+    /// connection open on its own.
     async fn held_exchange(
         &self,
         conn: &quinn::Connection,
@@ -1029,12 +1038,8 @@ impl Node {
         mut control: ControlStream,
         holder: bool,
     ) -> Result<()> {
-        {
-            let mut g = lock(&self.held_conns);
-            // An exchange whose dial was dropped mid-way left its entry: closed ones go here.
-            g.retain(|(_, c)| c.close_reason().is_none());
-            g.push((peer, conn.clone()));
-        }
+        lock(&self.held_conns).push((peer, conn.clone()));
+        let _entry = HeldEntry(self, conn.stable_id());
         let hook = self.held_control.get().map(Box::as_ref);
         let run = async {
             if holder {
@@ -1051,9 +1056,10 @@ impl Node {
             }
             Ok(())
         };
-        let r = tokio::time::timeout(HANDSHAKE_TIMEOUT, run).await.unwrap_or(Ok(()));
-        lock(&self.held_conns).retain(|(_, c)| c.stable_id() != conn.stable_id());
-        r
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, run)
+            .await
+            .unwrap_or(Ok(()))
+            .and_then(|()| allowed(&self.peers, &peer))
     }
 
     /// One side's turn in [`Node::held_exchange`]: what `hook` says is due at `peer`, then the end
@@ -1180,7 +1186,7 @@ impl Node {
             Ok(c) => c,
             // The handshake never completed: nothing answered at `addr`.
             Err(ConnectionError::TimedOut) => return Err(no_answer(addr, self.config.idle_timeout_ms)),
-            Err(e) => return Err(unproven(&e, shown.load(Ordering::SeqCst), false, addr, &expected)),
+            Err(e) => return Err(unproven(&e, shown.load(Ordering::SeqCst), addr, &expected)),
         };
         let peer = tls::peer_id_of(&conn)?;
         let (control, caps, minor) = self.finish_handshake(&conn, peer, true, false).await?;
@@ -1410,12 +1416,29 @@ mod tests {
         }
     }
 
+    /// The application close codes are wire values deployed builds read (`control.proto`): a
+    /// change here makes an older device misread every close (`CLOSE_HELD` as `peer_lost`, ...).
+    #[test]
+    fn close_codes_are_pinned_on_the_wire() {
+        assert_eq!(CLOSE_OK, 0);
+        for (code, wire, ascii) in [
+            (CLOSE_REVOKED, 0x5245, b"RE"),
+            (CLOSE_UNAUTHORIZED, 0x5541, b"UA"),
+            (CLOSE_PROTOCOL, 0x5056, b"PV"),
+            (CLOSE_FRAME_TOO_LARGE, 0x4654, b"FT"),
+            (CLOSE_HELD, 0x4844, b"HD"),
+        ] {
+            assert_eq!(code, wire);
+            assert_eq!(&code.to_be_bytes()[2..], ascii);
+        }
+    }
+
     /// No close received before the device proved its key is its verdict, whatever it carries and
     /// whether or not the key was shown: Initial packets that close the dial can be forged by
     /// anything on the path until the dialler sends its first Handshake packet (after the device's
-    /// whole flight). Before this side's handshake completed, an application close is not even
-    /// Common's, so every code reads as another device; after it, only the refusals (held,
-    /// revoked, unauthorized) do, and a protocol or frame-size close keeps its diagnosis.
+    /// whole flight). Every code but a plain loss reads as another device: the refusals (held,
+    /// revoked, unauthorized) and the diagnoses (protocol, frame size, a TLS alert such as
+    /// `no_application_protocol`), so none ends a dial walk or stops `health::supervise`.
     #[test]
     fn a_close_before_the_device_proved_its_key_proves_nothing() {
         let addr: SocketAddr = "10.0.0.9:8193".parse().unwrap();
@@ -1436,28 +1459,33 @@ mod tests {
             CLOSE_FRAME_TOO_LARGE,
         ] {
             for shown in [false, true] {
-                let e = unproven(&app(code), shown, false, addr, &id);
+                let e = unproven(&app(code), shown, addr, &id);
                 assert!(unauthorized(&e), "{code:#x} shown={shown}: {e}");
             }
         }
-        for code in [CLOSE_HELD, CLOSE_REVOKED, CLOSE_UNAUTHORIZED] {
-            let e = unproven(&app(code), true, true, addr, &id);
-            assert!(unauthorized(&e), "{code:#x} after the handshake: {e}");
-        }
-        assert_eq!(
-            unproven(&app(CLOSE_PROTOCOL), true, true, addr, &id).code,
-            ErrorCode::ProtocolIncompatible
+        let protocol = unproven(&app(CLOSE_PROTOCOL), true, addr, &id);
+        assert!(
+            protocol.hint.as_deref().unwrap_or("").contains("update Common"),
+            "{protocol:?}"
         );
-        assert_eq!(unproven(&app(0), true, false, addr, &id).code, ErrorCode::PeerLost);
-        let revoked = ConnectionError::ConnectionClosed(quinn::ConnectionClose {
-            error_code: TransportErrorCode::crypto(A::CertificateRevoked.into()),
-            frame_type: None,
-            reason: Default::default(),
-        });
-        for (shown, connected) in [(false, false), (true, false), (true, true)] {
-            let e = unproven(&revoked, shown, connected, addr, &id);
-            assert!(unauthorized(&e), "shown={shown} connected={connected}: {e}");
+        assert_eq!(unproven(&app(0), true, addr, &id).code, ErrorCode::PeerLost);
+        let alert = |a: A| {
+            ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+                error_code: TransportErrorCode::crypto(a.into()),
+                frame_type: None,
+                reason: Default::default(),
+            })
+        };
+        for a in [A::CertificateRevoked, A::NoApplicationProtocol] {
+            for shown in [false, true] {
+                let e = unproven(&alert(a), shown, addr, &id);
+                assert!(unauthorized(&e), "{a:?} shown={shown}: {e}");
+            }
         }
+        // This device's own verifier judged the shown key: its verdict, not the peer's.
+        let local = ConnectionError::TransportError(TransportErrorCode::crypto(A::CertificateRevoked.into()).into());
+        assert_eq!(unproven(&local, true, addr, &id).code, ErrorCode::PeerRevoked);
+        assert!(unauthorized(&unproven(&local, false, addr, &id)));
     }
 
     #[test]

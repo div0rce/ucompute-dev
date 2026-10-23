@@ -12,7 +12,9 @@
 // answers the peer's Capabilities with ErrorMsg{code:"peer_held"} instead of its own Capabilities;
 // the holder then sends its RevocationMsg frames and ends its stream, the held side reads to that
 // end, sends its own and ends its stream, and the holder reads to that end and closes with
-// CLOSE_HELD. A minor-0 peer gets CLOSE_HELD at once. No message or field was added.
+// CLOSE_HELD. A minor-0 peer gets no ErrorMsg (it would read one there as a protocol error): the
+// holder still sends its Hello and verifies the peer's Capabilities, then closes with CLOSE_HELD
+// without sending its own and without the revocation exchange. No message or field was added.
 syntax = "proto3";
 package common.v1;
 
