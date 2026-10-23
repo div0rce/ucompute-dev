@@ -3,7 +3,7 @@
 // "nothing answered" error points at that firewall instead of the code. Unit level against the fake daemon.
 // Migrated to the Devices section (plan §5.4). Deliberate wording change (plan §2.2 Firewall): the check cannot prove
 // a block, so the notice says no rule was found and that other devices may be unable to connect.
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +95,37 @@ describe("Windows Firewall consent step", () => {
     await user.click(screen.getByRole("button", { name: ALLOW }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Windows did not add the rule (netsh could not add the rule (exit code 1))."));
     expect(screen.queryByText("Allowed on private networks.")).toBeNull();
+    expect(allowCalls()).toBe(2);
+  });
+
+  // Open after round 2: only the success path kept focus. A `disabled` button drops the focus it has (the browser moves
+  // it to the document) while Windows asks, so after a cancel or a failure focus was nowhere and the outcome stood apart.
+  it("while Windows asks and after a cancel or failure, focus stays on the button, which names the outcome", async () => {
+    const user = userEvent.setup();
+    let settle: (e: string) => void = () => {};
+    windowsApp(BLOCKED, () => new Promise<void>((_, reject) => (settle = reject)));
+    installFakeDaemon({ network: NETWORK_ON });
+    renderDevices();
+    const button = (await screen.findByRole("button", { name: ALLOW })) as HTMLButtonElement;
+    await user.click(button);
+    // Waiting: still focusable (aria-disabled, not disabled) and still focused; a second click asks Windows nothing.
+    expect(button.textContent).toBe("Waiting for Windows");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(button);
+    await user.click(button);
+    expect(allowCalls()).toBe(1);
+
+    for (const outcome of ["cancelled", "netsh could not add the rule (exit code 1)"]) {
+      if (outcome !== "cancelled") await user.click(button);
+      act(() => settle(outcome));
+      const alert = await screen.findByRole("alert");
+      expect(document.activeElement).toBe(button);
+      expect(button.getAttribute("aria-disabled")).toBeNull();
+      // Focus coming back from the Windows prompt reads the outcome with the button.
+      expect(button.getAttribute("aria-describedby")).toBe(alert.id);
+      expect(alert.id).not.toBe("");
+    }
     expect(allowCalls()).toBe(2);
   });
 

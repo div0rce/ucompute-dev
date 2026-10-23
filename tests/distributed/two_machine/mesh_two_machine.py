@@ -149,14 +149,21 @@ def audit_clean(base):
     return s, [x for x in SECRETS if x in json.dumps(v)], kinds
 
 
-def refused_as_revoked(base, addrs, since):
-    """`base`'s own verdict on a dial from the host of one of `addrs`: refused because the key is revoked. The
-    dialler cannot tell (a refusal before the device proved its key reads as peer_unauthorized): this is the proof."""
+def refused_as_revoked(base, me, pid, net, addrs, since):
+    """`base`'s own verdict on `pid`'s dials since `since`: the dialler cannot tell (a refusal before the device
+    proved its key reads as peer_unauthorized), and an address alone proves little (on one host every daemon shares
+    it). So (1) `base` holds a revocation of `pid`'s key that `base` (`me`) signed, and (2) it refused a revoked key
+    from `pid`'s own endpoint: a known host of `pid` (`addrs`, its dial_addr) at the port `pid` listens on (`net`
+    is `pid`'s GET /api/network; a daemon dials from its listen socket, which no other process there holds).
+    The refusal line names no key: (1) ties the key to `pid`, (2) the socket. Returns both."""
+    signed = any(r.get("peer_id") == pid and r.get("revoked_by") == me for r in peers(base).get("revocations") or [])
+    port = (net.get("listen_addr") or "").rpartition(":")[2]
+    ends = {x.rpartition(":")[0] + ":" + port for x in [*addrs, net.get("dial_addr")] if x and port}
     s, v, _ = call(base, "GET", "/api/audit?n=1000")
-    hosts = {x.rsplit(":", 1)[0] for x in addrs if x}
-    return s == 200 and isinstance(v, dict) and any(
+    refused = s == 200 and isinstance(v, dict) and any(
         e["kind"] == "peer_rejected" and e["ts_utc"] >= since and (e.get("fields") or {}).get("reason") == "peer_revoked"
-        and (e.get("fields") or {}).get("addr", "").rsplit(":", 1)[0] in hosts for e in v.get("events", []))
+        and (e.get("fields") or {}).get("addr") in ends for e in v.get("events", []))
+    return signed, refused
 
 
 def steps(A, B, ida, idb, a):
@@ -248,14 +255,15 @@ def steps(A, B, ida, idb, a):
     if not (paired_ok and all(remote_ok)):
         step("revocation: skipped (pairing or remote execution failed; B left paired)", False)
     else:
-        t7, b_addrs = utc(), [(peer(A, idb) or {}).get("last_addr"), call(B, "GET", "/api/network")[1].get("dial_addr")]
+        t7, b_rec, b_net = utc(), peer(A, idb) or {}, call(B, "GET", "/api/network")[1]
         s, v, _ = call(A, "POST", f"/api/peers/{idb}/revoke")
         closed = wait(lambda: not connected(B, ida), 10)
         s2, v2, _ = call(B, "POST", "/v1/completions", {"model": MODEL, "prompt": PROMPT, "max_tokens": 8, "target": f"peer:{ida}"})
-        as_revoked = refused_as_revoked(A, b_addrs, t7)
+        signed, as_revoked = refused_as_revoked(A, ida, idb, b_net, [b_rec.get("last_addr")], t7)
         step("revocation: B disconnected and refused as revoked", s == 200 and closed is not None and s2 == 403
-             and code(v2) in ("peer_revoked", "peer_unauthorized") and as_revoked, b_disconnected_after_s=closed,
-             b_request_status=s2, b_error=code(v2) if isinstance(v2, dict) else v2, a_refused_as_revoked=as_revoked)
+             and code(v2) in ("peer_revoked", "peer_unauthorized") and signed and as_revoked,
+             b_disconnected_after_s=closed, b_request_status=s2, b_error=code(v2) if isinstance(v2, dict) else v2,
+             a_holds_its_revocation_of_b=signed, a_refused_as_revoked=as_revoked)
         s, start, _ = call(A, "POST", "/api/pair/start", {"name": names[1]})
         s3 = call(B, "POST", "/api/pair/join", {"addr": start.get("pair_addr"), "code": start.get("code"),
                                                 "name": names[0]})[0] if s == 200 else None

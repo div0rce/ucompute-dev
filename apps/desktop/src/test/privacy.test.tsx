@@ -99,6 +99,29 @@ describe("Settings › Privacy", () => {
     expect(ack.checked).toBe(true);
   });
 
+  // Open after round 2: Cancel stayed active while the service was down, unlike the other controls; a click there
+  // removed the focused button with the choice.
+  it("Cancel is inert too while the service is down, keeps the choice and its focus, and works once it is back", async () => {
+    const user = userEvent.setup();
+    installFakeDaemon();
+    await refreshStatus();
+    window.location.hash = "#/privacy";
+    render(<App poll={false} />);
+    await user.click(await screen.findByRole("radio", { name: /Trusted devices/ }));
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    cancel.focus();
+    act(() => daemon.set((d) => ({ ...d, reachable: false })));
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+    await user.click(cancel);
+    expect(document.activeElement).toBe(cancel);
+    expect(screen.getByRole("region", { name: "Before you switch" })).toBeTruthy();
+    act(() => daemon.set((d) => ({ ...d, reachable: true })));
+    expect(cancel.getAttribute("aria-disabled")).toBeNull();
+    await user.click(cancel);
+    expect(screen.queryByRole("region", { name: "Before you switch" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   // Deliberate change (plan §5.4): the disabled "Public compute" radio is gone; no backend exists (D-019), so there is no
   // control at all. Was: "public compute is present but disabled and honest about it".
   it("offers no public compute control", async () => {

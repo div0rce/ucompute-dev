@@ -151,6 +151,14 @@ class SyntheticDiscoveryDriverTests(unittest.TestCase):
         self.assertIs(steps[WIFI + " (no mDNS: by redial)"]["ok"], False)
         self.assertEqual(code, 3)
 
+    def test_a_new_lease_leaves_the_restore_to_the_runner(self):
+        # B returns at another address; its API (the tunnel to the old one) no longer answers: no restore through it
+        steps, out, code, files = run(Mesh(bad={"new_lease"}))
+        restore = steps["restore: both daemons put back as saved (state.py)"]
+        self.assertIsNone(restore["ok"])
+        self.assertIn("left to the runner's restore", restore["na"])
+        self.assertEqual((files["b_host"], out[-1], code), ("10.0.0.42\n", "ALL PASS (7 N/A)", 0))
+
     def test_b_not_coming_back_stops_the_run_and_keeps_the_results(self):
         steps, out, code, _ = run(Mesh(bad={"wifi_never_back"}))
         self.assertEqual(code, "wifi: B did not come back; stopping before anything else talks to B")

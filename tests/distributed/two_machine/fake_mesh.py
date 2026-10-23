@@ -46,7 +46,7 @@ class Daemon:
         self.up, self.enabled, self.serve, self.privacy, self.off_net = True, True, True, "local_only", False
         self.pins, self.groups, self.audit, self.revs = {}, {}, [], []
         self.held, self.held_audited, self.revoked, self.failures, self.last_error = set(), set(), set(), set(), {}
-        self.ghost = []  # advertised over mDNS but not answering (an old interface)
+        self.mdns = None  # what its mDNS record lists, when not the addresses it answers on (an old interface)
         self.window = self.loaded = self.crashed_at = self.quit_at = None
         self.pair_addr = f"10.0.9.{n}:5000"
 
@@ -59,7 +59,7 @@ class Mesh:
         self.d = {f"http://{k}": Daemon(k, n) for n, k in enumerate("abcds", 1)}
         self.d["http://s"].addrs = ["10.0.0.9:8193"]
         self.ids = {x.id: x for x in self.d.values()}
-        self.conns, self.next_conn, self.wifi_back_at = {}, 1, None
+        self.conns, self.next_conn, self.wifi_back_at, self.tunnel_dead = {}, 1, None, False
         A, B = self.d["http://a"], self.d["http://b"]
         A.pins[B.id] = {"name": B.name, "last_addr": B.addrs[1], "paired_at_utc": self.ts()}
         B.pins[A.id] = {"name": A.name, "last_addr": A.addrs[0], "paired_at_utc": self.ts()}
@@ -109,7 +109,8 @@ class Mesh:
             cached = (o.crashed_at is not None and t - o.crashed_at < 120 and "crash_forgets" not in self.bad) or (
                 o.quit_at is not None and "no_goodbye" in self.bad)
             if self.nearby and o is not me and (o.up and not o.off_net or cached):
-                out.append({"id": o.id, "addr": o.addrs[0], "addrs": (o.addrs + o.ghost)[:2], "trusted": o.id in me.pins,
+                adv = (o.mdns or o.addrs)[:2]
+                out.append({"id": o.id, "addr": adv[0], "addrs": adv, "trusted": o.id in me.pins,
                             "pairing": False, "seen_utc": self.ts() if o.up else o.seen})
         return out
 
@@ -159,8 +160,10 @@ class Mesh:
                 code = "peer_held"
             elif target is dst and src.id in dst.revoked:  # refused inside TLS: unproven to the dialler
                 code = "peer_lost" if "revoked_reads_lost" in self.bad else "peer_unauthorized"
-                if "revoked_unaudited" not in self.bad:
-                    self.log(dst, "peer_rejected", addr=src.addrs[0], reason="peer_revoked")
+                if "revoked_unaudited" not in self.bad:  # from the dialler's listen socket, no key named
+                    host, port = src.addrs[0].rsplit(":", 1)
+                    other = "revoked_line_from_neighbour" in self.bad  # another daemon on B's host
+                    self.log(dst, "peer_rejected", addr=f"{host}:{int(port) + other}", reason="peer_revoked")
             elif target is dst and src.id in dst.held:
                 code = "peer_held"
             elif target is dst and src.id in dst.pins:
@@ -187,13 +190,15 @@ class Mesh:
         if self.wifi_back_at is not None and self.clock.t >= self.wifi_back_at:
             A, B = self.d["http://a"], self.d["http://b"]
             self.wifi_back_at, B.off_net = None, False
+            if "new_lease" in self.bad:  # B comes back at another address; the tunnel to the old one is dead
+                B.addrs, self.tunnel_dead = ["10.0.0.42:8193"], True
             self.dial(B, A, None)
 
     # --- the API
     def call(self, base, method, path, body=None, timeout=60):
         self.tick()
         me, body = self.d[base], body or {}
-        if not me.up:
+        if not me.up or (base == "http://b" and self.tunnel_dead):
             return 0, "connection refused", 1.0
         s, v = self.route(me, method, path.split("?")[0], body)
         return s, v, 1.0
@@ -241,7 +246,8 @@ class Mesh:
                 rev = {"seq": len(me.revs), "peer_id": pid, "revoked_by": me.id, "at_utc": self.ts()}
                 self.unpin(me, pid)
                 me.revoked.add(pid)
-                me.revs.append(rev)
+                if "revocation_unrecorded" not in self.bad:
+                    me.revs.append(rev)
                 if "held_before_revoked" not in self.bad:
                     me.held.discard(pid)
                 return 200, rev

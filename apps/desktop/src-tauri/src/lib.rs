@@ -97,37 +97,71 @@ fn daemon_addr() -> SocketAddr {
 
 struct Daemon {
     child: Mutex<Option<CommandChild>>,
-    /// Set by the sidecar event loop when the daemon process has exited.
-    exited: Arc<AtomicBool>,
-    spawned: bool,
+    run: Arc<Run>,
 }
 
-impl Daemon {
-    /// The service on the port is the bundled daemon this app started: spawned, and not exited since. Once it exited
-    /// (crashed, or lost the port to another daemon), whatever serves is not ours (see [`stop_daemon`]).
+/// The bundled daemon this app started, as its sidecar event loop reports it.
+#[derive(Default)]
+struct Run {
+    spawned: bool,
+    /// It printed its listening line for [`daemon_addr`] (see [`is_listening_line`]): it, not another
+    /// daemon, holds the port. Only the child writes to its own stdout, so nothing else can set this.
+    bound: AtomicBool,
+    /// The process has exited.
+    exited: AtomicBool,
+}
+
+impl Run {
+    /// The service on the port is the bundled daemon this app started: it bound the port and has not exited
+    /// since. Until it binds, or once it exited (crashed, or lost the port to another daemon), whatever
+    /// serves is not ours (see [`stop_daemon`]).
     fn ours(&self) -> bool {
-        self.spawned && !self.exited.load(Ordering::SeqCst)
+        self.spawned && self.bound.load(Ordering::SeqCst) && !self.exited.load(Ordering::SeqCst)
     }
+
+    /// [`Run::ours`] once it is known: waits up to `timeout` while the daemon is still starting (neither
+    /// bound nor exited), so a read at app start does not call a daemon still starting "not ours".
+    // ponytail: bounded by the caller's timeout; a first start that downloads the engine for longer reads "not
+    // ours" until the UI reads again (next mount of Devices, Settings or Dashboard).
+    fn ours_once_started(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while self.spawned
+            && !self.bound.load(Ordering::SeqCst)
+            && !self.exited.load(Ordering::SeqCst)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.ours()
+    }
+}
+
+/// `common serve` prints `listening on http://<addr>` once it has bound its port, before it starts
+/// peer networking or anything else (crates/common-cli `serve`). Changing that line makes the app
+/// treat its own daemon as another one: fail closed (no firewall check, Quit kills it on Windows).
+fn is_listening_line(line: &[u8], addr: SocketAddr) -> bool {
+    String::from_utf8_lossy(line).trim_end() == format!("listening on http://{addr}")
 }
 
 /// Ask the daemon to stop, wait for it, and only then kill it. Stopping gracefully unloads the model,
 /// stops the llama.cpp engine and sends the mDNS goodbye, so other devices drop this one at once
 /// instead of listing it as nearby for minutes. A plain `kill()` (SIGKILL / TerminateProcess) did
 /// none of that and, before the job object, left the engine running orphaned.
-fn stop_daemon(child: CommandChild, exited: &AtomicBool) {
+fn stop_daemon(child: CommandChild, run: &Run) {
+    let exited = &run.exited;
     // Our daemon already exited (crashed, or lost the port to another daemon): whatever answers on the port now
     // is not ours, and on unix its pid may have been reused. Ask nothing, kill nothing.
-    // ponytail: a child still starting while another daemon holds the port is not caught; a per-launch token
-    // checked by /api/shutdown (or a pid reported by /health) would close that.
     if exited.load(Ordering::SeqCst) {
         return;
     }
-    // SAFETY: plain kill(2) on the pid of a child this process spawned and has not reaped.
+    // SAFETY: plain kill(2) on the pid of a child this process spawned and has not reaped. The signal reaches
+    // our child whether or not it bound the port yet.
     #[cfg(unix)]
     let asked = unsafe { libc::kill(child.pid() as libc::pid_t, libc::SIGTERM) } == 0;
-    // Windows has no SIGTERM: `POST /api/shutdown` takes the daemon down the same path.
+    // Windows has no SIGTERM: `POST /api/shutdown` takes the daemon down the same path, but only when the port
+    // is our child's (a child still starting while another daemon holds the port is killed instead).
     #[cfg(not(unix))]
-    let asked = request_shutdown(daemon_addr());
+    let asked = ask_to_stop(run.bound.load(Ordering::SeqCst), daemon_addr());
     if asked {
         let deadline = Instant::now() + STOP_TIMEOUT;
         while !exited.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -176,6 +210,13 @@ fn health_ok(addr: SocketAddr) -> bool {
     )
 }
 
+/// [`request_shutdown`] to `addr` only when our daemon bound it (`bound`); before that whatever answers
+/// there is another daemon. Used on Windows only; built everywhere so the tests run on every platform.
+#[cfg_attr(unix, allow(dead_code))]
+fn ask_to_stop(bound: bool, addr: SocketAddr) -> bool {
+    bound && request_shutdown(addr)
+}
+
 /// POST /api/shutdown; true on a 202 (the daemon is shutting down). False on an older daemon
 /// without the route, which the caller then kills. Used on Windows only; built everywhere so the
 /// tests run on every platform.
@@ -220,17 +261,17 @@ fn quit_on_signals(handle: tauri::AppHandle) {
 fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
     DaemonInfo {
         base_url: format!("http://{}", daemon_addr()),
-        spawned: state.spawned,
+        spawned: state.run.spawned,
     }
 }
 
 /// Windows Firewall state for the bundled daemon; `supported: false` elsewhere, `adopted` when the
 /// serving daemon is not the one this app started (or that one exited). Read-only; `Err` when the
-/// rules could not be read.
+/// rules could not be read. Waits while the app's own daemon is still starting.
 #[tauri::command]
 async fn firewall_status(state: tauri::State<'_, Daemon>) -> Result<firewall::Status, String> {
-    let ours = state.ours();
-    tauri::async_runtime::spawn_blocking(move || firewall::status_for(ours))
+    let run = state.run.clone();
+    tauri::async_runtime::spawn_blocking(move || firewall::status_for(run.ours_once_started(HEALTH_TIMEOUT)))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -240,8 +281,8 @@ async fn firewall_status(state: tauri::State<'_, Daemon>) -> Result<firewall::St
 /// once the one it started exited.
 #[tauri::command]
 async fn allow_through_firewall(state: tauri::State<'_, Daemon>) -> Result<(), String> {
-    let ours = state.ours();
-    tauri::async_runtime::spawn_blocking(move || firewall::allow_for(ours))
+    let run = state.run.clone();
+    tauri::async_runtime::spawn_blocking(move || firewall::allow_for(run.ours_once_started(HEALTH_TIMEOUT)))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -256,8 +297,7 @@ pub fn run() {
             quit_on_signals(app.handle().clone());
             let addr = daemon_addr();
             let mut child = None;
-            let mut spawned = false;
-            let exited = Arc::new(AtomicBool::new(false));
+            let mut run = Arc::new(Run::default());
             if health_ok(addr) {
                 eprintln!("common-desktop: daemon already serving on {addr}; not spawning the sidecar");
             } else {
@@ -272,33 +312,40 @@ pub fn run() {
                             #[cfg(windows)]
                             end_with_this_app(c.pid());
                             child = Some(c);
-                            spawned = true;
+                            run = Arc::new(Run {
+                                spawned: true,
+                                ..Run::default()
+                            });
                             let code = Arc::new(AtomicI32::new(i32::MIN));
-                            let (ev_exited, ev_code) = (exited.clone(), code.clone());
+                            let (ev_run, ev_code) = (run.clone(), code.clone());
                             tauri::async_runtime::spawn(async move {
                                 while let Some(ev) = rx.recv().await {
                                     match ev {
                                         CommandEvent::Stdout(l) | CommandEvent::Stderr(l) => {
+                                            if is_listening_line(&l, addr) {
+                                                ev_run.bound.store(true, Ordering::SeqCst);
+                                            }
                                             eprint!("common: {}", String::from_utf8_lossy(&l));
                                         }
                                         CommandEvent::Terminated(p) => {
                                             eprintln!("common-desktop: daemon exited with {:?}", p.code);
                                             ev_code.store(p.code.unwrap_or(-1), Ordering::SeqCst);
-                                            ev_exited.store(true, Ordering::SeqCst);
+                                            ev_run.exited.store(true, Ordering::SeqCst);
                                         }
                                         _ => {}
                                     }
                                 }
                             });
-                            let exited = exited.clone();
+                            let started = run.clone();
                             std::thread::spawn(move || {
                                 let start = Instant::now();
                                 while start.elapsed() < HEALTH_TIMEOUT {
-                                    if health_ok(addr) {
+                                    // A 200 before our daemon bound the port is another daemon's.
+                                    if started.ours() && health_ok(addr) {
                                         eprintln!("common-desktop: daemon healthy on {addr}");
                                         return;
                                     }
-                                    if exited.load(Ordering::SeqCst) {
+                                    if started.exited.load(Ordering::SeqCst) {
                                         // Exit code 2 is a command-line usage error: the bundled daemon
                                         // does not accept the arguments this app passes.
                                         let c = code.load(Ordering::SeqCst);
@@ -322,8 +369,7 @@ pub fn run() {
             }
             app.manage(Daemon {
                 child: Mutex::new(child),
-                exited,
-                spawned,
+                run,
             });
             Ok(())
         })
@@ -335,7 +381,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             let daemon = app.state::<Daemon>();
             if let Some(child) = daemon.child.lock().ok().and_then(|mut c| c.take()) {
-                stop_daemon(child, &daemon.exited);
+                stop_daemon(child, &daemon.run);
             }
         }
     });
@@ -368,20 +414,91 @@ mod tests {
         (addr, t)
     }
 
+    fn run(spawned: bool) -> Arc<Run> {
+        Arc::new(Run {
+            spawned,
+            ..Run::default()
+        })
+    }
+
     /// The finding: the firewall commands read the startup-only `spawned`, so after the app's own
     /// daemon exited (and another took the port) they still checked and added the bundled path's rule.
     #[test]
     fn a_daemon_that_exited_is_no_longer_ours() {
-        let daemon = |spawned| Daemon {
-            child: Mutex::new(None),
-            exited: Arc::new(AtomicBool::new(false)),
-            spawned,
-        };
-        let d = daemon(true);
-        assert!(d.ours());
-        d.exited.store(true, Ordering::SeqCst);
-        assert!(!d.ours());
-        assert!(!daemon(false).ours(), "adopted");
+        let r = run(true);
+        r.bound.store(true, Ordering::SeqCst);
+        assert!(r.ours());
+        r.exited.store(true, Ordering::SeqCst);
+        assert!(!r.ours());
+        assert!(!run(false).ours(), "adopted");
+    }
+
+    /// Open after round 2: the app's daemon still starting while another daemon holds the port counted
+    /// as ours, so the firewall commands checked the bundled program and, on Windows, Quit sent
+    /// `/api/shutdown` to the other daemon. Ours only once our child said it bound the port.
+    #[test]
+    fn a_daemon_still_starting_is_not_ours_until_it_binds_the_port() {
+        let r = run(true);
+        assert!(
+            !r.ours(),
+            "spawned but not bound: whatever answers on the port is not ours yet"
+        );
+        assert!(!r.ours_once_started(Duration::from_millis(100)), "never bound");
+
+        let r = run(true);
+        let later = r.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            later.bound.store(true, Ordering::SeqCst);
+        });
+        assert!(r.ours_once_started(Duration::from_secs(5)), "waits for the bind");
+        t.join().unwrap();
+
+        let r = run(true);
+        let later = r.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            later.exited.store(true, Ordering::SeqCst); // lost the port to the other daemon
+        });
+        let start = Instant::now();
+        assert!(!r.ours_once_started(Duration::from_secs(5)));
+        assert!(start.elapsed() < Duration::from_secs(2), "stops waiting once it exited");
+        t.join().unwrap();
+
+        let start = Instant::now();
+        assert!(!run(false).ours_once_started(Duration::from_secs(5)), "adopted");
+        assert!(start.elapsed() < Duration::from_secs(1), "nothing to wait for");
+    }
+
+    /// Only our child writes to its stdout: its listening line for our address marks the bind.
+    #[test]
+    fn the_listening_line_for_our_address_marks_the_bind() {
+        let addr: SocketAddr = "127.0.0.1:8192".parse().unwrap();
+        assert!(is_listening_line(b"listening on http://127.0.0.1:8192\n", addr));
+        assert!(is_listening_line(b"listening on http://127.0.0.1:8192\r\n", addr));
+        assert!(!is_listening_line(b"listening on http://127.0.0.1:8193\n", addr));
+        assert!(!is_listening_line(
+            b"cannot bind 127.0.0.1:8192: address in use\n",
+            addr
+        ));
+        assert!(!is_listening_line(
+            b"peer id listening on http://127.0.0.1:8192\n",
+            addr
+        ));
+        // The CLI's own line (`serve`, printed right after the bind): a change there fails here instead of
+        // silently making the app's own daemon "not ours".
+        assert!(include_str!("../../../../crates/common-cli/src/main.rs")
+            .contains(r#"println!("listening on http://{addr}");"#));
+    }
+
+    /// Windows Quit: `/api/shutdown` goes to whatever serves the port, so it is sent only when our
+    /// child bound it; otherwise the caller kills the child, which has started nothing yet.
+    #[test]
+    fn quit_asks_the_port_to_stop_only_when_our_daemon_bound_it() {
+        let (addr, req) = answer("202 Accepted");
+        assert!(!ask_to_stop(false, addr), "another daemon's port");
+        assert!(ask_to_stop(true, addr), "the one request goes to our own daemon");
+        assert!(req.join().unwrap().starts_with("POST /api/shutdown "));
     }
 
     /// The Windows quit path: POST /api/shutdown to the loopback daemon; only a 202 counts as

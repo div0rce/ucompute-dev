@@ -26,7 +26,9 @@ firewall consent step is not reached). Steps:
   wifi     B's Wi-Fi drops and reconnects (--wifi-cycle-b, runs detached on B): A loses B, a new connection
            forms and A hears B's record again (that it is freshly signed is not visible through the API: N/A).
            B's address afterwards goes to <out>/b_host (a new lease can move it); the run stops when B does not
-           come back. Run it last among the steps that talk to B.
+           come back. Run it last among the steps that talk to B. When B's API no longer answers here afterwards
+           (a new lease left its tunnel on the old address), this driver does not restore: the runner's restore
+           does, after reopening the tunnel at b_host (run alone: rerun state.py restore once B answers).
   offline  a paired device that is switched off (--offline-peer, pinned on A): one audit line per address,
            not one per redial, and a reason in GET /api/peers.
 --no-mdns (the network drops multicast): the nearby checks are recorded N/A (ok null), never PASS; so is a
@@ -407,6 +409,7 @@ def s_wifi(A, B, ida, idb, neta, netb, a):
         return na("wifi", "--wifi-cycle-b not given")
     c0 = conn(A, idb).get("id")
     d0 = nearby(A, idb) or {}
+    a.cycled = True  # from here B's tunnel may die with B's old address (main's restore checks)
     out = sh(a.wifi_cycle_b)
     t0 = time.monotonic()
     down = wait(lambda: not connected(A, idb), 40)
@@ -486,8 +489,14 @@ def main():
         for name in a.steps.split(","):
             STEPS[name](A, B, ida, idb, neta, netb, a)
     finally:  # also when B did not come back or the run is aborted: names (re-pairing), holds, B's model
-        rc = state("restore", snap)
-        step("restore: both daemons put back as saved (state.py)", rc == 0, exit_code=rc)
+        restore = "restore: both daemons put back as saved (state.py)"
+        if getattr(a, "cycled", False) and call(B, "GET", "/health", timeout=5)[0] != 200:
+            na(restore, f"B's Wi-Fi was cycled and its API no longer answers at {B} (a new lease moves B; the tunnel "
+                        "still points at the old address): left to the runner's restore, which reopens the tunnel at "
+                        f"b_host first; run alone, rerun python3 -I state.py restore {snap} once B answers")
+        else:
+            rc = state("restore", snap)
+            step(restore, rc == 0, exit_code=rc)
         with open(os.path.join(a.out, "results.json"), "w") as f:
             json.dump({"driven": DRIVEN, "a": neta, "b": netb, "steps": RESULTS}, f, indent=2, default=str)
     failed = [r["step"] for r in RESULTS if r["ok"] is False]

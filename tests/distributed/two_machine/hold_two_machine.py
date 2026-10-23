@@ -122,12 +122,19 @@ def held_rejections(base, pid, since):
                                     and (e.get("fields") or {}).get("reason") == "held"]
 
 
-def refused_as_revoked(base, addrs, since):
-    """`base`'s own verdict on a dial from the host of one of `addrs`: refused because the key is revoked. The
-    dialler cannot tell (a refusal before the device proved its key reads as peer_unauthorized): this is the proof."""
-    hosts = {x.rsplit(":", 1)[0] for x in addrs if x}
-    return any(e["kind"] == "peer_rejected" and (e.get("fields") or {}).get("reason") == "peer_revoked"
-               and (e.get("fields") or {}).get("addr", "").rsplit(":", 1)[0] in hosts for e in events(base, since) or [])
+def refused_as_revoked(base, me, pid, net, addrs, since):
+    """`base`'s own verdict on `pid`'s dials since `since`: the dialler cannot tell (a refusal before the device
+    proved its key reads as peer_unauthorized), and an address alone proves little (on one host every daemon shares
+    it). So (1) `base` holds a revocation of `pid`'s key that `base` (`me`) signed, and (2) it refused a revoked key
+    from `pid`'s own endpoint: a known host of `pid` (`addrs`, its dial_addr) at the port `pid` listens on (`net`
+    is `pid`'s GET /api/network; a daemon dials from its listen socket, which no other process there holds).
+    The refusal line names no key: (1) ties the key to `pid`, (2) the socket. Returns both."""
+    signed = any(r.get("peer_id") == pid and r.get("revoked_by") == me for r in peers(base).get("revocations") or [])
+    port = (net.get("listen_addr") or "").rpartition(":")[2]
+    ends = {x.rpartition(":")[0] + ":" + port for x in [*addrs, net.get("dial_addr")] if x and port}
+    refused = any(e["kind"] == "peer_rejected" and (e.get("fields") or {}).get("reason") == "peer_revoked"
+                  and (e.get("fields") or {}).get("addr") in ends for e in events(base, since) or [])
+    return signed, refused
 
 
 def pair_with(show, join):
@@ -212,14 +219,26 @@ def steps(A, B, ida, idb, a, a_serve):
     step(f"held: no reconnection for {a.watch} s and exactly one audit line on A for B's attempts",
          back is None and rej is not None and len(rej) == 1, reconnected_after_s=back,
          held_rejections=None if rej is None else len(rej), b_redialled_during_watch=e1.get("at_utc", "") > e0.get("at_utc", ""))
-    b_rec = peer(B, ida) or {}
-    others = [x for x in (next((d for d in peers(B)["discovered"] if d["id"] == ida), {}).get("addrs") or [])
-              if x != b_rec.get("last_addr")]
+    # B's last_error is its latest failed dial. Each walk dials A's mDNS addresses, then the pinned one (mesh.rs
+    # dial_order; no IPv6 address from an IPv4 endpoint); a walk that went on past the refusal would leave the
+    # failure at a later address as the latest. So only peer_held at an address B's walk has a later one for proves
+    # the refusal ended it; A's own held line shows the refusal was A's (the pinned key's, already proven to B).
+    # ponytail: the order is read after the dials; an mDNS change in between can misplace an address (rare in a watch).
+    b_rec, nearby = peer(B, ida) or {}, next((d for d in peers(B)["discovered"] if d["id"] == ida), None) or {}
+    v4 = not (call(B, "GET", "/api/network")[1].get("listen_addr") or "").startswith("[")
+    order = [x for x in dict.fromkeys([nearby.get("addr"), *(nearby.get("addrs") or []), b_rec.get("last_addr")])
+             if x and not (v4 and x.startswith("["))]
+    at = e1.get("addr")
+    later = order[order.index(at) + 1:] if at in order else []
     name = "held: a proven refusal ends B's dial (no later address replaces peer_held)"
-    if others:
-        step(name, back is None and e1.get("code") == "peer_held", other_addrs=others, b_last_error=e1)
-    else:
+    if len(order) < 2:
         step_na(name, "B knows no address for A but the pinned one (no mDNS record), so nothing follows the refusal")
+    elif e1.get("code") == "peer_held" and not later:
+        step_na(name, f"A refused B at {at}, with no address after it in B's dial order {order} (mDNS candidates, "
+                      "then the pinned one), so nothing followed the refusal that could have replaced it")
+    else:
+        step(name, back is None and e1.get("code") == "peer_held" and bool(rej), dial_order=order,
+             refused_at=at, after_it_in_the_walk=later, b_last_error=e1, a_held_lines=None if rej is None else len(rej))
 
     # 3. a Sharing change restarts A's endpoint but keeps the hold
     t3, puts = utc(), []
@@ -263,10 +282,11 @@ def steps(A, B, ida, idb, a, a_serve):
     t5 = utc()
     s, v, ms = call(A, "POST", f"/api/peers/{idb}/revoke")
     s2, v2, ms2, _ = run(B, ida, 8)
-    as_revoked = refused_as_revoked(A, [rec.get("last_addr"), call(B, "GET", "/api/network")[1].get("dial_addr")], t5)
+    signed, as_revoked = refused_as_revoked(A, ida, idb, call(B, "GET", "/api/network")[1], [rec.get("last_addr")], t5)
     step("revoke while held: A unpins B, B's request to A is refused as revoked", s0 == 200 and held and s == 200
-         and peer(A, idb) is None and s2 == 403 and code(v2) in ("peer_revoked", "peer_unauthorized") and as_revoked,
-         disconnect_status=s0, held=held, revoke_status=s, b_status=s2, b_code=code(v2), a_refused_as_revoked=as_revoked)
+         and peer(A, idb) is None and s2 == 403 and code(v2) in ("peer_revoked", "peer_unauthorized") and signed
+         and as_revoked, disconnect_status=s0, held=held, revoke_status=s, b_status=s2, b_code=code(v2),
+         a_holds_its_revocation_of_b=signed, a_refused_as_revoked=as_revoked)
     s, start, _ = call(A, "POST", "/api/pair/start", {"name": names[1]})
     s3 = call(B, "POST", "/api/pair/join", {"addr": start.get("pair_addr"), "code": start.get("code"),
                                             "name": names[0]})[0] if s == 200 else None

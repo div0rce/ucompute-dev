@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { allowThroughFirewall, firewallStatus, type FirewallStatus } from "../daemon";
 import { network } from "../state/live";
 import { createStore } from "../state/store";
@@ -34,6 +34,7 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null);
   const done = useRef<HTMLParagraphElement>(null);
+  const failedId = useId();
 
   useEffect(() => {
     void refreshFirewall();
@@ -61,6 +62,7 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
   );
 
   async function allow() {
+    if (busy) return;
     setBusy(true);
     setOutcome(null);
     try {
@@ -107,12 +109,14 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
       {publicNote}
       {domainNote}
       <div className="notice-actions">
-        <button type="button" className="btn" disabled={busy} onClick={() => void allow()}>
+        {/* aria-disabled, not disabled: a disabled button loses its focus while Windows asks, so after a cancel or a failure
+            focus would be nowhere. It keeps focus and is described by the outcome, read again when focus comes back. */}
+        <button type="button" className="btn" aria-disabled={busy || undefined} aria-describedby={outcome ? failedId : undefined} onClick={() => void allow()}>
           {busy ? "Waiting for Windows" : "Allow on private networks"}
         </button>
       </div>
       {outcome && (
-        <p role="alert" className="small tone-warn">
+        <p id={failedId} role="alert" className="small tone-warn">
           {outcome.text}
         </p>
       )}

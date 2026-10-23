@@ -61,7 +61,9 @@ class SyntheticMeshDriverTests(unittest.TestCase):
         self.assertIs(steps["audit on B has no prompt text"]["ok"], False)
 
     def test_revocation_needs_a_refusal_as_revoked(self):
-        for bad in ("revoked_reads_lost", "revoked_unaudited"):  # B reads no refusal; A never refused it as revoked
+        # B reads no refusal; A never refused it as revoked; A's only such line came from another daemon on B's
+        # host (another port); A holds no revocation of B's key that it signed
+        for bad in ("revoked_reads_lost", "revoked_unaudited", "revoked_line_from_neighbour", "revocation_unrecorded"):
             steps, _, _, _ = drive("mesh_two_machine.py", Mesh(bad={bad}), "--no-mdns")
             self.assertIs(steps["revocation: B disconnected and refused as revoked"]["ok"], False, bad)
 
@@ -121,23 +123,47 @@ class SyntheticHoldDriverTests(unittest.TestCase):
     def test_revoke_needs_a_refusal_as_revoked(self):
         steps, _, _, _ = drive("hold_two_machine.py", Mesh(bad={"held_before_revoked"}))
         self.assertEqual((steps[REVOKE]["ok"], steps[REVOKE]["b_code"]), (False, "peer_held"))
-        steps, _, _, _ = drive("hold_two_machine.py", Mesh(bad={"revoked_unaudited"}))
-        self.assertEqual((steps[REVOKE]["ok"], steps[REVOKE]["a_refused_as_revoked"]), (False, False))
+        for bad in ("revoked_unaudited", "revoked_line_from_neighbour"):  # none at all; one from another port
+            steps, _, _, _ = drive("hold_two_machine.py", Mesh(bad={bad}))
+            self.assertEqual((steps[REVOKE]["ok"], steps[REVOKE]["a_refused_as_revoked"]), (False, False), bad)
+        steps, _, _, _ = drive("hold_two_machine.py", Mesh(bad={"revocation_unrecorded"}))
+        self.assertEqual((steps[REVOKE]["ok"], steps[REVOKE]["a_holds_its_revocation_of_b"]), (False, False))
+        steps, _, _, _ = drive("hold_two_machine.py", Mesh())
+        self.assertEqual((steps[REVOKE]["ok"], steps[REVOKE]["b_code"]), (True, "peer_unauthorized"))
 
     def test_a_failed_re_pair_stops_the_run(self):
         steps, _, code, _ = drive("hold_two_machine.py", Mesh(bad={"pair_join_fails"}))
         self.assertTrue(str(code).startswith("A revoked B and the re-pair failed"), code)
         self.assertIn(RESTORE, steps)
 
+    @staticmethod
+    def refusal(mdns, pinned="10.0.0.1:8193", bad=(), answers=("10.0.0.1:8193",)):
+        """The proven-refusal step when A's mDNS record lists `mdns`, A answers at `answers` and B has A pinned
+        at `pinned` (B dials the mDNS addresses, then the pinned one)."""
+        mesh = Mesh(nearby=True, bad=bad)
+        A, B = mesh.d["http://a"], mesh.d["http://b"]
+        A.addrs, A.mdns, B.pins[A.id]["last_addr"] = list(answers), mdns, pinned
+        return drive("hold_two_machine.py", mesh)[0][REFUSAL]
+
     def test_a_proven_refusal_ends_the_dial(self):
-        mesh = Mesh(nearby=True)
-        mesh.d["http://a"].ghost = ["10.0.0.11:8193"]  # A shows a second address, which does not answer
-        steps, _, _, _ = drive("hold_two_machine.py", mesh)
-        self.assertIs(steps[REFUSAL]["ok"], True)
-        mesh = Mesh(nearby=True, bad={"refusal_continues"})
-        mesh.d["http://a"].ghost = ["10.0.0.11:8193"]
-        steps, _, _, _ = drive("hold_two_machine.py", mesh)
-        self.assertIs(steps[REFUSAL]["ok"], False)
+        # A's second address does not answer: a walk that went on past the refusal leaves peer_lost there
+        mdns = ["10.0.0.1:8193", "10.0.0.11:8193"]
+        ok = self.refusal(mdns)
+        self.assertEqual((ok["ok"], ok["after_it_in_the_walk"]), (True, ["10.0.0.11:8193"]))
+        self.assertIs(self.refusal(mdns, bad={"refusal_continues"})["ok"], False)
+        self.assertIs(self.refusal(mdns, bad={"held_unaudited"})["ok"], False)  # A never said it refused B
+
+    def test_a_refusal_at_the_last_address_b_dials_proves_nothing(self):
+        # mDNS candidates before the pinned address: the refusal there is the latest failure either way
+        self.assertIsNone(self.refusal(["10.0.0.11:8193", "10.0.0.1:8193"])["ok"])
+        # a walk that went on past the refusal to another address of A reads peer_held there too: no PASS
+        two = {"answers": ("10.0.0.1:8193", "10.0.0.21:8193"), "pinned": "10.0.0.21:8193"}
+        self.assertIs(self.refusal(["10.0.0.1:8193"], **two)["ok"], True)
+        self.assertIsNone(self.refusal(["10.0.0.1:8193"], bad={"refusal_continues"}, **two)["ok"])
+
+    def test_an_address_b_cannot_dial_is_not_a_later_one(self):
+        # B's endpoint is IPv4 (0.0.0.0:8193): it never dials A's IPv6 address, so nothing follows the refusal
+        self.assertIsNone(self.refusal(["10.0.0.1:8193", "[2001:db8::1]:8193"])["ok"])
 
     def test_a_crash_still_restores_and_writes_the_results(self):
         mesh = Mesh()

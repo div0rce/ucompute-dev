@@ -347,7 +347,7 @@ function PrivacyPage() {
               <button type="button" className="btn btn-primary" onClick={() => void apply()} disabled={saving || (needsAck && !ack)} aria-disabled={inert}>
                 {saving ? "Switching" : `Switch to ${MODE_LABEL[selected ?? mode].toLowerCase()}`}
               </button>
-              <button type="button" className="btn" onClick={() => (setPick(null), setAck(false))} disabled={saving}>
+              <button type="button" className="btn" onClick={() => live && (setPick(null), setAck(false))} disabled={saving} aria-disabled={inert}>
                 Cancel
               </button>
             </div>
