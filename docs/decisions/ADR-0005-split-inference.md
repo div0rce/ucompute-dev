@@ -18,7 +18,12 @@ WP-04 asks for static physical pooling: one model's transformer blocks split bet
 | `ggml-rpc-server` defaults to `-H 127.0.0.1` and warns on any other host; it has `-p`, `-t`, `-d`, `-c` and no memory cap | ✅ |
 | It reads `LLAMA_CACHE` | ✅ (strings) |
 | libggml-rpc prints `TCP (RDMA auto-negotiate enabled)`, contains `GGML_RPC_NO_RDMA`, logs `handshake ok: … transport: %s`, and refuses on `RPC server version mismatch` | ✅ (strings) |
-| Protocol v8.0.0; the server takes one client at a time; `--list-devices` opened two sequential connections | ⚠️ (one session, `--list-devices` only) |
+| Protocol v8.0.0; the server serves each accepted connection to completion, one at a time (accept loop, `ggml-rpc.cpp` 2782-2790 at b11609) | ✅ (source, lab INTEGRATION §8, d741ef8) |
+| Per-connection buffer isolation: each accepted connection gets a fresh `rpc_server` (2399-2401); `deserialize_tensor` nulls any buffer outside that connection's set (1641); the destructor frees all of the connection's buffers on close (2393), so a tunnel drop frees R's weights | ✅ (source, lab) |
+| llama-server opens about 11-12 sequential TCP connections per RPC server per load-and-generate (plus 2 for `--list-devices`); only one is open at a time | ✅ (loopback measurement, Metal both stages, lab Addendum 9) |
+| Each `SET_TENSOR` arrives whole in a `std::vector` (2565-2573), so R transiently holds its largest tensor twice (macOS: the freed buffer stayed resident, MALLOC_LARGE +48 MB for a 47.81 MiB output tensor); R's idle baseline is about 37 MiB | ✅ macOS / `unverified` Linux glibc |
+| Config P per decode token: head to R three activations (embd, inp_mixed_embd, node_1) plus a 2·n_kv B f16 mask plus about 2.9 KB of descriptors and commands; R to head one activation plus 8 B; exactly one synchronous round trip per token; prefill: 3·p activations plus a 2·n_kv·p B mask up | ✅ (loopback, lab) |
+| Same backend (Metal on both stages, loopback): greedy tokens equal local for 64/64 in every split configuration; the handshake logs `transport : TCP (RDMA auto-negotiate enabled)` | ✅ SINGLE-HOST (lab) |
 | An endpoint appears as device `RPC0`, in `--rpc` order | ⚠️ (one session); re-confirmed in R0 |
 | `--tensor-split` follows `--device` order; Common passes `--fit off -ngl 999` | ✅ (lab Addendum 5) |
 | The input embedding stays on the head CPU; the output layer goes with layer `n_layer` | ⚠️ (llama.cpp source via Context7, lab) |
@@ -51,7 +56,7 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 - Linux only in this build.
 - One `ggml-rpc-server` per session: `-H 127.0.0.1 -p <ephemeral> -t <cores−2>`, no `-c`, no `-d`.
 - Environment cleared and scrubbed, with `LLAMA_CACHE` removed and `GGML_RPC_NO_RDMA=1`, `MALLOC_ARENA_MAX=2` set.
-- `pre_exec`: `PR_SET_PDEATHSIG(SIGKILL)` plus a `getppid` re-check, `RLIMIT_AS` = granted + measured baseline, nice 10.
+- `pre_exec`: `PR_SET_PDEATHSIG(SIGKILL)` plus a `getppid` re-check, `RLIMIT_AS` = granted + the largest tensor of R's range (each `SET_TENSOR` is held twice transiently; in config C that is the output layer) + measured baseline (about 37 MiB on macOS) + thread stacks and arenas, nice 10.
 - It is spawned from a runtime worker task, never from a short-lived thread.
 - No byte is forwarded until the `127.0.0.1:pR` listener is proved to belong to the child pid (`/proc/<pid>/fd` against `/proc/net/tcp`).
 - At every tunnel open and every second, every established client of pR must be one of the daemon's own sockets; otherwise the session is torn down.
@@ -84,10 +89,10 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 | Limit | Default |
 |---|---|
 | Sessions | 1 per R |
-| Tunnels | 8 per session |
+| Tunnels | at most 8 open at once per session (a concurrent cap: llama-server opens about 12 sequential connections per load, so a per-session count would fail every load); the socket-owner check (lsof, 50-100 ms on macOS) adds about 0.5-1.2 s per load there |
 | Bytes | `2 × est_bytes + 1 GiB` per direction per session, recalibrated after R0 and P1 |
 | Memory | `est_bytes × 1.1 ≤ available now − 2 GiB` at admission; `RLIMIT_AS` thereafter |
-| Time | TTL 30 min; idle close 10 s after the last tunnel; silence watchdog `T_rpc` (pre-registered from R0/S1) while a request is in flight |
+| Time | TTL 30 min; idle close 10 s after the last tunnel; silence watchdog `T_rpc` while a request is in flight: H's only wait in a step is one `GET_TENSOR` reply per remote stage and the longest silence is R's prefill of its range, so `T_rpc` must exceed R's prefill time for the longest admitted prompt (bounded from the calibrated prefill rate; pre-registered from R0/S1) |
 | Rate | the existing per-peer `bytes_per_second` (unlimited by default) |
 
 ### D7 Failure semantics
@@ -119,7 +124,7 @@ This deviates from the ledger's `crates/common-distributed`. `common-network` al
 
 ### D10 Evidence and claims
 - Two daemons on one host are SINGLE-HOST and never satisfy F-03-01, F-03-02 or Gate D.
-- F-03-03 stays open (B-016). RPC carriage bytes per token are reported as a ratio to `hidden × 4`.
+- F-03-03 stays open (B-016). RPC carriage bytes per token are reported as a ratio to `hidden × 4` (config P measures about 3.9 up and 1 down for qwen2.5-0.5B, lab; config C also returns vocab × 4 B per token, 608 KB for qwen2.5).
 - F-03-10 is capped at `IMPLEMENTED_UNVERIFIED` while F-08-04 is `NOT_STARTED`.
 - F-03-04 needs the same backend. A Metal/CPU or arm64/x86 run is reported as measured and never relabelled.
 - Evidence says "one model split across two devices", not "larger model", unless the model does not fit on either host. There is no speedup claim.
