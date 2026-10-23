@@ -131,6 +131,7 @@ This deviates from the ledger's `crates/common-distributed`. `common-network` al
 - F-03-03 stays open (B-016). RPC carriage bytes per token are reported as a ratio to `hidden × 4` (config P measures about 3.9 up and 1 down for qwen2.5-0.5B, lab; config C also returns vocab × 4 B per token, 608 KB for qwen2.5).
 - F-03-10 is capped at `IMPLEMENTED_UNVERIFIED` while F-08-04 is `NOT_STARTED`.
 - F-03-04 needs the same backend. A Metal/CPU or arm64/x86 run is reported as measured and never relabelled.
+- Expected on the first pair (this Mac's Metal head, sentinel's x86 CPU stage): greedy tokens diverge from a Metal-only reference within a few tokens (lab REPORT Addendum 11, SINGLE-HOST: a CPU stage diverged from Metal within 1-10 tokens, and so did whole-model CPU execution, while Metal+Metal splits matched local 64/64). That pair's correctness evidence is therefore closeness (top-k agreement and per-position logprob differences, through C7's `n_probs` passthrough: llama-server's `completion_probabilities` / OpenAI `logprobs.content`, b11609 `server-task.cpp` 256-295, 1060), not token identity; identity is claimed only for a same-backend, same-ISA pair.
 - Evidence says "one model split across two devices", not "larger model", unless the model does not fit on either host. There is no speedup claim.
 
 ## 4. Alternatives considered
