@@ -61,6 +61,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 - **Does not claim:** any split capability.
 
 ### C2. `runtime: typed split launch, placement proved from the log`
+- **Source to port (lab, 2026-10-23):** the `--device` / `--tensor-split` mapping comes from ucompute-core-lab `src/llamacpp.rs` at 1914372 or later, not the earlier 4-test version: it formats split weights with Rust's shortest round-trip decimal (`{w}`; `{:.9}` did not round-trip f32 values below about 0.0156: `split_text_round_trips_small_weights`) and refuses all-zero weights instead of treating them as an even split (b11609 then splits by free memory, `llama-model.cpp:1619`: `all_zero_weights_are_not_an_even_split`); 7 unit tests including the 20,000-partition round trip; Apache-2.0 like this repository. The engine's own `-lv 5` per-layer log confirmed the mapping on real runs (lab rpc-dataflow run 4).
 - **Files:**
   - `crates/common-runtime/src/types.rs`:
     - `LoadRequest.split: Option<Split { rpc_ports: Vec<u16>, devices: Vec<String>, tensor_split: Vec<f32>, n_gpu_layers: u32, no_mmap: bool }>`;
