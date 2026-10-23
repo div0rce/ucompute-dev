@@ -373,3 +373,23 @@ A security review of the round-1 transport and hold changes confirmed 7 findings
 - Open after round 3 (all LOW): `apply_peer_revocation` releases a hold on the connection's Node without the `net` lock, so a peer's revocation of a held device applied on the outgoing Node during a Sharing restart can leave the new Node holding a device no longer paired (it starts held when paired again, until Connect; fails closed); `peer_disconnect` checks `paired()` and then holds, not atomically. `held_conns` keeps a strong connection handle, so a dial cancelled mid-exchange (an HTTP client gone) leaves that connection open until the holder closes it (about 10 s if honest; a malicious paired holder can keep it until the Node shuts down; no work is routed over it). No test checks that a held minor-0 redial is audited once as `held` (mutant M4, dropping that arm in `serve_incoming`, survives the whole `peer_transport` binary); no test pins `CLOSE_HELD`'s wire value 0x4844, which deployed builds rely on; the `control.proto` comment "A minor-0 peer gets CLOSE_HELD at once" leaves out that the holder first sends its Hello and verifies the peer's Capabilities. `health::supervise` still treats `peer_unauthorized` as final (only tests call it), and a forged non-refusal close (`protocol_incompatible`) still counts as proven (diagnostics only). The connector side of the held exchange has no store-change test, and at the 10 s exchange timeout no final store check runs.
 - Not run: any of this on two machines; the round-2 SINGLE-HOST shakedown was not repeated with the round-3 code.
 - Label: unit and SINGLE-HOST only.
+
+## 2026-10-23 — Per-finding verification of the three fix rounds and SINGLE-HOST shakedown with the final binary
+
+Read-only verifier agents, one per finding set, against the committed tree (3df9438, 75a0a89, 18c4cf3, 3a8f0d7):
+round 1 cross-cutting review, 37 of 37 resolved; round 2 desktop regression review, 18 of 18 resolved; round 3
+mesh security review, 7 of 7 resolved. The round 2 driver set (44 findings, overlapping) was verified by the round 2
+checker: 42 resolved, 2 partially (the proven-refusal hold step can pass without proof when mDNS addresses exist;
+the CommonTestWifi script is not in the repo). The open items each verifier listed are those in the round entries
+above. All of it is unit, synthetic or SINGLE-HOST evidence; nothing physical is re-certified.
+
+**SINGLE-HOST shakedown** (one Mac, four daemons on loopback; never two-machine evidence): `cargo build -p common-cli
+--bin common`, then `BIN=target/debug/common OUT=<dir> bash sh-hold.sh` (A/B paired, C and D for the cross-hold step,
+C also the discovery stranger): discovery ALL PASS (5 N/A), hold including revocations across a hold ALL PASS (1 N/A),
+mesh ALL PASS (2 N/A): 51 PASS, 8 N/A, 0 FAIL. The Mac was on battery (8% to 7%) and dark-woke and slept repeatedly
+during the run (pmset log); the verdicts stand, the timings count awake time only.
+
+**Undetermined:** `peer_flood_throttled_through_daemon_single_host` (common-api tests/mesh) failed in the full run
+(local p95 ×1.816) and alone ×1.202 and ×1.253, passed alone ×1.136, against a 1.2 bound, at load average 2-3.8 on the
+8 GB M2. Not determined as environmental yet: pending an alternating A/B run of the same test at 95592b0 (before the fix
+rounds) and at 3a8f0d7 under the same conditions, on mains power.
