@@ -935,6 +935,8 @@ All the states are real:
 4. `POST …/connect` releases the hold.
 5. A networking restart or service restart also clears it. The UI tooltip says so.
 
+**As built, after the 2026-10-22 review fixes** (`docs/evidence/desktop-ui2-2026-10-22.md`): unpair and revoke also end the hold. A settings change that keeps networking on (Sharing) keeps it; turning networking off and on, or a service restart, still ends it, which is what the tooltip says ("Until you connect again, turn networking off and on, or the service restarts"). A hold stops work and connections but not revocations (ADR-0003 §9.9): from protocol minor 1, each dial from the held device carries the revocation exchange both ways before the `CLOSE_HELD`, so delivery waits for that device's next redial (backoff at most 300 s). Known limit: two devices that hold each other exchange nothing until one connects.
+
 **Why:** the owner directive lists Disconnect, and there is no honest substitute. DELETE unpairs, and turning networking off disconnects everything. Without the inbound refusal the other device would simply redial, and the button would lie; without `peer_held` the other device would show a false protocol or firewall error.
 
 **Test (SINGLE-HOST):**
@@ -1263,7 +1265,7 @@ Every removed or renamed case is listed in its commit message with its replaceme
 
 ## 7. Open owner decisions (the plan works with either answer)
 
-1. **Visible brand.** The plan shows "UCompute" in the rail and window title (D-018: public name in use, clearance not claimed). `productName` and `identifier` in `tauri.conf.json`, which affect bundle and installer names and data paths, stay "Common" unless the owner approves a change. Until then the macOS app menu (built by `Menu.default()` from `productName`), the Dock and the installer say "Common" while the window and rail say "UCompute"; this mismatch is known and accepted.
+1. **Visible brand.** Decided 2026-10-22 (D-021): UCompute is the product's name and Common its former name, so the rail and window title show "UCompute" (clearance not claimed). `productName` and `identifier` in `tauri.conf.json`, which affect bundle and installer names and data paths, stay "Common" for now: D-021 keeps code identifiers unchanged until a separate rename after physical acceptance. Until then the macOS app menu (built by `Menu.default()` from `productName`), the Dock and the installer say "Common" while the window and rail say "UCompute"; this mismatch is known and accepted.
 2. **N2 peer status broadcast.** It would enable a true peer Busy state, live peer free memory and the "Loaded there" field, but discloses the loaded model to every paired device.
 3. **E5 hold persistence and reach.** The plan holds in memory until Connect or a restart, and the hold also refuses the other device's dials (it reads "Disconnected by <name>"). Persisting holds across restarts would need a `peers.json` field.
 

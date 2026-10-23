@@ -2,6 +2,31 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-22 (night) — Claude Code — fix rounds 2 and 3: desktop, two-machine drivers, mesh security (unit, synthetic, SINGLE-HOST)
+
+- Round 2 (18 desktop and 44 driver findings, all fixed with tests; checkers: desktop 18/18 resolved, drivers 42 resolved and 2 partly): the firewall read throws non-not-found PowerShell errors, an exited own daemon counts as adopted, failed reads retried within 5 s, "Loading…" before a busy service's first read, privacy not known on a failed read, status bar named groups and other accessibility fixes, "not refreshed" live values, Chat copy; drivers that could pass without proving their claim fixed, N/A for unmet preconditions, exit codes 3/1, `state.py` save and restore in every driver, the runner's restore on exit, the cross-hold step and `CROSS_HOLD=1`, no 19222 forward. Results: desktop `pnpm test` 33 files 443 passed, desktop crate 10 passed, clippy (macOS and windows-gnu) clean, 20 mutants killed; driver tests 55 OK (synthetic), runner flow PASS, 58 mutants killed; SINGLE-HOST shakedown run 2 ALL PASS (discovery 5 N/A, hold with cross-hold 1 N/A, mesh 2 N/A).
+- Round 3 (7 security findings, 1 high, all fixed with tests; checkers 7/7 resolved): a refusal is the device's own only after its Hello was read (a forged Initial close can no longer end a dial or read as revoked or held); revocation fan-out state only for stored records; the held exchange follows the store and closes on revoke or unpair; a peer's revocation ends a hold; holds under the `net` lock. Results: fmt and clippy (macOS and windows-gnu) clean; common-network lib 57, peer_transport 25 (+1 ignored), invariants 2, pairing 8, remote_single_host 11; common-api lib 53, mesh 33, api 16, jobs 2, ui_fixtures 5; common-cli mesh_single_host 3, cli 13 (3 tests updated to the new rule after a first run failed on it).
+- Documents: VERIFICATION round entries with the exact commands; ADR-0003 §9.3, §9.9, §9.12 and §9.15; THREAT_MODEL M3-03, M3-17 and the firewall row; `docs/api/README.md` (proven and unproven refusals, `peer_held` on connect); the UI 2.0 evidence (round 2 and 3 changes, open items); `docs/environment/windows-test-host.md` (runner flags, tunnels, `state.py`, the hold driver and cross-hold, step-name changes, the UIA dump and the NVDA run with its keystroke caveat); both READMEs and AGENTS. D-021 naming: UCompute is the product's name, Common its former name, code identifiers stay `common` (AGENTS, README, spec §26.1, ADR-0004, the UI 2.0 plan, the desktop README).
+- Counts: no ledger status changed (`validate_registry.py`: VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0, NOT_STARTED 106; 153 rows). No fix of rounds 1-3 has run on two machines or is in a packaged build.
+- Open: round 2 (PowerShell read not run on Windows; port-8192 startup race; focus after a cancelled or failed Allow; NVDA or UIA checks of the status bar groups and the Allow outcome; the hold driver's proven-refusal step can pass vacuously; cross-hold only SINGLE-HOST; `CommonTestWifi` not in the repo and a restore FAIL likely after a DHCP change; D1 freshness N/A; `windows-uia-dump.ps1` and `windows-nvda-run.ps1` never run); round 3 (all LOW: off-lock hold release during a Sharing restart, a strong held-connection handle after a cancelled dial, untested held minor-0 audit and `CLOSE_HELD` wire value, the `control.proto` minor-0 comment, `health::supervise` final on `peer_unauthorized`). Details: `docs/VERIFICATION.md`. Against the laptop's 593d4ea app (minor 0) the hold driver's `peer_held` steps cannot pass: rebuild the installer first.
+
+Next:
+    commit rounds 1-3; caffeinate -i env COMMON_MDNS=0 COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --no-fail-fast; (cd apps/desktop && caffeinate -i pnpm test --maxWorkers=2)
+    repeat the SINGLE-HOST shakedown with the round-3 binary (discovery, hold with --c/--d, mesh)
+    rebuild the macOS app and the Windows NSIS installer from that commit, then WIN_HOST=<laptop> OUT=<dir> [NO_MDNS=1] [CROSS_HOLD=1] tests/distributed/two_machine/run_mac_windows.sh
+    on the laptop: scripts\windows-uia-dump.ps1 and scripts\windows-nvda-run.ps1 from a scheduled task while it is unattended
+
+## 2026-10-22 (evening) — Claude Code — cross-cutting review of af3e37c..245fd14 and its fixes (unit + SINGLE-HOST)
+
+- Reviewed: everything committed since af3e37c; 37 findings confirmed by skeptics (2 high: a Sharing change silently ended every Disconnect hold). Fixed with tests in the working tree after 95592b0 (some in 95592b0 itself): the hold survives Sharing changes; revocations cross a hold (protocol minor 1: the holder answers the held device's Capabilities with `peer_held`, the two exchange revocations, then `CLOSE_HELD`); a refusal only the pinned key's holder can send ends a dial; no IPv6 candidates from an IPv4 endpoint; peer `finish_reason` capped at 32 characters; desktop inspectors, privacy mode and never-read stores honest about staleness; chat sends a paired device only the messages exchanged with it; the Windows firewall rule read through PowerShell, adopted daemons not checked, domain networks named, Allow replacing only this program's rule; drivers labelled as daemon API runs, N/A never PASS, audit checks by marker; sync keep-list from HEAD's tree.
+- Documents corrected: the UI 2.0 evidence (what is done, hold compatibility), the eduroam evidence (raw output not saved; exact commands; daemon API run versus manual UI steps), the 2026-10-21 evidence (labels replaced by plain names; the re-pair PASS is not a pass; audit counts recounted from the raw log: the driver's "0 lines in 164 s" was really 1 redial line plus 1 from its own dead-hint check), `docs/api/README.md` and both READMEs (routes, fields and error codes since af3e37c; the UI 2.0 app), VERIFICATION entries for the packaged app, the browser round, eduroam and the firewall step, AGENTS and B-002 (three machines, next steps), the sync docs (exactly what is deleted), commands that now run as written.
+- Verified here: offline driver tests 9 passed, sync keep-list PASS (synthetic). No ledger status changed. No fix has run on two machines; no packaged build contains them yet.
+
+Next:
+    commit the fixes; COMMON_MDNS=0 COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast; (cd apps/desktop && pnpm test --maxWorkers=2)
+    rebuild the macOS app and the Windows NSIS installer from that commit; run scripts\windows-sync-clean.ps1 and scripts\windows-keep-awake.ps1 on the laptop
+    then the daemon API runs and the manual UI steps listed in the afternoon entry below
+
 ## 2026-10-22 (afternoon) — Claude Code — UI 2.0 packaged on macOS, browser checks, signal timing, eduroam connect-at-address
 
 - Verified: Desktop UI 2.0 packaged macOS app ALL PASS (15 checks) and installed (`docs/evidence/desktop-ui2-2026-10-22.md`); browser accessibility with colour contrast 0 violations at 1024×700 and 720×480 after 11 fixes, keyboard flows clean (SINGLE-HOST); jobs report `connecting` for requests to paired devices; the whole Windows desktop crate type-checks and passes clippy for x86_64-pc-windows-gnu.
@@ -13,8 +38,10 @@ Newest first. Every entry: date, agent, what changed, counts, evidence, next com
 
 Next:
     finish the Windows NSIS build (scheduled task CommonTestBuild), verify it with apps/desktop/scripts/verify_windows_app.ps1, install it, then
-    WIN_HOST=10.75.120.9 OUT=<dir> NO_MDNS=1 tests/distributed/two_machine/run_mac_windows.sh
-    OUT=<dir> tests/distributed/two_machine/run_mac_mac.sh when Kyle's Mac is awake
+    WIN_HOST=10.75.120.9 OUT=<dir> NO_MDNS=1 tests/distributed/two_machine/run_mac_windows.sh   # daemon API run, not an app UI run
+    OUT=<dir> tests/distributed/two_machine/run_mac_mac.sh when Kyle's Mac is awake            # daemon API run too
+    by hand in the apps, each with its own evidence: the Windows firewall consent step, pairing started in each app,
+    a wrong code typed by hand, the Mac-side group and run steps
 
 ## 2026-10-22 — Claude Code — Desktop UI 2.0 implemented (unit + SINGLE-HOST); capability snapshot draft; publication readiness
 

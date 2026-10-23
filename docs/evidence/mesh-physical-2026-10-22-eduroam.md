@@ -1,6 +1,6 @@
 # Mac and Windows laptop on eduroam: connect at address and remote run (2026-10-22)
 
-**Two-machine evidence.** This Mac and the Windows laptop on the Rutgers eduroam network, which drops multicast between clients, so mDNS discovery cannot work there (`docs/evidence/m3-two-machine-2026-10-18.md`). This is the case the connect-at-address fallback exists for (D3, requirement 5).
+**Two-machine evidence.** This Mac and the Windows laptop on the Rutgers eduroam network, which drops multicast between clients, so mDNS discovery cannot work there (`docs/evidence/m3-two-machine-2026-10-18.md`). This is the case the connect-at-address fallback (`POST /api/peers/{id}/connect` with an address, added in 6ab9f8b) exists for.
 
 | | Mac | Windows laptop |
 |---|---|---|
@@ -15,7 +15,47 @@ The laptop's SSH host key at the new address was compared with the one already k
 | `POST /api/peers/<laptop>/connect {"addr":"10.75.120.9:8193"}` on the Mac | **200 in 0.166 s**, connected; the pinned address became `10.75.120.9:8193` only after the laptop presented the key pinned at pairing (the transport's pinned-key check; an address is a hint) |
 | Remote run, Mac → laptop, `stories15M-q4_0`, 32 tokens, temperature 0 | **golden completion**, `target: peer:1a54602a…`; first token 2.5 s (the laptop loaded the model on demand), 509 tok/s decode on the laptop (fixture: a path check, not performance); the Mac's new jobs list shows the request `done` with the peer target and 32 tokens |
 
-Not covered here (follows in the acceptance run with the new Windows build): pairing in both directions, the Windows firewall consent step, revocation, privacy, disconnect/hold, quit/crash cleanup, network change, Windows UI.
+### How each number above was produced (raw output not saved)
+
+The raw API responses of this run (20:48-20:50 UTC) were not saved: no raw log, results file or console capture exists. The numbers above are the summary lines the commands printed, copied from the session transcript. The commands ran on the Mac against its installed app's API, exactly as below except that the laptop's 64-hex peer id is shortened here (`HP=1a54602a…`):
+
+```sh
+# host key at the new address (before trusting it): both print SHA256:Tpf9ki…
+ssh-keygen -F jess-hp.local -l
+ssh-keyscan -T 10 -t ed25519 10.75.120.9 > hp-ip.key; ssh-keygen -l -f hp-ip.key
+
+# before, connect at address, after (20:50:18 UTC)
+HP=1a54602a…; curl -s 127.0.0.1:8192/api/network | python3 -c "import json,sys; d=json.load(sys.stdin); print({k:d.get(k) for k in ['device_name','dial_addr','enabled','mdns']})"; curl -s 127.0.0.1:8192/api/peers | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+for p in d['peers']: print('PEER', p['name'], p['short_label'], 'connected=',p['connected'], p.get('health'), 'last_addr=',p.get('last_addr'), 'err=',(p.get('last_error') or {}).get('message'))
+print('nearby:', len(d['discovered']))"; echo "--- connect at address"; curl -s -m 30 -X POST 127.0.0.1:8192/api/peers/$HP/connect -H 'Content-Type: application/json' -d '{"addr":"10.75.120.9:8193"}' -w '\nHTTP %{http_code} in %{time_total}s\n' | python3 -c "
+import sys,json; raw=sys.stdin.read(); body,_,tail=raw.rpartition('\nHTTP'); d=json.loads(body); print({k:d.get(k) for k in ['name','last_addr','last_seen_utc']} if 'error' not in d else d['error']); print('HTTP'+tail.strip())"; curl -s 127.0.0.1:8192/api/peers | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+for p in d['peers']:
+  if p['short_label'].startswith('1a54'): print('after:', p['connected'], p.get('health'), p.get('last_addr'), (p.get('connection') or {}).get('remote_addr'))"
+
+# remote run and the jobs list (20:50:32 UTC)
+HP=1a54602a…; curl -s -m 120 -X POST 127.0.0.1:8192/v1/completions -H 'Content-Type: application/json' -d "{\"model\":\"stories15M-q4_0\",\"prompt\":\"Once upon a time, a little rabbit\",\"max_tokens\":32,\"temperature\":0,\"target\":\"peer:$HP\"}" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+if 'error' in d: print('ERROR', d['error'])
+else:
+  t=d.get('timings') or {}; print('target=',d.get('target'),'| golden=', d['choices'][0]['text']==' named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big', '| device=',t.get('device'),'| ttft_ms=',round(t.get('time_to_first_token_ms') or 0),'| tok/s=',round(t.get('decode_tokens_per_second') or 0,1))"; curl -s 127.0.0.1:8192/api/jobs | python3 -c "import json,sys; d=json.load(sys.stdin); r=(d['recent'] or [{}])[0]; print('job:', {k:r.get(k) for k in ['state','target','model_id','completion_tokens','duration_ms']})"
+```
+
+What they printed, number by number:
+- Before: the laptop's row `connected= False disconnected last_addr= 172.20.10.6:8193 err= no answer from 172.20.10.6:8193 within 4 s`, and `nearby: 0`. The Mac's network status: `enabled: True, mdns: True, dial_addr 10.75.79.236:8193`. The laptop's row was still named "This Mac" here: the name the caf1497 build gave itself at the 2026-10-19 pairing.
+- Connect: `HTTP200 in 0.165779s` (curl's `time_total`) and a record with `last_addr 10.75.120.9:8193`; after: `True connected 10.75.120.9:8193 10.75.120.9:8193` (connected, health, `last_addr`, `connection.remote_addr`).
+- Remote run: `golden= True` is the comparison of `choices[0].text` with the fixture's known 32-token continuation in the command; `ttft_ms= 2535` and `tok/s= 508.9` are the response's `timings.time_to_first_token_ms` and `timings.decode_tokens_per_second`; `device= None` (not reported for a request run on another device).
+- Jobs: `recent[0]` was `state: done`, `target: peer:1a54602a…`, `model_id: stories15M-q4_0`, `completion_tokens: 32`, `duration_ms: 2540`.
+
+### Not covered by this run
+
+Pairing in both directions, revocation, privacy, disconnect/hold, quit/crash cleanup and network change are not covered here. The next run, `tests/distributed/two_machine/run_mac_windows.sh`, is a **daemon API run, not an app UI run**: it pairs and checks through the two daemons' HTTP APIs (its drivers print "daemon API run (not app UI)" first and store it as `driven` in `results.json`), so it is never evidence for a step in an app's window. These app UI steps each need their own evidence, done by hand in the apps' windows with no API or DevTools substitute:
+1. The Windows firewall consent step: done (next section).
+2. Pairing started in each app: started in the Windows app, done (next section); started in the Mac app (UI 2.0), open.
+3. A wrong pairing code typed by hand: open.
+4. The Mac-side group and run steps (a group that allows prompts, then a run on the laptop from the Mac app's Chat): open.
+5. The Windows app's own checks (plan §5.5 step 5: screenshots, keyboard, NVDA): open.
 
 ## Windows firewall consent step and pairing started on Windows (2026-10-22, 21:28-21:29 UTC)
 

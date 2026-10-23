@@ -17,16 +17,16 @@ The full Rust suite on B (quiet, load 1.1): `COMMON_HOME=$PWD/.common COMMON_REQ
 
 | Check | Result |
 |---|---|
-| Each daemon reports its own host name; no "This Mac" (E1) | PASS: "mous", "Kyle’s MacBook Pro"; dial addresses 192.168.1.176:8193 and 192.168.1.115:8193 |
-| Each side sees the other with 1-2 routable addresses, best first (D2) | PASS both ways (one address each on this network) |
-| "Last seen" advances while connected (E5) | PASS: 22:55:25Z → 22:56:25Z |
-| Connect for an unpaired id is refused before any packet (requirement 8) | PASS: 403 in 9 ms, no audit line on B |
+| Each daemon reports its own host name as its device name, not "This Mac" | PASS: "mous", "Kyle’s MacBook Pro"; dial addresses 192.168.1.176:8193 and 192.168.1.115:8193 |
+| Each side sees the other with 1-2 routable addresses, best first (two dial candidates) | PASS both ways (one address each on this network) |
+| "Last seen" advances while connected | PASS: 22:55:25Z → 22:56:25Z |
+| Connect for an unpaired id is refused before any packet | PASS: 403 in 9 ms, no audit line on B |
 | Connect at a hint while already connected | PASS but weak: returned the open connection in < 1 ms without dialling; replaced by the dead-hint check below |
 | No peer added on either side by manual connects | PASS |
-| An unreachable paired device (the Windows laptop, not on this network) | PASS: `last_error` peer_lost "no answer … within 4 s" with a firewall hint; **0 audit lines in 150 s** (the 5f0c580 build wrote one per ~35 s: 567 lines for one device) |
-| Graceful quit of B (E6) | PASS: A shows B disconnected after 0.26 s; B leaves A's nearby list after **1.04 s** (goodbye); B's daemon and engine gone after 0.54 s; A shows "no answer from 192.168.1.115:8193 within 4 s" |
-| Connect at a dead hint while B is down (D3, requirement 8) | PASS: 502 peer_lost after 8.0 s (hint, then pinned address), pinned address unchanged |
-| One audit line while B is away, not one per redial (E4) | PASS: 0 lines in 164 s |
+| An unreachable paired device (the Windows laptop, not on this network) | PASS: `last_error` peer_lost "no answer … within 4 s" with a firewall hint; **0 audit lines in 150 s** (the 5f0c580 build wrote one per ~35 s: 567 lines for one device). Recounted from the raw log (see below): A wrote no audit event at all between 22:57:37 and 23:00:07 |
+| Graceful quit of B (mDNS goodbye on quit) | PASS: A shows B disconnected after 0.26 s; B leaves A's nearby list after **1.04 s** (goodbye); B's daemon and engine gone after 0.54 s; A shows "no answer from 192.168.1.115:8193 within 4 s" |
+| Connect at a dead address hint while B is down (an address is only a hint) | PASS: 502 peer_lost after 8.0 s (hint, then pinned address), pinned address unchanged |
+| One audit line while B is away, not one per redial | PASS on recount, not as printed. The driver printed 0 lines in 164 s, but that count was wrong (see below). The raw log holds 2 `peer_rejected` lines for B in that window: one from the background redial of the pinned address at 23:00:12 and one from the dead-hint connect check above at 23:00:17 (address 192.168.1.1:8193, the driver's dead hint). After that, nothing for the remaining ~150 s, so the redials wrote one line, not one per redial |
 | Crash of B: cached record never shown as connected | PASS, but B had already been down (see invalid) |
 | Pairing, A shows the code | **FAIL (test setup)**: 409, a pairing window from the driver's first, aborted run was still open on A; there is no route to cancel a pairing window early (gap) |
 | Pairing, B shows the code, A joins | **FAIL, cause not yet established**: "nothing answered at 192.168.1.115:61578" (B's random pairing port), with the new firewall hint. Candidates: the macOS application firewall on B blocking the new, differently signed build, or B already going to sleep. To be repeated with B awake and its firewall state read |
@@ -35,6 +35,12 @@ The full Rust suite on B (quiet, load 1.1): `COMMON_HOME=$PWD/.common COMMON_REQ
 
 Re-pairing ran on the existing pair: both sides stayed connected (0.02 s) and kept their earlier names ("Kyle", "Mous"), because the 409 and the failed join pinned nothing new.
 
+`run2-console.txt` and `run2-results.json` record the step "pair: connected again after re-pairing, named by host name" as PASS. It is not a pass: both pairings failed, so nothing was re-paired, and the names it recorded are the old ones, not the device names ("mous", "Kyle’s MacBook Pro"). The fixed driver (95592b0) records such a step as N/A (`ok: null`) and checks the names against the other side's `device_name`.
+
+**Audit counts in these runs.** The driver of this run counted audit lines by reading `GET /api/audit?n=5000` before and after a step. The API returns at most 1000 events, and A's trail held more than that (each read returned exactly 1000), so each new line pushed an old one out and a before/after count of one device's lines could stay the same while new lines were written: every "0 lines" the driver printed for A is unproven as printed. The two rows above were recounted from the events' timestamps in `run2-raw.jsonl.gz`; so was the crash step's "0 lines in 212 s", which holds (A wrote no event at all from 23:00:17 to its last read at 23:09:39). B's trail held 51 events, so the "no audit line on B" count is exact. Since 95592b0 the driver compares against the newest event read before the step.
+
+**Labels in the raw files.** Step names in `run*-console.txt` and `run2-results.json` (and in the driver) carry tags from an uncommitted reconnection plan: (E4), (E5), (E6), "requirement 5" and "requirement 8" in the raw files, and (D1) in the driver. This file used (E1), (D2) and (D3) too before they were replaced by plain names. The tags are not the Desktop UI 2.0 plan's E1-E5 (`docs/design/desktop-ui-2-plan.md` §4: E5 there is the disconnect hold, which did not exist at 6ab9f8b) and not ADR-0003's D1-D7. Their meanings: E1, E4 and E5 are defects 1, 4 and 5 of `desktop-two-machine-2026-10-19.md` (macOS wording and the "This Mac" default name; a redial audited every ~35 s; "last seen" not advancing); E6 is the 2026-10-19 finding that the Windows app killed its daemon on quit (no mDNS goodbye); D1 is the re-signed mDNS record after an interface change, D2 the two dial candidates per device, D3 connect at an address; requirement 5 is "the address shown on one device connects the other to it" and requirement 8 is "an address is only a hint: the pinned key decides, and an unpaired id is refused before any packet".
+
 ## Not covered here
 
-Windows (laptop off this network), pairing initiated on Windows and the firewall consent step, interface and address changes (D1), Mac-side UI flows (all driving was through the daemon APIs and the driver), and anything about pooling (none exists).
+Windows (laptop off this network), pairing initiated on Windows and the firewall consent step, interface and address changes (the re-signed record after an interface change), Mac-side UI flows (all driving was through the daemon APIs and the driver), and anything about pooling (none exists).
