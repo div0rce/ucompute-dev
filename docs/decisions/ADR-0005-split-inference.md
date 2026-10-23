@@ -24,7 +24,11 @@ WP-04 asks for static physical pooling: one model's transformer blocks split bet
 | Each `SET_TENSOR` arrives whole in a `std::vector` (2565-2573), so R transiently holds its largest tensor twice (macOS: the freed buffer stayed resident, MALLOC_LARGE +48 MB for a 47.81 MiB output tensor); R's idle baseline is about 37 MiB | ✅ macOS / `unverified` Linux glibc |
 | Config P per decode token: head to R three activations (embd, inp_mixed_embd, node_1) plus a 2·n_kv B f16 mask plus about 2.9 KB of descriptors and commands; R to head one activation plus 8 B; exactly one synchronous round trip per token; prefill: 3·p activations plus a 2·n_kv·p B mask up | ✅ (loopback, lab) |
 | Same backend (Metal on both stages, loopback): greedy tokens equal local for 64/64 in every split configuration; the handshake logs `transport : TCP (RDMA auto-negotiate enabled)` | ✅ SINGLE-HOST (lab) |
-| An endpoint appears as device `RPC0`, in `--rpc` order | ⚠️ (one session); re-confirmed in R0 |
+| With `--rpc`, `--list-devices` lists `MTL0`, `BLAS`, then `RPC0`, `RPC1`, ... in `--rpc` order | ✅ (R0, lab b252188, SINGLE-HOST) |
+| Per RPC server, llama-server opens 12-13 short connections (each open under 5 ms, 42-59 B up and 48-68 B down; three carry 3,302 B up), then one long-lived session connection that carries all weights and per-token traffic; peak concurrency is 1 | ✅ (R0) |
+| The per-layer `load_tensors: layer N assigned to device X` lines are llama DEBUG lines: shown at `-lv 5`, none at `-lv 4` (Common's level). The head's `[negotiate_hello] handshake ok: server version 8.0.0, transport: TCP` and R's `[rpc_serve_client] client connected, transport: TCP` are ggml-rpc debug lines gated by `GGML_RPC_DEBUG` (`ggml/src/ggml-rpc/log.h`); R's startup banner `transport : TCP (RDMA auto-negotiate enabled)` prints unconditionally | ✅ (R0; log fixture `rpc-dataflow/results-r0/b11609-rpc-split-A.log` in the lab) |
+| Longest silence on the link while a request is in flight: 13-21 ms in the first request (setup plus a 10-token prefill), about 5 ms after (stories15M, loopback); idle `ggml-rpc-server` (Metal) before any client: 40-41 MiB | ✅ (R0; a tiny model on loopback: scale by R's prefill time) |
+| A 64-byte pattern from a block a server holds is found in that server's plaintext stream; one from a block it does not hold is not (positive and negative control for the capture scan; `tools/rpc_dataflow.py` `weight_pattern()` reads it from the GGUF tensor table) | ✅ (R0) |
 | `--tensor-split` follows `--device` order; Common passes `--fit off -ngl 999` | ✅ (lab Addendum 5) |
 | The input embedding stays on the head CPU; the output layer goes with layer `n_layer` | ⚠️ (llama.cpp source via Context7, lab) |
 | `validate_extra_args` accepts `--rpc <addr>` as two tokens; `RESERVED_FLAGS` has 7 entries | ✅ (`process.rs:22,37`) |
@@ -48,7 +52,7 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 - Every split and RPC flag is reserved, so `extra_args` cannot set any of them.
 - Configuration **P**: `--device RPC0,MTL0 --tensor-split <exact midpoints> --split-mode layer -ngl 999 --fit off`. R holds blocks [0,k); H holds [k,n) plus the output layer, so no logits row crosses the link.
 - Configuration **C** (same backend, ggml-cpu on both stages): `--device RPC0 -ngl (n+1−k)`. R holds [k,n) plus output, and one logits row crosses per token.
-- `GGML_RPC_NO_RDMA=1` is set.
+- `GGML_RPC_NO_RDMA=1` is set, and for a split load H's llama-server also gets `GGML_RPC_DEBUG=1` and `-lv 5` (the engine environment scrub sets them explicitly): the layer assignment and the handshake transport lines exist only at that level (R0).
 - The load fails unless the log shows `transport: TCP` and a layer-to-device assignment equal to the plan.
 - A split never falls back to CPU or to local. The response reports the placement as parsed from the log.
 
