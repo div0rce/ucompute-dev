@@ -1,0 +1,3 @@
+listening on http://127.0.0.1:18332
+peer id 1b06b0561d5e8556d38ed0055c5361c4bc0f552236a077642aae42a1d10c3d1c
+peer endpoint udp://0.0.0.0:18432 (serving peers: yes, mdns: off)

@@ -1,0 +1,341 @@
+{
+  "driven": "daemon API run (not app UI): every step goes through the two daemons' loopback APIs",
+  "a": {
+    "connections": 1,
+    "device_name": "sentinel",
+    "dial_addr": "192.168.1.167:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "edb3-c91c-dcfd"
+  },
+  "b": {
+    "connections": 1,
+    "device_name": "mous",
+    "dial_addr": "192.168.1.176:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8983-9a1e-e341"
+  },
+  "steps": [
+    {
+      "step": "state: each daemon reports its own host name",
+      "ok": true,
+      "t": "2026-10-23T18:45:32Z",
+      "names": {
+        "A": "sentinel",
+        "B": "mous"
+      },
+      "dial_addr": {
+        "A": "192.168.1.167:8193",
+        "B": "192.168.1.176:8193"
+      }
+    },
+    {
+      "step": "state: A sees the other with 1-2 routable addresses, best first",
+      "ok": true,
+      "t": "2026-10-23T18:45:35Z",
+      "seconds": 2.42,
+      "entry": {
+        "addr": "192.168.1.176:8193",
+        "addrs": [
+          "192.168.1.176:8193"
+        ],
+        "id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "pair_port": null,
+        "pairing": false,
+        "proto": "1.1",
+        "seen_utc": "2026-10-23T18:45:35Z",
+        "trusted": true
+      }
+    },
+    {
+      "step": "state: B sees the other with 1-2 routable addresses, best first",
+      "ok": true,
+      "t": "2026-10-23T18:45:35Z",
+      "seconds": 0.0,
+      "entry": {
+        "addr": "192.168.1.167:8193",
+        "addrs": [
+          "192.168.1.167:8193"
+        ],
+        "id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+        "pair_port": null,
+        "pairing": false,
+        "proto": "1.1",
+        "seen_utc": "2026-10-23T18:45:29Z",
+        "trusted": true
+      }
+    },
+    {
+      "step": "state: last seen advances while connected (E5)",
+      "ok": true,
+      "t": "2026-10-23T18:46:40Z",
+      "before": "2026-10-23T18:45:31Z",
+      "after": "2026-10-23T18:46:31Z"
+    },
+    {
+      "step": "manual: an unpaired id is refused before any packet (requirement 8)",
+      "ok": true,
+      "t": "2026-10-23T18:46:42Z",
+      "status": 403,
+      "ms": 23.8,
+      "b_new_audit": []
+    },
+    {
+      "step": "manual: a hint with no Common device falls through to a known address and is not saved",
+      "ok": true,
+      "t": "2026-10-23T18:46:47Z",
+      "status": 200,
+      "ms": 4376.4,
+      "hint": "192.0.2.1:8193",
+      "pinned_before": "192.168.1.176:8193",
+      "pinned_after": "192.168.1.176:8193",
+      "new_connection": true,
+      "dialled_hint": true,
+      "connection": {
+        "direction": "outbound",
+        "id": 2,
+        "lost_packets": 0,
+        "opened_at_utc": "2026-10-23T18:46:43Z",
+        "remote_addr": "192.168.1.176:8193",
+        "rtt_ms": 30.430667000000003,
+        "rx_bytes": 8685,
+        "tx_bytes": 11051
+      }
+    },
+    {
+      "step": "manual: the address shown on B connects A to B (requirement 5)",
+      "ok": true,
+      "t": "2026-10-23T18:46:48Z",
+      "status": 200,
+      "ms": 171.8,
+      "addr": "192.168.1.176:8193",
+      "connection": {
+        "direction": "outbound",
+        "id": 3,
+        "lost_packets": 0,
+        "opened_at_utc": "2026-10-23T18:46:48Z",
+        "remote_addr": "192.168.1.176:8193",
+        "rtt_ms": 63.251481999999996,
+        "rx_bytes": 8392,
+        "tx_bytes": 10824
+      },
+      "attempts": 1
+    },
+    {
+      "step": "manual: no peer was added on either side",
+      "ok": true,
+      "t": "2026-10-23T18:46:48Z"
+    },
+    {
+      "step": "pair A shows the code, B joins: wrong code refused, right code pairs",
+      "ok": true,
+      "t": "2026-10-23T18:46:48Z",
+      "pair_addr": "192.168.1.167:53347",
+      "wrong": [
+        401,
+        "pairing failed: closed by peer (code 0x5046 pairing_failed)",
+        36.6
+      ],
+      "right": [
+        200,
+        "sentinel",
+        58.2
+      ]
+    },
+    {
+      "step": "pair B shows the code, A joins: wrong code refused, right code pairs",
+      "ok": true,
+      "t": "2026-10-23T18:46:48Z",
+      "pair_addr": "192.168.1.176:64488",
+      "wrong": [
+        401,
+        "pairing failed: closed by peer (code 0x5046 pairing_failed)",
+        48.7
+      ],
+      "right": [
+        200,
+        "mous",
+        55.1
+      ]
+    },
+    {
+      "step": "pair: connected after re-pairing, named by host name",
+      "ok": true,
+      "t": "2026-10-23T18:46:48Z",
+      "seconds": 0.03,
+      "a_calls_b": "mous",
+      "b_calls_a": "sentinel",
+      "connection_id_before": 3,
+      "connection_id_after": 3
+    },
+    {
+      "step": "quit: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-23T18:46:50Z",
+      "seconds": 0.46,
+      "health": "disconnected",
+      "lost_reason": "closed_by_peer",
+      "cmd_output": ""
+    },
+    {
+      "step": "quit: B's daemon closed the connection itself (graceful stop, not the kill fallback)",
+      "ok": true,
+      "t": "2026-10-23T18:46:50Z",
+      "lost_reason": "closed_by_peer"
+    },
+    {
+      "step": "quit: A drops B from nearby within seconds (goodbye sent on quit, E6)",
+      "ok": true,
+      "t": "2026-10-23T18:46:50Z",
+      "seconds": 1.05
+    },
+    {
+      "step": "quit: B's daemon and engine processes end",
+      "ok": true,
+      "t": "2026-10-23T18:46:50Z",
+      "seconds": 0.2,
+      "procs": "0"
+    },
+    {
+      "step": "quit: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-23T18:46:50Z",
+      "last_error": {
+        "addr": "192.168.1.176:8193",
+        "at_utc": "2026-10-23T18:46:49Z",
+        "code": "peer_lost",
+        "hint": null,
+        "message": "transport error (closed by peer: the server refused to accept a new connection)"
+      }
+    },
+    {
+      "step": "quit: connecting at a dead hint fails with a reason and saves nothing",
+      "ok": true,
+      "t": "2026-10-23T18:46:59Z",
+      "status": 502,
+      "code": "peer_lost",
+      "ms": 8018.6,
+      "message": "no answer from 192.168.1.176:8193 within 4 s",
+      "pinned": "192.168.1.176:8193"
+    },
+    {
+      "step": "quit: one audit line per address for B while it is away, not one per redial (E4)",
+      "ok": true,
+      "t": "2026-10-23T18:48:59Z",
+      "audit_lines": 1,
+      "watched_s": 131,
+      "lines": [
+        {
+          "fields": {
+            "addr": "192.168.1.176:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+          "ts_utc": "2026-10-23T18:46:49Z"
+        }
+      ]
+    },
+    {
+      "step": "quit: B restarted, the two reconnect",
+      "ok": true,
+      "t": "2026-10-23T18:49:02Z",
+      "seconds_after_start": 2.9,
+      "a_connected_direction": "inbound",
+      "seen_nearby_after": null
+    },
+    {
+      "step": "crash: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-23T18:49:03Z",
+      "seconds": 0.43,
+      "health": "disconnected",
+      "lost_reason": "closed_by_peer",
+      "cmd_output": ""
+    },
+    {
+      "step": "crash: B's signed record may stay cached, but A never shows it as connected",
+      "ok": null,
+      "na": "A held no record of B after the crash, so there was no cached record to ignore",
+      "t": "2026-10-23T18:49:03Z"
+    },
+    {
+      "step": "crash: B's daemon and engine processes end",
+      "ok": true,
+      "t": "2026-10-23T18:49:06Z",
+      "seconds": 2.13,
+      "procs": "0"
+    },
+    {
+      "step": "crash: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-23T18:49:06Z",
+      "last_error": {
+        "addr": "192.168.1.176:8193",
+        "at_utc": "2026-10-23T18:49:04Z",
+        "code": "peer_lost",
+        "hint": null,
+        "message": "transport error (closed by peer: the server refused to accept a new connection)"
+      }
+    },
+    {
+      "step": "crash: one audit line per address for B while it is away, not one per redial (E4)",
+      "ok": true,
+      "t": "2026-10-23T18:51:06Z",
+      "audit_lines": 1,
+      "watched_s": 124,
+      "lines": [
+        {
+          "fields": {
+            "addr": "192.168.1.176:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+          "ts_utc": "2026-10-23T18:49:03Z"
+        }
+      ]
+    },
+    {
+      "step": "crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)",
+      "ok": null,
+      "na": "A held no record of B after the crash, so there was nothing to expire",
+      "t": "2026-10-23T18:51:06Z"
+    },
+    {
+      "step": "crash: B restarted, the two reconnect",
+      "ok": true,
+      "t": "2026-10-23T18:51:09Z",
+      "seconds_after_start": 2.65,
+      "a_connected_direction": "inbound",
+      "seen_nearby_after": null
+    },
+    {
+      "step": "restore: both daemons put back as saved (state.py)",
+      "ok": true,
+      "t": "2026-10-23T18:51:10Z",
+      "exit_code": 0
+    }
+  ]
+}

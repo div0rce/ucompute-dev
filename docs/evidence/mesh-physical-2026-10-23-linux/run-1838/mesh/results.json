@@ -1,0 +1,313 @@
+{
+  "driven": "daemon API run (not app UI): pairing, groups and requests go through the two daemons' loopback APIs",
+  "a": {
+    "connections": 0,
+    "device_name": "sentinel",
+    "dial_addr": "192.168.1.167:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "edb3-c91c-dcfd"
+  },
+  "b": {
+    "connections": 0,
+    "device_name": "mous",
+    "dial_addr": "192.168.1.176:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8983-9a1e-e341"
+  },
+  "steps": [
+    {
+      "step": "setup: A and B start unpaired (unpinned, not revoked)",
+      "ok": true,
+      "delete_statuses": []
+    },
+    {
+      "step": "discovery: each daemon lists the other (mDNS)",
+      "ok": true,
+      "seconds": 0.104,
+      "a_discovered": [
+        {
+          "addr": "192.168.1.176:8193",
+          "addrs": [
+            "192.168.1.176:8193"
+          ],
+          "id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+          "pair_port": null,
+          "pairing": false,
+          "proto": "1.1",
+          "seen_utc": "2026-10-23T18:45:00Z",
+          "trusted": false
+        }
+      ],
+      "b_discovered": [
+        {
+          "addr": "[fe80::1a56:f930:12fd:9b67]:8193",
+          "addrs": [
+            "[fe80::1a56:f930:12fd:9b67]:8193"
+          ],
+          "id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+          "pair_port": null,
+          "pairing": false,
+          "proto": "1.1",
+          "seen_utc": "2026-10-23T18:44:59Z",
+          "trusted": false
+        }
+      ]
+    },
+    {
+      "step": "discovery: an unpaired peer is listed as untrusted",
+      "ok": true,
+      "a_sees": {
+        "addr": "192.168.1.176:8193",
+        "addrs": [
+          "192.168.1.176:8193"
+        ],
+        "id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "pair_port": null,
+        "pairing": false,
+        "proto": "1.1",
+        "seen_utc": "2026-10-23T18:45:00Z",
+        "trusted": false
+      },
+      "b_sees": {
+        "addr": "[fe80::1a56:f930:12fd:9b67]:8193",
+        "addrs": [
+          "[fe80::1a56:f930:12fd:9b67]:8193"
+        ],
+        "id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+        "pair_port": null,
+        "pairing": false,
+        "proto": "1.1",
+        "seen_utc": "2026-10-23T18:44:59Z",
+        "trusted": false
+      }
+    },
+    {
+      "step": "an unpaired peer cannot receive work",
+      "ok": true,
+      "privacy_status": 200,
+      "status": 403,
+      "code": "peer_unauthorized",
+      "ms": 18.7
+    },
+    {
+      "step": "pairing: wrong code refused",
+      "ok": true,
+      "status": 401,
+      "code": "pairing_failed",
+      "ms": 46.1
+    },
+    {
+      "step": "pairing: right code pins both sides and they connect",
+      "ok": true,
+      "status": 200,
+      "pair_addr": "192.168.1.167:35726",
+      "join_ms": 61.0,
+      "connected_after_s": 1.017
+    },
+    {
+      "step": "group and privacy set on both",
+      "ok": true,
+      "A": {
+        "groups_status": 200,
+        "privacy_status": 200,
+        "group": {
+          "members": [
+            "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf"
+          ],
+          "name": "two-machine",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        },
+        "ok": true
+      },
+      "B": {
+        "groups_status": 200,
+        "privacy_status": 200,
+        "group": {
+          "members": [
+            "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98"
+          ],
+          "name": "two-machine",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        },
+        "ok": true
+      }
+    },
+    {
+      "step": "stories15M-q4_0 pulled and loaded on both",
+      "ok": true,
+      "statuses": [
+        200,
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "step": "remote execution A -> B (B serves)",
+      "ok": true,
+      "cold": {
+        "status": 200,
+        "ms": 198.4,
+        "golden": true,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "engine_ttft_ms": 24.081433999999998,
+        "decode_tok_s": 432.0
+      },
+      "warm": {
+        "status": 200,
+        "ms": 212.0,
+        "golden": true,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "engine_ttft_ms": 16.247175,
+        "decode_tok_s": 502.3
+      },
+      "stream": {
+        "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+        "golden": true,
+        "chunks": 33,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "client_first_text_ms": 48.9,
+        "total_ms": 131.3
+      }
+    },
+    {
+      "step": "remote execution B -> A (A serves)",
+      "ok": true,
+      "cold": {
+        "status": 200,
+        "ms": 35.9,
+        "golden": true,
+        "target": "peer:edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+        "engine_ttft_ms": 19.780709,
+        "decode_tok_s": 1606.6
+      },
+      "warm": {
+        "status": 200,
+        "ms": 50.5,
+        "golden": true,
+        "target": "peer:edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+        "engine_ttft_ms": 12.410208,
+        "decode_tok_s": 1609.7
+      },
+      "stream": {
+        "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+        "golden": true,
+        "chunks": 33,
+        "target": "peer:edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+        "client_first_text_ms": 7.4,
+        "total_ms": 27.4
+      }
+    },
+    {
+      "step": "local_only: peer request refused on the sender",
+      "ok": true,
+      "privacy_statuses": [
+        200,
+        200
+      ],
+      "status": 403,
+      "ms": 102.0
+    },
+    {
+      "step": "audit on A has no prompt text",
+      "ok": true,
+      "status": 200,
+      "hits": [],
+      "remote_entries": 24
+    },
+    {
+      "step": "audit on B has no prompt text",
+      "ok": true,
+      "status": 200,
+      "hits": [],
+      "remote_entries": 71
+    },
+    {
+      "step": "revocation: B disconnected and refused as revoked",
+      "ok": true,
+      "b_disconnected_after_s": 0.002,
+      "b_request_status": 403,
+      "b_error": "peer_unauthorized",
+      "a_holds_its_revocation_of_b": true,
+      "a_refused_as_revoked": true
+    },
+    {
+      "step": "re-pair after revocation",
+      "ok": true,
+      "start_status": 200,
+      "join_status": 200,
+      "group_status": 200,
+      "connected_after_s": 0.388
+    },
+    {
+      "step": "B killed: A notices the loss",
+      "ok": true,
+      "seconds": 0.486
+    },
+    {
+      "step": "B restarted: the two reconnect",
+      "ok": true,
+      "seconds_after_restart": 3.712,
+      "seconds_after_kill": 4.2
+    },
+    {
+      "step": "remote execution A -> B after B restarted",
+      "ok": true,
+      "cold": {
+        "status": 200,
+        "ms": 213.3,
+        "golden": true,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "engine_ttft_ms": 28.975265,
+        "decode_tok_s": 264.7
+      },
+      "warm": {
+        "status": 200,
+        "ms": 152.1,
+        "golden": true,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "engine_ttft_ms": 33.992034,
+        "decode_tok_s": 327.6
+      },
+      "stream": {
+        "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+        "golden": true,
+        "chunks": 33,
+        "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+        "client_first_text_ms": 40.1,
+        "total_ms": 134.4
+      }
+    },
+    {
+      "step": "restore: both daemons put back as saved (state.py)",
+      "ok": true,
+      "exit_code": 0
+    }
+  ]
+}

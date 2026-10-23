@@ -1,0 +1,63 @@
+{
+  "http://127.0.0.1:18304": {
+    "peer_id": "edb3c91cdcfddefc71c489ee453bb2e1540be8f3185c88f2f453339fb99bbb98",
+    "network": {
+      "enabled": true,
+      "serve_peers": true
+    },
+    "names": {},
+    "held": [],
+    "groups": [],
+    "privacy": "local_only",
+    "loaded": {
+      "id": "stories15M-q4_0",
+      "device": "auto"
+    }
+  },
+  "http://127.0.0.1:8192": {
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "network": {
+      "enabled": true,
+      "serve_peers": true
+    },
+    "names": {
+      "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6": "Kyle",
+      "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79": "JESS-HP"
+    },
+    "held": [],
+    "groups": [
+      {
+        "members": [
+          "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"
+        ],
+        "name": "home",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      },
+      {
+        "members": [
+          "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6"
+        ],
+        "name": "kyle",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      },
+      {
+        "members": [
+          "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"
+        ],
+        "name": "two-machine",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      }
+    ],
+    "privacy": "trusted_group",
+    "loaded": null
+  }
+}
