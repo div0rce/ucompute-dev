@@ -215,10 +215,13 @@ def s_state(A, B, ida, idb, neta, netb, a):
         if NO_MDNS:
             na(f"state: {me} sees the other with 1-2 routable addresses, best first")
             continue
-        d = nearby(base, oid)
-        addrs = (d or {}).get("addrs") or []
-        step(f"state: {me} sees the other with 1-2 routable addresses, best first",
-             d is not None and 1 <= len(addrs) <= 2 and addrs[0] == d["addr"] and all(map(routable, addrs)), entry=d)
+        def good(d):
+            addrs = (d or {}).get("addrs") or []
+            return d is not None and 1 <= len(addrs) <= 2 and addrs[0] == d["addr"] and all(map(routable, addrs))
+        # A daemon started moments ago may hold a partly resolved record (AAAA before A); give mDNS 15 s.
+        secs = wait(lambda: good(nearby(base, oid)), 15)
+        step(f"state: {me} sees the other with 1-2 routable addresses, best first", secs is not None,
+             seconds=secs, entry=nearby(base, oid))
     wait(lambda: connected(A, idb), 30)  # right after a pairing the connection can still be forming
     before = peer(A, idb)
     ok0 = bool(before and before.get("connected"))
