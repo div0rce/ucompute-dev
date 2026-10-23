@@ -5,6 +5,8 @@
 //   node cdp.mjs eval '<js expression or async IIFE>'   prints the JSON value
 //   node cdp.mjs text                                   prints the page's visible text
 //   node cdp.mjs click '<visible text>'                 clicks the first button/link/tab whose text matches
+//   node cdp.mjs key <Tab|Shift+Tab|Enter|Escape|Space|Arrow*> [count] [delay ms]
+//                                                       real key presses; prints the focused element after each
 //   node cdp.mjs shot <out.png>                         screenshot of the app window's page
 // CDP_PORT selects the local tunnel port (default 19222). Stdlib only (Node 22+: global WebSocket).
 import { writeFileSync } from "node:fs";
@@ -24,14 +26,20 @@ ws.onmessage = (m) => {
     pending.delete(msg.id);
   }
 };
+// A target that goes away mid-run fails the calls still waiting, instead of leaving them hanging.
+ws.onclose = () => {
+  for (const f of pending.values()) f({ error: { message: "socket closed" } });
+  pending.clear();
+};
 await new Promise((r, j) => {
   ws.onopen = r;
   ws.onerror = j;
 });
+// A CDP error rejects (so a key press the page never got is never printed as done).
 const send = (method, params = {}) =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
     const i = ++id;
-    pending.set(i, resolve);
+    pending.set(i, (msg) => (msg.error ? reject(new Error(`${method}: ${JSON.stringify(msg.error)}`)) : resolve(msg)));
     ws.send(JSON.stringify({ id: i, method, params }));
   });
 const evaluate = async (expression) => {
@@ -53,12 +61,30 @@ try {
         .find(e => e.offsetParent !== null && (e.innerText || e.getAttribute('aria-label') || '').trim().startsWith(want));
       if (!el) return 'not found: ' + want; el.click(); return 'clicked: ' + (el.innerText || el.getAttribute('aria-label')).trim(); })()`;
     console.log(await evaluate(js));
+  } else if (cmd === "key") {
+    // Real key events (Tab moves focus the way a keyboard user does). One JSON line per press: the page
+    // clock and the focused element, to line up with a screen reader's log.
+    const [, , , name, count = "1", delay = "800"] = process.argv;
+    const K = { Tab: 9, Enter: 13, Escape: 27, Space: 32, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39 };
+    const key = name.replace(/^Shift\+/, "");
+    const modifiers = name.startsWith("Shift+") ? 8 : 0;
+    const ev = { key: key === "Space" ? " " : key, code: key, windowsVirtualKeyCode: K[key], modifiers };
+    if (!K[key]) throw new Error(`unknown key ${name}`);
+    const focused = `(() => { const e = document.activeElement; return { t: Date.now(), tag: e?.tagName,
+      role: e?.getAttribute('role'), label: e?.getAttribute('aria-label'), text: (e?.innerText || e?.value || '').trim().slice(0, 80) }; })()`;
+    for (let i = 0; i < Number(count); i++) {
+      await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...ev });
+      if (key === "Space" || key === "Enter") await send("Input.dispatchKeyEvent", { type: "char", text: key === "Space" ? " " : "\r", modifiers });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", ...ev });
+      await new Promise((r) => setTimeout(r, Number(delay)));
+      console.log(JSON.stringify({ key: name, ...(await evaluate(focused)) }));
+    }
   } else if (cmd === "shot") {
     const r = await send("Page.captureScreenshot", { format: "png" });
     writeFileSync(arg, Buffer.from(r.result.data, "base64"));
     console.log(`saved ${arg}`);
   } else {
-    console.error("usage: cdp.mjs eval '<js>' | text | click '<visible text>' | shot <file.png>");
+    console.error("usage: cdp.mjs eval '<js>' | text | click '<visible text>' | key <name> [count] [delay] | shot <file.png>");
     process.exitCode = 2;
   }
 } catch (e) {
