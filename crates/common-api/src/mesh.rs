@@ -35,11 +35,12 @@ use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, MAX_RECORD_
 use common_network::health::PeerHealth;
 use common_network::pairing;
 use common_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
-use common_network::transport::{ControlStream, Node, PeerConnection};
+use common_network::transport::{ControlStream, HeldControl, Node, PeerConnection};
 use common_network::{remote, NetworkConfig, MAX_CONTROL_FRAME};
 use common_observability::Audit;
 use common_policy::{PolicyConfig, PolicyEngine, PrivacyMode, QuotaConfig, Quotas};
 use common_runtime::{GenerateEvent, GenerateRequest, GenerateStream};
+use futures_util::future::BoxFuture;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -391,12 +392,19 @@ impl AppState {
 
     /// Close any pairing window, stop whatever runs, then start the Node, discovery, the accept
     /// loop and the sync loop when `settings().network_enabled`. `Node::start` refuses unless the
-    /// config says enabled, so a disabled setting can never leave an endpoint bound.
+    /// config says enabled, so a disabled setting can never leave an endpoint bound. A restart that
+    /// keeps networking on (a Sharing change) keeps the devices disconnected by the user (E5);
+    /// turning networking off ends those holds.
     pub async fn apply_network(self: &Arc<Self>) -> Result<()> {
         let mut pairing = self.pairing.lock().await;
         cancel_pairing(&mut pairing).await;
         let s = self.settings();
         let mut net = self.net.lock().await;
+        // Only paired devices: a hold belongs to the pairing it was set on (`peer_delete`).
+        let holds: Vec<PeerId> = match &net.node {
+            Some(node) if s.network_enabled => node.held().into_iter().filter(|id| self.peers.is_pinned(id)).collect(),
+            _ => vec![],
+        };
         net.stop().await;
         // A (re)started network dials every pinned device at once, as a user toggling it expects.
         lock(&self.redial).clear();
@@ -415,6 +423,12 @@ impl AppState {
             self.audit.clone(),
         )
         .await?;
+        // A held device that connected before this line is closed by `hold`, one mid-handshake by
+        // `Node::register`.
+        for id in &holds {
+            node.hold(id);
+        }
+        node.set_held_control(Box::new(HeldRevocations(Arc::downgrade(self))));
         *lock(&node.cached_models) = self
             .store
             .list()
@@ -441,7 +455,14 @@ impl AppState {
 
     /// The running Node, or `PolicyDenied` while peer networking is off.
     pub async fn node(&self) -> Result<Arc<Node>> {
-        self.net.lock().await.node.clone().ok_or_else(|| {
+        self.on_node(Arc::clone).await
+    }
+
+    /// `f` on the running Node under the `net` lock, so no restart ([`AppState::apply_network`],
+    /// which carries the Node's holds over) runs between: a hold is never set on, nor a release
+    /// lost with, a Node being replaced. `PolicyDenied` while peer networking is off.
+    async fn on_node<R>(&self, f: impl FnOnce(&Arc<Node>) -> R) -> Result<R> {
+        self.net.lock().await.node.as_ref().map(f).ok_or_else(|| {
             CommonError::new(ErrorCode::PolicyDenied, "peer networking is disabled in settings")
                 .with_hint("PUT /api/network {\"enabled\": true}")
         })
@@ -500,10 +521,15 @@ impl AppState {
     /// the user typed), the addresses mDNS sees now, then the pinned `last_addr` (see
     /// [`dial_order`]). Each is only a hint: `Node::connect` accepts nothing but `id`'s pinned key.
     /// `last_seen_utc` is refreshed, and `last_addr` only when this dial's handshake to it is the
-    /// connection returned. Any failure tries the next address: no answer, another device, or a
-    /// refusal at that address (one sent before the device showed its pinned key reads as another
-    /// device, never as `peer_revoked`: `Node::connect`). This store's own refusal (revoked or unpaired here) sends
-    /// nothing at any address (`Node::connect`). The error returned is the last refusal if there
+    /// connection returned. A failure tries the next address: no answer, another device, or a
+    /// refusal at that address. A refusal closed before the device proved its pinned key with
+    /// authenticated control data reads as another device, never as `peer_revoked` or `peer_held`,
+    /// however late in the TLS handshake it came (a close in an Initial packet is forgeable by
+    /// anything on the path: `Node::connect`), so it never ends the walk. This store's own refusal
+    /// (revoked or unpaired here) sends nothing at any address (`Node::connect`). A proven refusal
+    /// (`peer_held` sent on the control stream, a close after it, this store's `peer_revoked`) ends
+    /// the dial: every address of that device says the same, and a later timeout must not replace
+    /// it as the device's `last_error`. Otherwise the error returned is the last refusal if there
     /// was one (it says more than a later timeout), else the last failure.
     pub async fn peer_connection_via(
         self: &Arc<Self>,
@@ -533,8 +559,9 @@ impl AppState {
             .and_then(|p| p.last_addr)
             .and_then(|a| a.parse().ok());
         let mut last: Option<CommonError> = None;
+        let local = node.local_addr()?;
         // ponytail: up to 4 sequential dials x idle timeout per request; parallel dials if that latency bites
-        for addr in dial_order(hint, &discovered, pinned) {
+        for addr in dial_order(hint, &discovered, pinned, local) {
             match node.connect(addr, id).await {
                 Ok(conn) => {
                     // `connect` may hand back a connection it did not dial here (one that
@@ -544,6 +571,7 @@ impl AppState {
                     self.attach(node, conn.clone());
                     return Ok(conn);
                 }
+                Err(e) if matches!(e.code, ErrorCode::PeerHeld | ErrorCode::PeerRevoked) => return Err(e),
                 Err(e) => last = Some(prefer_refusal(last, e)),
             }
         }
@@ -632,6 +660,20 @@ impl AppState {
         !due || write_frame(send, &revocation_msg(r)).await.is_ok()
     }
 
+    /// Offer every revocation this store holds to `peer` where it is due (ADR-0003 D7
+    /// `revocations_since` on every connection); false when the stream is gone.
+    async fn offer_revocations<W>(&self, send: &mut W, peer: PeerId) -> bool
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        for r in self.peers.revocations_since(0).unwrap_or_default() {
+            if !self.offer_revocation(send, peer, &r).await {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn network_status(&self) -> Value {
         let s = self.settings();
         let net = self.net.lock().await;
@@ -669,10 +711,19 @@ fn short_label(s: &str) -> Option<String> {
 
 /// Where to dial a peer, best first: the address the user typed, the addresses in a fresh signed
 /// mDNS record (they follow DHCP and Wi-Fi changes), then the pinned `last_addr`; each address
-/// once, in that order.
-fn dial_order(hint: Option<SocketAddr>, discovered: &[SocketAddr], pinned: Option<SocketAddr>) -> Vec<SocketAddr> {
+/// once, in that order. A known address the endpoint at `local` cannot dial is left out (IPv6 on an
+/// IPv4 endpoint: quinn refuses it at once, and that error would replace a useful one); a typed
+/// one is kept, so its error says why.
+fn dial_order(
+    hint: Option<SocketAddr>,
+    discovered: &[SocketAddr],
+    pinned: Option<SocketAddr>,
+    local: SocketAddr,
+) -> Vec<SocketAddr> {
+    let dialable = |a: &SocketAddr| local.is_ipv6() || a.is_ipv4();
+    let known = discovered.iter().copied().chain(pinned).filter(dialable);
     let mut v: Vec<SocketAddr> = Vec::new();
-    for a in hint.into_iter().chain(discovered.iter().copied()).chain(pinned) {
+    for a in hint.into_iter().chain(known) {
         if !v.contains(&a) {
             v.push(a);
         }
@@ -981,27 +1032,35 @@ impl RevocationFanout {
 /// A revocation from a peer: ignored when it names this device or is already held; otherwise
 /// checked and stored by `PeerStore::apply_revocation` (issuer pinned and sharing a group with the
 /// target, signature valid, not superseded by a later local re-pair, so a replay on reconnect
-/// cannot undo that re-pair), the revoked device disconnected, audited once, and offered to the
-/// connected peers that shared a group with the revoked device here (not back to `from`).
-/// The held-check and the apply run under `peer_writes`, so two connections delivering the same
-/// record at once write one `peer_revoked` line.
+/// cannot undo that re-pair), the revoked device disconnected and its hold ended (a hold belongs
+/// to the pairing it was set on, as for `peer_revoke`), audited once, and offered to the connected
+/// peers that shared a group with the revoked device here (not back to `from`). Only a record
+/// this store holds (already, or now) is marked as `from`'s ([`RevocationFanout::done`]): a peer
+/// sending records that fail the checks leaves nothing behind. The held-check and the apply run
+/// under `peer_writes`, so two connections delivering the same record at once write one
+/// `peer_revoked` line.
 async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revocation) {
     if r.peer_id == st.identity.id {
         return;
     }
     {
         let _g = lock(&st.peer_writes);
-        if st.peers.revocations_since(0).unwrap_or_default().contains(&r) {
+        let held = st.peers.revocations_since(0).unwrap_or_default().contains(&r);
+        if !held {
+            let audience = st.revocation_audience(&r.peer_id);
+            if let Err(e) = st.peers.apply_revocation(&r) {
+                tracing::info!(peer = %from.short_label(), code = %e.code, "revocation from peer ignored");
+                return;
+            }
+            lock(&st.fanout).set_audience(&r, audience);
+        }
+        lock(&st.fanout).done(&r, from);
+        if held {
             return;
         }
-        let audience = st.revocation_audience(&r.peer_id);
-        if let Err(e) = st.peers.apply_revocation(&r) {
-            tracing::info!(peer = %from.short_label(), code = %e.code, "revocation from peer ignored");
-            return;
-        }
-        lock(&st.fanout).set_audience(&r, audience);
     }
     node.disconnect(&r.peer_id, "revoked").await;
+    node.release(&r.peer_id);
     st.audit(
         "peer_revoked",
         Some(&r.peer_id),
@@ -1010,19 +1069,55 @@ async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revo
     let _ = st.revocations.send(r);
 }
 
+/// A control message from `peer`: a revocation is applied ([`apply_peer_revocation`]); `Status`
+/// and unknown messages are ignored in this minor.
+async fn control_received(st: &AppState, node: &Node, peer: PeerId, msg: ControlMessage) {
+    let Some(Body::Revocation(m)) = msg.body else {
+        return;
+    };
+    match revocation_from_msg(m) {
+        Ok(r) => apply_peer_revocation(st, node, peer, r).await,
+        Err(e) => {
+            tracing::info!(peer = %peer.short_label(), code = %e.code, "malformed revocation ignored");
+        }
+    }
+}
+
+/// E5 + ADR-0003 D7: a device held on either side still exchanges revocations with this one on
+/// each connection it opens, before the holder closes it (`Node::hold`). Weak: the Node must not
+/// keep the daemon alive.
+struct HeldRevocations(std::sync::Weak<AppState>);
+
+impl HeldControl for HeldRevocations {
+    fn offer<'a>(&'a self, peer: PeerId, control: &'a mut ControlStream) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            match self.0.upgrade() {
+                Some(st) => st.offer_revocations(&mut control.send, peer).await,
+                None => false,
+            }
+        })
+    }
+
+    fn received<'a>(&'a self, node: &'a Node, peer: PeerId, msg: ControlMessage) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(st) = self.0.upgrade() {
+                control_received(&st, node, peer, msg).await;
+            }
+        })
+    }
+}
+
 /// Owns the control stream for the life of the connection: first offers every revocation this
 /// store holds (ADR-0003 D7 `revocations_since` on every reconnect), then new ones (local or applied
 /// from another peer), each only where [`RevocationFanout::due`] says, and applies the peer's
-/// ([`apply_peer_revocation`]). `Status` and unknown messages are ignored in this minor.
+/// ([`control_received`]).
 async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnection>) {
     let peer = conn.peer_id;
     let mut rx = st.revocations.subscribe();
     let mut guard = conn.control.lock().await;
     let ControlStream { send, recv } = &mut *guard;
-    for r in st.peers.revocations_since(0).unwrap_or_default() {
-        if !st.offer_revocation(send, peer, &r).await {
-            return;
-        }
+    if !st.offer_revocations(send, peer).await {
+        return;
     }
     loop {
         // One read future lives across the inner loop, so a write never cancels a half-read frame.
@@ -1042,18 +1137,7 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
             }
         };
         match frame {
-            Ok(Some(ControlMessage {
-                body: Some(Body::Revocation(m)),
-            })) => match revocation_from_msg(m) {
-                Ok(r) => {
-                    lock(&st.fanout).done(&r, peer);
-                    apply_peer_revocation(&st, &node, peer, r).await;
-                }
-                Err(e) => {
-                    tracing::info!(peer = %peer.short_label(), code = %e.code, "malformed revocation ignored");
-                }
-            },
-            Ok(Some(_)) => {}
+            Ok(Some(msg)) => control_received(&st, &node, peer, msg).await,
             Ok(None) | Err(_) => return,
         }
     }
@@ -1392,8 +1476,8 @@ pub async fn peer_connect(
     let id = st.resolve_peer(&id)?;
     paired(&st, &id)?;
     let hint = body.addr.as_deref().map(parse_dial_addr).transpose()?;
+    st.on_node(|n| n.release(&id)).await?;
     let node = st.node().await?;
-    node.release(&id);
     lock(&st.redial).remove(&id);
     st.peer_connection_via(&node, id, hint).await?;
     Ok(axum::Json(paired(&st, &id)?))
@@ -1412,15 +1496,17 @@ fn paired(st: &AppState, id: &PeerId) -> Result<PeerRecord> {
 
 /// E5: close every connection to a paired device (`CLOSE_HELD`; audited `peer_disconnected`,
 /// reason `by_user`) and refuse it in both directions, including this device's own requests and
-/// redials, until `POST /api/peers/{id}/connect` or networking or the service restarts. The device
-/// sees `peer_held`. Returns its record.
+/// redials, until `POST /api/peers/{id}/connect`, networking is turned off, or the service
+/// restarts (a settings change that keeps networking on keeps it: [`AppState::apply_network`]).
+/// Revocations still cross: each connection the device opens exchanges them before it is closed
+/// (`Node::hold`). The device sees `peer_held`. Returns its record.
 pub async fn peer_disconnect(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> std::result::Result<axum::Json<PeerRecord>, ApiError> {
     let id = st.resolve_peer(&id)?;
     let rec = paired(&st, &id)?;
-    st.node().await?.hold(&id);
+    st.on_node(|n| n.hold(&id)).await?;
     Ok(axum::Json(rec))
 }
 
@@ -1434,12 +1520,11 @@ pub async fn peer_delete(
         let _g = lock(&st.peer_writes);
         st.peers.remove(&id)?;
     }
-    let node = st.net.lock().await.node.clone();
-    if let Some(node) = node {
+    if let Ok(node) = st.node().await {
         node.disconnect(&id, "unpaired").await;
-        // A hold belongs to the pairing it was set on: pairing the device again starts unheld.
-        node.release(&id);
     }
+    // A hold belongs to the pairing it was set on: pairing the device again starts unheld.
+    let _ = st.on_node(|n| n.release(&id)).await;
     st.audit("peer_removed", Some(&id), json!({}));
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1459,11 +1544,10 @@ pub async fn peer_revoke(
         lock(&st.fanout).set_audience(&rev, audience);
         rev
     };
-    let node = st.net.lock().await.node.clone();
-    if let Some(node) = node {
+    if let Ok(node) = st.node().await {
         node.disconnect(&id, "revoked").await;
-        node.release(&id);
     }
+    let _ = st.on_node(|n| n.release(&id)).await;
     let _ = st.revocations.send(rev.clone());
     st.audit(
         "peer_revoked",
@@ -1868,6 +1952,125 @@ mod tests {
         assert!(!same_addr(v4, "192.168.1.21:8193".parse().unwrap()));
     }
 
+    /// An AppState over a temp COMMON_HOME with networking on (loopback, no mDNS), started.
+    async fn networked_state(dir: &std::path::Path) -> Arc<AppState> {
+        let paths = Paths::at(dir);
+        paths.ensure_dirs().unwrap();
+        let backend = common_runtime::backend_by_name("llama.cpp", dir.join("engine"), paths.clone()).unwrap();
+        let store = common_artifacts::Store::new(paths.clone());
+        let manager = common_runtime::manager::ModelManager::new(paths.clone(), store, backend, Default::default());
+        let config = crate::ApiConfig {
+            network: NetworkConfig {
+                listen_port: 0,
+                bind_addr: "127.0.0.1".into(),
+                mdns: false,
+                ..NetworkConfig::default()
+            },
+            ..Default::default()
+        };
+        let catalog = common_artifacts::Catalog::builtin().unwrap();
+        let st = Arc::new(AppState::new(config, paths, catalog, Arc::new(manager)).unwrap());
+        st.update_settings(|s| Settings {
+            network_enabled: true,
+            ..s
+        })
+        .unwrap();
+        st.apply_network().await.unwrap();
+        st
+    }
+
+    fn pin_id(st: &AppState, id: PeerId) {
+        st.peers
+            .pin(PeerRecord {
+                id,
+                name: "X".into(),
+                paired_at_utc: utc_now(),
+                last_seen_utc: None,
+                last_addr: None,
+            })
+            .unwrap();
+    }
+
+    /// ADR-0003 D7 bound: a peer's revocation frames leave fan-out state only for records this
+    /// store holds, so a connected (or held) peer streaming well-formed but invalid records (any
+    /// `seq`, a bad signature, an issuer not paired here) grows nothing; the map stays within the
+    /// stored records (each issuer adds at most one per fellow group member). A valid record is
+    /// applied, marked as the sender's, and ends the revoked device's hold (E5: a hold belongs to
+    /// the pairing it was set on), as a local revoke does. Loopback only, nothing is dialled.
+    #[tokio::test]
+    async fn peer_revocations_leave_state_only_for_stored_records_and_end_a_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = networked_state(dir.path()).await;
+        let node = st.node().await.unwrap();
+        let (b, c) = (DeviceIdentity::generate().unwrap(), DeviceIdentity::generate().unwrap());
+        let stranger = DeviceIdentity::generate().unwrap();
+        for id in [b.id, c.id] {
+            pin_id(&st, id);
+        }
+        st.peers
+            .upsert_group(Group {
+                name: "home".into(),
+                members: vec![b.id, c.id],
+                policy: Default::default(),
+            })
+            .unwrap();
+        node.hold(&b.id);
+        let signed = |by: &DeviceIdentity, seq: u64| {
+            let at_utc = utc_now();
+            let sig = by.sign(&common_identity::revocation_message(seq, &b.id, &at_utc));
+            Revocation {
+                seq,
+                peer_id: b.id,
+                revoked_by: by.id,
+                at_utc,
+                signature: hex::encode(sig),
+            }
+        };
+        for seq in 0..500u64 {
+            let forged = Revocation {
+                signature: hex::encode([7u8; 64]),
+                ..signed(&c, seq)
+            };
+            control_received(&st, &node, c.id, revocation_msg(&forged)).await;
+            control_received(&st, &node, c.id, revocation_msg(&signed(&stranger, seq))).await;
+        }
+        assert_eq!(lock(&st.fanout).0.len(), 0, "nothing rejected is kept");
+        assert!(st.peers.is_pinned(&b.id) && node.is_held(&b.id));
+
+        let r = signed(&c, 1);
+        control_received(&st, &node, c.id, revocation_msg(&r)).await;
+        assert!(st.peers.is_revoked(&b.id));
+        assert!(!node.is_held(&b.id), "the revocation ended the hold");
+        control_received(&st, &node, b.id, revocation_msg(&r)).await;
+        assert_eq!(lock(&st.fanout).0.len(), 1);
+        assert!(!lock(&st.fanout).due(&r, &c.id, || true), "c sent it here");
+        st.stop_network().await;
+    }
+
+    /// E5: a restart that keeps networking on carries only holds on devices still paired: one
+    /// unpinned by any path (a peer's revocation, an unpair racing the restart) does not come back
+    /// held when it is paired again. Loopback only.
+    #[tokio::test]
+    async fn a_restart_drops_holds_on_devices_no_longer_paired() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = networked_state(dir.path()).await;
+        let (kept, gone) = (
+            DeviceIdentity::generate().unwrap().id,
+            DeviceIdentity::generate().unwrap().id,
+        );
+        for id in [kept, gone] {
+            pin_id(&st, id);
+            st.node().await.unwrap().hold(&id);
+        }
+        st.peers.remove(&gone).unwrap();
+        st.apply_network().await.unwrap();
+        pin_id(&st, gone);
+        let node = st.node().await.unwrap();
+        assert!(node.is_held(&kept));
+        assert!(!node.is_held(&gone), "the hold belonged to the old pairing");
+        st.stop_network().await;
+    }
+
     /// ADR-0003 D7: a record goes to its audience, on every connection until the member sends it
     /// back (a write is not a delivery); never to the revoked device, never back to the device it
     /// came from; without a recorded audience, to group members only.
@@ -1956,17 +2159,34 @@ mod tests {
             sa("172.20.10.9:8193"),
             sa("192.168.1.20:8193"),
         );
-        assert_eq!(dial_order(Some(h), &[d1, d2], Some(p)), vec![h, d1, d2, p]);
+        let l = sa("0.0.0.0:8193");
+        assert_eq!(dial_order(Some(h), &[d1, d2], Some(p), l), vec![h, d1, d2, p]);
         assert_eq!(
-            dial_order(None, &[d1, d2], Some(d1)),
+            dial_order(None, &[d1, d2], Some(d1), l),
             vec![d1, d2],
             "pinned = first mDNS"
         );
-        assert_eq!(dial_order(Some(p), &[d1], Some(p)), vec![p, d1], "hint = pinned");
-        assert_eq!(dial_order(Some(d2), &[d1, d2], None), vec![d2, d1]);
-        assert_eq!(dial_order(None, &[], Some(p)), vec![p]);
-        assert_eq!(dial_order(Some(h), &[], None), vec![h]);
-        assert!(dial_order(None, &[], None).is_empty());
+        assert_eq!(dial_order(Some(p), &[d1], Some(p), l), vec![p, d1], "hint = pinned");
+        assert_eq!(dial_order(Some(d2), &[d1, d2], None, l), vec![d2, d1]);
+        assert_eq!(dial_order(None, &[], Some(p), l), vec![p]);
+        assert_eq!(dial_order(Some(h), &[], None, l), vec![h]);
+        assert!(dial_order(None, &[], None, l).is_empty());
+    }
+
+    /// An IPv4 endpoint (the default bind) cannot dial the IPv6 address mDNS also announces, so it
+    /// is not a candidate: its instant "invalid remote address" would replace the IPv4 dial's
+    /// "no answer … UDP port" as the device's error. A dual-stack endpoint dials both; an address
+    /// the user typed is always tried.
+    #[test]
+    fn dial_order_leaves_out_what_the_endpoint_cannot_dial() {
+        let (v4, v6) = (sa("10.0.0.5:8193"), sa("[2001:db8::5]:8193"));
+        let pinned6 = sa("[fd00::5]:8193");
+        assert_eq!(dial_order(None, &[v4, v6], Some(pinned6), sa("0.0.0.0:8193")), vec![v4]);
+        assert_eq!(
+            dial_order(None, &[v4, v6], Some(pinned6), sa("[::]:8193")),
+            vec![v4, v6, pinned6]
+        );
+        assert_eq!(dial_order(Some(v6), &[v4], None, sa("0.0.0.0:8193")), vec![v6, v4]);
     }
 
     /// D2a/D5: after several failed dials the error shown is a refusal when there was one.

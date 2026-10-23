@@ -766,9 +766,16 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
         "trusted_group",
         "via daemon A"
     );
-    a.fails_with(&["run", MODEL, "-p", PROMPT, "--peer", &id_b], "peer_revoked");
+    // That refusal comes before B sent any control data, so A cannot tell it from one forged on
+    // the path: it reads as a device that did not prove it is B, never as revoked (trust-3).
+    let err = a.fails_with(&["run", MODEL, "-p", PROMPT, "--peer", &id_b], "peer_unauthorized");
+    assert!(err.contains("did not prove"), "{err}");
     let (st, v) = http(api_a, "POST", "/v1/completions", Some(completion(&id_b)));
-    assert_eq!((st, v["error"]["code"].as_str()), (403, Some("peer_revoked")), "{v}");
+    assert_eq!(
+        (st, v["error"]["code"].as_str()),
+        (403, Some("peer_unauthorized")),
+        "{v}"
+    );
     // A later daemon write (a CLI group edit through daemon B) keeps the revocation on disk.
     b.ok(&["groups", "create", "later"]);
     let (_, g) = http(api_b, "GET", "/api/groups", None);

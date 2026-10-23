@@ -5,7 +5,7 @@ mod common;
 
 use common::{child_home, spawn_child, Peer};
 use common_network::discovery::{Advertiser, Browser};
-use common_network::NetworkConfig;
+use common_network::{NetworkConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,7 @@ fn two_instances_discover_within_5s_single_host() {
     assert!(db.pairing);
     assert_eq!(db.pair_port, Some(40102));
     assert!(!db.trusted, "unpinned id is never trusted");
-    assert_eq!(da.proto, "1.0");
+    assert_eq!(da.proto, format!("{PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"));
     // Both advertisers bind 127.0.0.1 (`Peer::config`): that is the only address advertised, never
     // a LAN address nothing listens on (this Mac also has en0).
     for d in [da, db] {

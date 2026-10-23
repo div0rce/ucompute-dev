@@ -7,6 +7,12 @@
 // 0 ok, 0x5245 'RE' revoked, 0x5541 'UA' unauthorized, 0x5056 'PV' protocol, 0x4654 'FT' frame too
 // large, 0x4844 'HD' held: the closing device's user disconnected the peer and refuses it until they
 // connect it again (read as `peer_held`; builds without it read `peer_lost`).
+//
+// Protocol minor 1 (PROTOCOL_MINOR = 1, HELD_EXCHANGE_MINOR = 1): a device that holds its peer
+// answers the peer's Capabilities with ErrorMsg{code:"peer_held"} instead of its own Capabilities;
+// the holder then sends its RevocationMsg frames and ends its stream, the held side reads to that
+// end, sends its own and ends its stream, and the holder reads to that end and closes with
+// CLOSE_HELD. A minor-0 peer gets CLOSE_HELD at once. No message or field was added.
 syntax = "proto3";
 package common.v1;
 

@@ -35,7 +35,11 @@ use serde::{Deserialize, Serialize};
 pub const ALPN_WORKLOAD: &[u8] = b"common/1";
 pub const ALPN_PAIRING: &[u8] = b"common-pair/1";
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 0;
+pub const PROTOCOL_MINOR: u32 = 1;
+/// From this minor a device that holds its peer (E5, `transport::Node::hold`) answers the peer's
+/// Capabilities with `ErrorMsg{code: "peer_held"}` and the two exchange revocations (ADR-0003 D7)
+/// before the holder closes with `CLOSE_HELD`; with an older peer it closes at once.
+pub const HELD_EXCHANGE_MINOR: u32 = 1;
 /// Hard bound on one control frame.
 pub const MAX_CONTROL_FRAME: usize = 1 << 20;
 /// Bound on the Capabilities control frame: signed record plus signature (F-02-04).

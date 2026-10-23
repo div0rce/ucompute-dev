@@ -557,9 +557,12 @@ async fn pairing_pins_both_sides_and_revoke_closes_the_connection_single_host() 
     let peers_a = get(&a, "/api/peers").await;
     assert!(peers_a["peers"].as_array().unwrap().is_empty());
     assert_eq!(peers_a["revocations"][0]["peer_id"], idb.to_hex());
-    // B is still pinned to A, but A's verifier refuses the revoked key inside the handshake.
+    // B is still pinned to A, but A's verifier refuses the revoked key inside the handshake. That
+    // alert comes before A sent any control data, so B cannot tell it from a forged one: it reads
+    // as a device that did not prove it is A, never as revoked (trust-3).
     let e = b.state.peer_connection(&nb, ida).await.unwrap_err();
-    assert_eq!(e.code, common_core::ErrorCode::PeerRevoked, "{e}");
+    assert_eq!(e.code, common_core::ErrorCode::PeerUnauthorized, "{e}");
+    assert!(e.message.contains("did not prove"), "{e}");
     // B still pins A; its view of A says the connection was closed on purpose.
     wait_for("B reports A disconnected", || async {
         (get(&b, "/api/peers").await["peers"][0]["health"] == "disconnected").then_some(())
@@ -1027,8 +1030,9 @@ async fn revocation_reaches_a_third_device_and_a_re_pair_survives_replay_single_
         (!na.connections().iter().any(|x| x.peer_id == idc)).then_some(())
     })
     .await;
+    // C's verifier refuses A inside the handshake: unproven at A (trust-3), never `peer_revoked`.
     let e = a.state.peer_connection(&na, idc).await.unwrap_err();
-    assert_eq!(e.code, common_core::ErrorCode::PeerRevoked, "{e}");
+    assert_eq!(e.code, common_core::ErrorCode::PeerUnauthorized, "{e}");
     let events = get(&c, "/api/audit").await;
     assert!(
         events["events"]
@@ -2187,12 +2191,18 @@ async fn wrong_device_at_hint_falls_through_to_pinned_single_host() {
     }
 }
 
-/// D2a, SINGLE-HOST: a `certificate_revoked` alert from the hint address is what that address
-/// said, not this device's verdict (anyone can send that alert before showing a key), so the dial
-/// goes on to B's pinned address. Here the alert comes from a second endpoint holding B's key
-/// whose store revoked A. Regression: the dial stopped at the alert and never tried the pinned one.
+/// D2a + trust-3, SINGLE-HOST: a refusal closed before the device at an address proved B's key
+/// with control data does not end the dial, even when that device showed B's key and signed the
+/// handshake with it: the dialler cannot tell such a close from one forged in an Initial packet on
+/// the path (common-network `a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host`),
+/// and stopping there would let any host at a hinted or discovered address keep A from B. Two
+/// endpoints holding B's key stand in at the hint: one whose store revoked A (a
+/// `certificate_revoked` alert), one that holds A without a held exchange (`CLOSE_HELD` right after
+/// TLS, as a minor-0 build). Each time the dial goes on to B's pinned address and connects; the
+/// hint is audited `peer_unauthorized`, never `peer_revoked` or `peer_held`, and never stored.
+/// (A proven refusal still ends the dial: `a_held_refusal_ends_the_dial_single_host`.)
 #[tokio::test(flavor = "multi_thread")]
-async fn revoked_alert_at_hint_falls_through_to_pinned_single_host() {
+async fn a_refusal_before_the_device_proved_its_key_does_not_end_the_dial_single_host() {
     let (a, _da) = empty_server().await;
     let (b, _db) = empty_server().await;
     let b_addr = listen_addr(&enable_network(&b, true).await);
@@ -2212,25 +2222,48 @@ async fn revoked_alert_at_hint_falls_through_to_pinned_single_host() {
             srv.state.audit.clone(),
         )
     };
-    let d2 = tempfile::tempdir().unwrap();
-    let revoker = Arc::new(common_identity::PeerStore::open(&Paths::at(d2.path())).unwrap());
+    let store = |dir: &tempfile::TempDir| Arc::new(common_identity::PeerStore::open(&Paths::at(dir.path())).unwrap());
+    let (d2, d3) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let revoker = store(&d2);
     revoker.revoke(&ida, &b.state.identity).unwrap();
-    let nb2 = start(&b, revoker).await.unwrap();
+    let holds = store(&d3);
+    holds
+        .pin(PeerRecord {
+            id: ida,
+            name: "A".into(),
+            paired_at_utc: "2026-10-22T00:00:00Z".into(),
+            last_seen_utc: None,
+            last_addr: None,
+        })
+        .unwrap();
+    let (nb2, nb3) = (start(&b, revoker).await.unwrap(), start(&b, holds).await.unwrap());
+    nb3.hold(&ida);
     let na = start(&a, a.state.peers.clone()).await.unwrap();
-    let alert = nb2.local_addr().unwrap();
 
-    let conn = a.state.peer_connection_via(&na, idb, Some(alert)).await.unwrap();
-    assert_eq!((conn.peer_id, conn.remote_addr.to_string()), (idb, b_addr.clone()));
-    assert_eq!(a.state.peers.get(&idb).unwrap().unwrap().last_addr, Some(b_addr));
-    let refused = rejections(&a);
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(
-        (refused[0].fields["addr"].as_str(), refused[0].fields["reason"].as_str()),
-        (Some(alert.to_string().as_str()), Some("peer_revoked"))
-    );
-    eprintln!("SINGLE-HOST D2a: a revoked alert at the hint did not stop the dial to the pinned address");
-    na.shutdown().await;
-    nb2.shutdown().await;
+    for fake in [nb2.local_addr().unwrap(), nb3.local_addr().unwrap()] {
+        let conn = a.state.peer_connection_via(&na, idb, Some(fake)).await.unwrap();
+        assert_eq!(
+            (conn.peer_id, conn.remote_addr.to_string()),
+            (idb, b_addr.clone()),
+            "{fake}"
+        );
+        assert_eq!(
+            a.state.peers.get(&idb).unwrap().unwrap().last_addr,
+            Some(b_addr.clone())
+        );
+        let refused: Vec<_> = rejections(&a)
+            .into_iter()
+            .filter(|e| e.fields["addr"] == fake.to_string())
+            .collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].fields["reason"], "peer_unauthorized", "{refused:?}");
+        conn.conn.close(0u32.into(), b"next");
+        assert!(na.connections().is_empty());
+    }
+    eprintln!("SINGLE-HOST D2a: refusals before the key was proven did not end the dial");
+    for n in [na, nb2, nb3] {
+        n.shutdown().await;
+    }
     a.stop().await;
     b.stop().await;
 }
@@ -2936,6 +2969,139 @@ async fn unpairing_ends_a_hold_single_host() {
     assert_eq!(peer_entry(&get(&a, "/api/peers").await, idb)["held"], false);
     let (status, v) = connect_peer(&a, &idb.to_hex(), json!({ "addr": b_addr })).await;
     assert_eq!(status, 200, "{v}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST** E5: a settings change that keeps networking on (Sharing, which restarts the
+/// endpoint) keeps a hold: A still shows B held and the new endpoint still refuses it. Turning
+/// networking off and on ends it, as documented.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sharing_change_keeps_a_hold_and_networking_off_ends_it_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    enable_network(&a, false).await;
+    enable_network(&b, true).await;
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    let (status, _) = post(&a, &format!("/api/peers/{}/disconnect", idb.to_hex()), json!({})).await;
+    assert_eq!(status, 200);
+    for serve_peers in [true, false] {
+        let a_addr = listen_addr(&enable_network(&a, serve_peers).await);
+        let pb = peer_entry(&get(&a, "/api/peers").await, idb);
+        assert_eq!(pb["held"], true, "after Sharing {serve_peers}: {pb}");
+        let (status, v) = connect_peer(&b, &ida.to_hex(), json!({ "addr": a_addr })).await;
+        assert_eq!((status, v["error"]["code"].as_str()), (403, Some("peer_held")), "{v}");
+    }
+    let (status, v) = put(&a, "/api/network", json!({ "enabled": false })).await;
+    assert_eq!(status, 200, "{v}");
+    enable_network(&a, false).await;
+    assert_eq!(peer_entry(&get(&a, "/api/peers").await, idb)["held"], false);
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST** E5 + ADR-0003 D7: a hold stops work and connections, never revocations. A holds
+/// B, then A revokes C and B revokes D (both share a group with A and B on each side). B's next dial
+/// is still refused (`peer_held`, never connected), but on it each side receives and applies the
+/// other's revocation.
+#[tokio::test(flavor = "multi_thread")]
+async fn revocations_cross_a_hold_both_ways_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let a_addr = listen_addr(&enable_network(&a, true).await);
+    enable_network(&b, true).await;
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    let (idc, idd) = (
+        DeviceIdentity::generate().unwrap().id,
+        DeviceIdentity::generate().unwrap().id,
+    );
+    pin(&a, idb, "B", None);
+    pin(&b, ida, "A", None);
+    for (srv, other) in [(&a, idb), (&b, ida)] {
+        pin(srv, idc, "C", None);
+        pin(srv, idd, "D", None);
+        put_group(srv, "home", &[other, idc, idd], false, false).await;
+    }
+    let (status, _) = post(&a, &format!("/api/peers/{}/disconnect", idb.to_hex()), json!({})).await;
+    assert_eq!(status, 200);
+    let (status, v) = post(&a, &format!("/api/peers/{}/revoke", idc.to_hex()), json!({})).await;
+    assert_eq!(status, 200, "{v}");
+    let (status, v) = post(&b, &format!("/api/peers/{}/revoke", idd.to_hex()), json!({})).await;
+    assert_eq!(status, 200, "{v}");
+    let b_connects_before = audit_about(&b, "peer_connected", ida).len();
+
+    let (status, v) = connect_peer(&b, &ida.to_hex(), json!({ "addr": a_addr })).await;
+    assert_eq!((status, v["error"]["code"].as_str()), (403, Some("peer_held")), "{v}");
+    wait_for("B applies A's revocation of C", || async {
+        (b.state.peers.is_revoked(&idc) && !b.state.peers.is_pinned(&idc)).then_some(())
+    })
+    .await;
+    wait_for("A applies B's revocation of D", || async {
+        (a.state.peers.is_revoked(&idd) && !a.state.peers.is_pinned(&idd)).then_some(())
+    })
+    .await;
+    assert!(audit_about(&a, "peer_revoked", idd)
+        .iter()
+        .any(|e| e.fields["source"] == "peer"));
+    assert_eq!(
+        peer_entry(&get(&a, "/api/peers").await, idb)["held"],
+        true,
+        "still held"
+    );
+    assert_eq!(peer_entry(&get(&b, "/api/peers").await, ida)["connected"], false);
+    assert_eq!(
+        audit_about(&b, "peer_connected", ida).len(),
+        b_connects_before,
+        "B never got in"
+    );
+    a.stop().await;
+    b.stop().await;
+}
+
+/// **SINGLE-HOST**: a refusal only the device's own key can send (here `peer_held`) ends the dial.
+/// A stale pinned address tried after it would fail later with "no answer" and become the
+/// device's `last_error`, hiding why it is refused. A's Node is started by hand (networking stays
+/// off in A's settings), so no sync loop races this dial.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_refusal_ends_the_dial_single_host() {
+    let (a, _da) = empty_server().await;
+    let (b, _db) = empty_server().await;
+    let b_addr: std::net::SocketAddr = listen_addr(&enable_network(&b, true).await).parse().unwrap();
+    let stale = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", Some(stale.local_addr().unwrap().to_string()));
+    pin(&b, ida, "A", None);
+    let (status, _) = post(&b, &format!("/api/peers/{}/disconnect", ida.to_hex()), json!({})).await;
+    assert_eq!(status, 200);
+    let na = common_network::transport::Node::start(
+        NetworkConfig {
+            enabled: true,
+            ..cfg().network
+        },
+        a.state.identity.clone(),
+        a.state.peers.clone(),
+        a.state.policy(),
+        a.state.audit.clone(),
+    )
+    .await
+    .unwrap();
+
+    let e = a.state.peer_connection_via(&na, idb, Some(b_addr)).await.unwrap_err();
+    assert_eq!(e.code, common_core::ErrorCode::PeerHeld, "{e}");
+    assert_eq!(
+        na.dial_failure(&idb).map(|f| (f.addr, f.code)),
+        Some((b_addr, common_core::ErrorCode::PeerHeld))
+    );
+    let mut buf = [0u8; 2048];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), stale.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "the stale pinned address was not dialled"
+    );
+    na.shutdown().await;
     a.stop().await;
     b.stop().await;
 }

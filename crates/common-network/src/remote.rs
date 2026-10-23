@@ -51,6 +51,21 @@ fn short(s: &str) -> String {
     s.chars().take(MAX_ECHO).collect()
 }
 
+/// Longest `finish_reason` kept from a peer ("stop", "length", "tool_calls" ...).
+const MAX_FINISH_REASON: usize = 32;
+
+/// A peer's generation event as this device keeps it: its `finish_reason` is peer text that lands
+/// in job rows (served on every `GET /api/jobs`) and the caller's response, so it is capped like
+/// other peer text.
+fn peer_event(json: &str) -> Result<GenerateEvent> {
+    let mut ev: GenerateEvent = serde_json::from_str(json)
+        .map_err(|_| CommonError::new(ErrorCode::ProtocolIncompatible, "undecodable event from peer"))?;
+    if let GenerateEvent::Done { finish_reason, .. } = &mut ev {
+        *finish_reason = finish_reason.chars().take(MAX_FINISH_REASON).collect();
+    }
+    Ok(ev)
+}
+
 /// The privacy gate both sides apply: only `trusted_group` may leave the device. The routing
 /// decision proper (`PolicyEngine::evaluate`, I-05) belongs to the caller; this is the last line,
 /// so a `local_only` request never opens a stream even if a caller forgot to ask the engine.
@@ -121,8 +136,7 @@ impl Client {
                 "peer answered with a chunk for another request",
             ));
         }
-        let mut ev: GenerateEvent = serde_json::from_str(&c.event_json)
-            .map_err(|_| CommonError::new(ErrorCode::ProtocolIncompatible, "undecodable event from peer"))?;
+        let mut ev = peer_event(&c.event_json)?;
         match &mut ev {
             GenerateEvent::Token { .. } if self.first_token.is_none() => {
                 let ttft = self.started.elapsed();
@@ -864,5 +878,29 @@ mod tests {
         assert_eq!(e.code, ErrorCode::IntegrityMismatch);
         assert!(e.message.contains("no substitution") && e.message.contains("bb"));
         assert!(e.message.len() < 2 * MAX_ECHO + 100);
+    }
+
+    /// A peer's `finish_reason` is kept at most [`MAX_FINISH_REASON`] characters: a peer cannot
+    /// park text (a completion, a megabyte) in every job row it answers.
+    #[test]
+    fn peer_finish_reason_is_capped() {
+        let done = |reason: &str| {
+            serde_json::to_string(&GenerateEvent::Done {
+                finish_reason: reason.into(),
+                usage: Usage::default(),
+                timings: Default::default(),
+            })
+            .unwrap()
+        };
+        let reason = |json: &str| match peer_event(json).unwrap() {
+            GenerateEvent::Done { finish_reason, .. } => finish_reason,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reason(&done("stop")), "stop");
+        assert_eq!(reason(&done(&"é".repeat(1 << 19))), "é".repeat(MAX_FINISH_REASON));
+        assert_eq!(
+            peer_event("not json").unwrap_err().code,
+            ErrorCode::ProtocolIncompatible
+        );
     }
 }

@@ -4,19 +4,24 @@ mod common;
 
 use common::{audit_kinds, child_home, child_value, pair, poll_until, spawn_child, start_relay, Peer};
 use common_core::ErrorCode;
+use common_identity::PeerId;
 use common_network::health::{supervise, PeerHealth};
 use common_network::proto::{
-    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, SignedCapabilities,
+    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, RevocationMsg,
+    SignedCapabilities,
 };
 use common_network::tls::{self, PeerPolicy};
 use common_network::transport::{
-    map_conn_error, sign_capabilities, sign_capabilities_record, verify_capabilities, Node, CLOSE_FRAME_TOO_LARGE,
-    CLOSE_PROTOCOL, CLOSE_REVOKED,
+    map_conn_error, sign_capabilities, sign_capabilities_record, verify_capabilities, ControlStream, HeldControl, Node,
+    CLOSE_FRAME_TOO_LARGE, CLOSE_HELD, CLOSE_PROTOCOL, CLOSE_REVOKED, CLOSE_UNAUTHORIZED,
 };
-use common_network::{ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
+use common_network::{
+    ALPN_WORKLOAD, HELD_EXCHANGE_MINOR, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+};
+use futures_util::future::BoxFuture;
 use prost::Message;
 use quinn::ConnectionError;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -103,13 +108,17 @@ async fn unpinned_key_rejected() {
     assert_eq!(e.code, ErrorCode::PeerUnauthorized);
 }
 
+/// B's verifier refuses A's revoked key inside the handshake. A cannot tell that alert from one
+/// forged on the path (it arrives before B sent any authenticated control data), so A reads it as
+/// a device that did not prove it is B, never as revoked; nothing is accepted on B.
 #[tokio::test]
 async fn revoked_key_rejected() {
     let (a, b) = pair();
     b.peers.revoke(&a.id(), &b.identity).unwrap();
     let (na, nb) = (a.start().await, b.start().await);
     let e = na.connect(nb.local_addr().unwrap(), b.id()).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::PeerRevoked, "{e}");
+    assert_eq!(e.code, ErrorCode::PeerUnauthorized, "{e}");
+    assert!(e.message.contains("did not prove"), "{e}");
     assert!(timeout(Duration::from_millis(500), nb.accept()).await.is_err());
     // Local revocation refuses before connecting.
     a.peers.revoke(&b.id(), &a.identity).unwrap();
@@ -117,15 +126,15 @@ async fn revoked_key_rejected() {
     assert_eq!(e.code, ErrorCode::PeerRevoked);
 }
 
-/// A server Initial packet that closes the connection with TLS alert `alert`, answering the
-/// client Initial `client`. Initial keys come from the client's public destination connection id
-/// (RFC 9001 5.2), so anything that sees the dial can send this before showing any key.
-fn forged_initial_close(client: &[u8], alert: u8) -> Vec<u8> {
+/// A server Initial packet with source connection id `scid` and packet number `pn` carrying
+/// `frame`, answering the client Initial `client`. Initial keys come from the client's public
+/// destination connection id (RFC 9001 5.2), so anything that sees the dial can send this.
+fn forged_initial(client: &[u8], scid: &[u8], pn: u8, frame: &[u8]) -> Vec<u8> {
     use rustls::quic::{Keys, Version};
     let dcid_len = usize::from(client[5]);
     let client_dcid = &client[6..6 + dcid_len];
-    let scid_len = usize::from(client[6 + dcid_len]);
-    let client_scid = &client[7 + dcid_len..7 + dcid_len + scid_len];
+    let cscid_len = usize::from(client[6 + dcid_len]);
+    let client_scid = &client[7 + dcid_len..7 + dcid_len + cscid_len];
     let suite = rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256
         .tls13()
         .unwrap();
@@ -136,25 +145,37 @@ fn forged_initial_close(client: &[u8], alert: u8) -> Vec<u8> {
         client_dcid,
         rustls::Side::Server,
     );
-    // CONNECTION_CLOSE (0x1c), error 0x100 + alert as a 2-byte varint, frame type 0, no reason; PADDING.
-    let mut payload = vec![0x1c, 0x41, alert, 0, 0];
-    payload.resize(20, 0);
-    let mut p = vec![0xc0, 0, 0, 0, 1, scid_len as u8]; // Initial, 1-byte packet number, QUIC v1
+    let mut payload = frame.to_vec();
+    payload.resize(payload.len().max(20), 0); // PADDING: room for the header protection sample
+    let mut p = vec![0xc0, 0, 0, 0, 1, cscid_len as u8]; // Initial, 1-byte packet number, QUIC v1
     p.extend_from_slice(client_scid);
-    p.extend_from_slice(&[8, 1, 2, 3, 4, 5, 6, 7, 8, 0]); // our id, no token
+    p.push(scid.len() as u8);
+    p.extend_from_slice(scid);
+    p.push(0); // no token
     let len = 1 + payload.len() + 16;
-    p.extend_from_slice(&[0x40 | (len >> 8) as u8, len as u8, 0]); // length, packet number 0
-    let pn = p.len() - 1;
-    let tag = keys.local.packet.encrypt_in_place(0, &p, &mut payload).unwrap();
+    p.extend_from_slice(&[0x40 | (len >> 8) as u8, len as u8, pn]);
+    let pn_at = p.len() - 1;
+    let tag = keys
+        .local
+        .packet
+        .encrypt_in_place(u64::from(pn), &p, &mut payload)
+        .unwrap();
     p.extend_from_slice(&payload);
     p.extend_from_slice(tag.as_ref());
-    let sample = p[pn + 4..pn + 20].to_vec();
+    let sample = p[pn_at + 4..pn_at + 20].to_vec();
     let (head, rest) = p.split_at_mut(1);
     keys.local
         .header
-        .encrypt_in_place(&sample, &mut head[0], &mut rest[pn - 1..pn])
+        .encrypt_in_place(&sample, &mut head[0], &mut rest[pn_at - 1..pn_at])
         .unwrap();
     p
+}
+
+/// A server Initial packet that closes the connection with TLS alert `alert`, answering the
+/// client Initial `client`, before any key was shown.
+fn forged_initial_close(client: &[u8], alert: u8) -> Vec<u8> {
+    // CONNECTION_CLOSE (0x1c), error 0x100 + alert as a 2-byte varint, frame type 0, no reason.
+    forged_initial(client, &[1, 2, 3, 4, 5, 6, 7, 8], 0, &[0x1c, 0x41, alert, 0, 0])
 }
 
 /// A `certificate_revoked` alert from an address where the dialled device never showed its key
@@ -186,6 +207,280 @@ async fn forged_revoked_alert_before_the_key_is_not_a_revocation() {
         e.hint.as_deref().unwrap_or("").contains("nothing was trusted or saved"),
         "{e}"
     );
+}
+
+/// A QUIC varint at the start of `b`: (value, its length).
+fn varint(b: &[u8]) -> (usize, usize) {
+    let k = 1usize << (b[0] >> 6);
+    let v = b[1..k]
+        .iter()
+        .fold(usize::from(b[0] & 0x3f), |v, x| v << 8 | usize::from(*x));
+    (v, k)
+}
+
+/// Where the long-header packets at the start of datagram `d` end, when one of them is a
+/// Handshake packet (the server's flight: Certificate, CertificateVerify, Finished).
+fn after_handshake_packets(d: &[u8]) -> Option<usize> {
+    let (mut at, mut handshake) = (0, false);
+    while at < d.len() && d[at] & 0x80 != 0 {
+        let kind = (d[at] >> 4) & 3; // 0 Initial, 1 0-RTT, 2 Handshake, 3 Retry
+        if kind == 3 {
+            return None;
+        }
+        handshake |= kind == 2;
+        let mut p = at + 6 + usize::from(d[at + 5]);
+        p += 1 + usize::from(d[p]);
+        if kind == 0 {
+            let (token, k) = varint(&d[p..]);
+            p += k + token;
+        }
+        let (len, k) = varint(&d[p..]);
+        at = p + k + len;
+    }
+    handshake.then_some(at)
+}
+
+/// TEST-ONLY on-path attacker in front of `server`: relays a dial both ways and, into the
+/// server's first datagram that carries its Handshake flight, right after that flight, inserts a
+/// forged Initial packet carrying `frame` (a CONNECTION_CLOSE). The dialler checks the genuine
+/// key, signature and Finished, then processes the forgery before it sends anything (its Initial
+/// keys are still live). Returns the address to dial and whether the forgery went out.
+async fn forging_relay(server: std::net::SocketAddr, frame: Vec<u8>) -> (std::net::SocketAddr, Arc<AtomicBool>) {
+    let r_in = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let r_out = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let front = r_in.local_addr().unwrap();
+    let forged = Arc::new(AtomicBool::new(false));
+    let done = forged.clone();
+    tokio::spawn(async move {
+        let (mut bi, mut bo) = (vec![0u8; 65535], vec![0u8; 65535]);
+        let (mut client, mut initial) = (None, None::<Vec<u8>>);
+        loop {
+            tokio::select! {
+                r = r_in.recv_from(&mut bi) => {
+                    let Ok((n, from)) = r else { return };
+                    client = Some(from);
+                    if bi[0] & 0xb0 == 0x80 {
+                        initial = Some(bi[..n].to_vec()); // the client's latest Initial: its keys
+                    }
+                    let _ = r_out.send_to(&bi[..n], server).await;
+                }
+                r = r_out.recv_from(&mut bo) => {
+                    let (Ok((n, _)), Some(to)) = (r, client) else { continue };
+                    let mut d = bo[..n].to_vec();
+                    if let (false, Some(at), Some(ci)) = (done.load(Ordering::SeqCst), after_handshake_packets(&d), &initial) {
+                        let scid = &d[7 + usize::from(d[5])..][..usize::from(d[6 + usize::from(d[5])])];
+                        let packet = forged_initial(ci, scid, 9, &frame);
+                        d.splice(at..at, packet);
+                        done.store(true, Ordering::SeqCst);
+                    }
+                    let _ = r_in.send_to(&d, to).await;
+                }
+            }
+        }
+    });
+    (front, forged)
+}
+
+/// trust-3: a close appended on the path to the device's genuine flight (after its pinned key was
+/// shown and its signature and Finished checked) is processed by the dialler in the Initial space,
+/// whose keys anyone on the path has: it proves nothing. Neither a `certificate_revoked` alert nor
+/// a `CLOSE_HELD` reads as `peer_revoked`/`peer_held`, so it can never end a dial walk; it reads
+/// as another device at that address. SINGLE-HOST: an in-process relay on loopback forges it.
+#[tokio::test]
+async fn a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host() {
+    let (a, b) = pair();
+    let (na, nb) = (a.start().await, b.start().await);
+    let held = CLOSE_HELD.to_be_bytes();
+    for (what, frame) in [
+        ("certificate_revoked", vec![0x1c, 0x41, 44, 0, 0]),
+        ("CLOSE_HELD", vec![0x1d, 0x80, held[1], held[2], held[3], 0]),
+    ] {
+        let (front, forged) = forging_relay(nb.local_addr().unwrap(), frame).await;
+        let e = timeout(Duration::from_secs(10), na.connect(front, b.id()))
+            .await
+            .expect("the forged close ends the dial")
+            .unwrap_err();
+        assert!(forged.load(Ordering::SeqCst), "{what}: the forgery was sent");
+        assert_eq!(e.code, ErrorCode::PeerUnauthorized, "{what}: {e}");
+        assert!(
+            e.message
+                .contains(&format!("{front} did not prove it is {}", b.id().short_label())),
+            "{what}: {e}"
+        );
+        eprintln!("SINGLE-HOST forged {what} after the genuine flight: {e}");
+    }
+    assert!(nb.connections().is_empty());
+}
+
+/// Counts what a held exchange hands the daemon; writes nothing.
+#[derive(Default)]
+struct Counts {
+    offers: AtomicUsize,
+    received: AtomicUsize,
+}
+
+struct CountingHook(Arc<Counts>);
+
+impl HeldControl for CountingHook {
+    fn offer<'a>(&'a self, _: PeerId, _: &'a mut ControlStream) -> BoxFuture<'a, bool> {
+        self.0.offers.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { true })
+    }
+    fn received<'a>(&'a self, _: &'a Node, _: PeerId, _: ControlMessage) -> BoxFuture<'a, ()> {
+        self.0.received.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+}
+
+/// `b`'s Node holding `a` (E5), with the daemon's held exchange stood in for by counters.
+async fn holder(a: &common::Peer, b: &common::Peer) -> (Arc<Node>, Arc<Counts>) {
+    let nb = b.start().await;
+    let counts = Arc::new(Counts::default());
+    nb.set_held_control(Box::new(CountingHook(counts.clone())));
+    nb.hold(&a.id());
+    (nb, counts)
+}
+
+fn caps_frame(me: &common::Peer) -> ControlMessage {
+    Body::Capabilities(sign_capabilities(&me.identity, "{}".into(), 1, &[], &[]).unwrap()).into()
+}
+
+/// E5 across protocol minors, SINGLE-HOST. A held peer below [`HELD_EXCHANGE_MINOR`] (the
+/// deployed minor-0 builds) gets `CLOSE_HELD` right after its Capabilities, with no frame first
+/// (an `ErrorMsg` where it expects Capabilities would read as a protocol error there); a minor-1
+/// peer gets `ErrorMsg{peer_held}` first, then the revocation exchange, then `CLOSE_HELD`. One
+/// `peer_rejected` line (reason `held`) per hold. Unheld, a minor-0 peer still connects at minor 0.
+/// (Pairing carries no protocol minor.)
+#[tokio::test]
+async fn a_held_peer_of_each_minor_reads_the_hold_single_host() {
+    let (a, b) = pair();
+    let (nb, counts) = holder(&a, &b).await;
+    let addr = nb.local_addr().unwrap();
+
+    let old = HELD_EXCHANGE_MINOR - 1;
+    let (_ep, conn, mut send, mut recv, theirs) = raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, old)).await;
+    assert_eq!(theirs.minor, PROTOCOL_MINOR);
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let frame = read_frame(&mut recv, MAX_CONTROL_FRAME).await;
+    assert!(!matches!(frame, Ok(Some(_))), "no frame before the close: {frame:?}");
+    let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_HELD)), "{reason:?}");
+    assert_eq!(map_conn_error(&reason).code, ErrorCode::PeerHeld);
+    assert_eq!(
+        counts.offers.load(Ordering::SeqCst),
+        0,
+        "nothing exchanged at minor {old}"
+    );
+
+    let (_ep, conn, mut send, mut recv, _) =
+        raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, HELD_EXCHANGE_MINOR)).await;
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    match read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap() {
+        Some(ControlMessage {
+            body: Some(Body::Error(e)),
+        }) => assert_eq!(e.code, "peer_held"),
+        other => panic!("expected ErrorMsg peer_held, got {:?}", other.map(|m| m.body)),
+    }
+    assert!(
+        read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap().is_none(),
+        "the holder's records end"
+    );
+    send.finish().unwrap();
+    let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_HELD)), "{reason:?}");
+    assert_eq!(counts.offers.load(Ordering::SeqCst), 1);
+    let held: Vec<_> = b
+        .audit
+        .tail(50)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "peer_rejected" && e.fields["reason"] == "held")
+        .collect();
+    assert_eq!(held.len(), 1, "{held:?}");
+
+    nb.release(&a.id());
+    let (_ep, conn, mut send, mut recv, _) = raw_after_hello(&a, addr, hello(&a, PROTOCOL_MAJOR, old)).await;
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let accepted = timeout(Duration::from_secs(5), nb.accept()).await.unwrap().unwrap();
+    assert_eq!(accepted.negotiated_minor, old);
+    assert!(matches!(
+        read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await.unwrap(),
+        Some(ControlMessage {
+            body: Some(Body::Capabilities(_))
+        })
+    ));
+    assert!(conn.close_reason().is_none());
+}
+
+/// F-06-05 on a held exchange (E5), SINGLE-HOST: like a registered connection, it exchanges
+/// nothing with a key the store stopped allowing meanwhile, and a revoke or unpair closes it at
+/// once. (1) Revoked after Hello: the holder offers nothing and closes `CLOSE_REVOKED`. (2) Unpaired
+/// after the holder's records: the peer's frame is not applied, closed `CLOSE_UNAUTHORIZED`.
+/// (3) Revoked while the holder waits for the peer's records: closed `CLOSE_REVOKED` at once, not
+/// at the exchange's 10 s bound.
+#[tokio::test]
+async fn a_held_exchange_follows_the_store_single_host() {
+    let first_frame = |recv: quinn::RecvStream| async move {
+        let mut recv = recv;
+        let _ = read_frame(&mut recv, MAX_CONTROL_FRAME).await;
+        recv
+    };
+
+    let (a, b) = pair();
+    let (nb, counts) = holder(&a, &b).await;
+    let (_ep, conn, mut send, _recv, _) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR)).await;
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_REVOKED)), "{reason:?}");
+    assert_eq!(
+        counts.offers.load(Ordering::SeqCst),
+        0,
+        "nothing offered to a revoked key"
+    );
+
+    let (a, b) = pair();
+    let (nb, counts) = holder(&a, &b).await;
+    let (_ep, conn, mut send, recv, _) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR)).await;
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let mut recv = first_frame(recv).await; // peer_held
+    assert!(read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap().is_none());
+    b.peers.remove(&a.id()).unwrap();
+    let rev = RevocationMsg {
+        seq: 1,
+        peer_id: vec![9; 32],
+        revoked_by: a.id().0.to_vec(),
+        at_utc: "2026-10-22T00:00:00Z".into(),
+        signature: vec![0; 64],
+    };
+    write_frame(&mut send, &Body::Revocation(rev).into()).await.unwrap();
+    send.finish().unwrap();
+    let reason = timeout(Duration::from_secs(5), conn.closed()).await.expect("closed");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_UNAUTHORIZED)), "{reason:?}");
+    assert_eq!(
+        counts.received.load(Ordering::SeqCst),
+        0,
+        "nothing applied from an unpaired key"
+    );
+
+    let (a, b) = pair();
+    let (nb, _counts) = holder(&a, &b).await;
+    let (_ep, conn, mut send, recv, _) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, PROTOCOL_MINOR)).await;
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let mut recv = first_frame(recv).await;
+    assert!(read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap().is_none());
+    // The holder now waits for a's records, which never come.
+    let t0 = Instant::now();
+    b.peers.revoke(&a.id(), &b.identity).unwrap();
+    nb.disconnect(&a.id(), "revoked").await;
+    let reason = timeout(Duration::from_secs(3), conn.closed())
+        .await
+        .expect("the revoke closed the held exchange");
+    assert_eq!(app_close(&reason), Some(u64::from(CLOSE_REVOKED)), "{reason:?}");
+    eprintln!("SINGLE-HOST held exchange closed {:?} after the revoke", t0.elapsed());
 }
 
 #[tokio::test]

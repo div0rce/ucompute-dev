@@ -12,21 +12,25 @@
 //! or with another error at that address ([`Node::dial_failure`] keeps the latest).
 use crate::health::{HealthTracker, PeerHealth};
 use crate::proto::{
-    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, Hello, SignedCapabilities,
+    control_message::Body, read_frame, write_frame, Capabilities, ControlMessage, ErrorMsg, Hello, SignedCapabilities,
 };
 use crate::tls::{self, Check, PeerPolicy, Verdict};
-use crate::{NetworkConfig, ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
+use crate::{
+    NetworkConfig, ALPN_WORKLOAD, HELD_EXCHANGE_MINOR, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
+};
 use common_core::{CommonError, ErrorCode, Result};
 use common_identity::{utc_now, DeviceIdentity, PeerId, PeerStore};
 use common_observability::Audit;
 use common_policy::PolicyEngine;
+use futures_util::future::BoxFuture;
 use prost::Message;
 use quinn::{ConnectionError, IdleTimeout, TransportConfig, TransportErrorCode, VarInt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -211,9 +215,24 @@ pub struct Node {
     /// Latest failed outbound dial per (peer, address) since the peer's last connection.
     dial_failures: Mutex<HashMap<(PeerId, SocketAddr), (DialFailure, Instant)>>,
     /// Peers this device's owner disconnected ([`Node::hold`]), each with whether a refused
-    /// inbound connection from it was audited during this hold. In memory: a new Node (networking
-    /// or service restart) starts empty.
+    /// inbound connection from it was audited during this hold. In memory: a new Node starts empty
+    /// (the daemon re-holds [`Node::held`] when it restarts the Node with networking still on).
     held: Mutex<HashMap<PeerId, bool>>,
+    /// What a held connection carries ([`Node::set_held_control`]).
+    held_control: OnceLock<Box<dyn HeldControl>>,
+    /// Connections in a held exchange now ([`Node::held_exchange`]): never registered, so
+    /// [`Node::close_peer`] closes them from here.
+    held_conns: Mutex<Vec<(PeerId, quinn::Connection)>>,
+}
+
+/// The daemon's half of ADR-0003 D7 on a connection a hold refuses (E5): a hold stops work and
+/// connections, never revocations. Set once per Node ([`Node::set_held_control`]); without it a
+/// held connection is closed at once and nothing is exchanged.
+pub trait HeldControl: Send + Sync {
+    /// Write what is due at `peer` (its revocations) to `control.send`; false once that failed.
+    fn offer<'a>(&'a self, peer: PeerId, control: &'a mut ControlStream) -> BoxFuture<'a, bool>;
+    /// A control message `peer` sent on the held connection.
+    fn received<'a>(&'a self, node: &'a Node, peer: PeerId, msg: ControlMessage) -> BoxFuture<'a, ()>;
 }
 
 /// Fixed one-minute window over inbound `peer_rejected` audit lines.
@@ -283,16 +302,34 @@ fn no_answer(addr: SocketAddr, idle_timeout_ms: u64) -> CommonError {
     ))
 }
 
-/// A handshake refusal is `expected`'s verdict only once its key was `shown`: rustls checks the
-/// key right before the server's signature and a bad signature closes the dial here, so a refusal
-/// arriving after that came from the key's holder. Before it, anything at `addr` can send one (an
-/// Initial CONNECTION_CLOSE needs only the public connection id), or it showed another key: that is
-/// another device at `addr` (`peer_unauthorized`), never "revoked".
-fn unproven(e: CommonError, shown: bool, addr: SocketAddr, expected: &PeerId) -> CommonError {
-    if shown || !matches!(e.code, ErrorCode::PeerRevoked | ErrorCode::PeerUnauthorized) {
+/// The error for a dial that ended with `c` before the device at `addr` proved it is `expected`.
+/// Proof is authenticated data from it: its Hello read on the control stream
+/// ([`Node::finish_handshake`]). Until then the dialler still accepts Initial packets (quinn drops
+/// their keys only when it sends its first Handshake packet, after the server's whole flight was
+/// processed), and their keys come from the public connection id: anything at or on the path to
+/// `addr` can close the dial with any code, even after the pinned key was shown and its signature
+/// checked (a relay appends the close to the device's genuine flight). So no close received (TLS
+/// alert or application code) is `expected`'s verdict here. This device's own verifier's is:
+/// `shown` says it judged `expected`'s key, else the device at `addr` showed another key. An
+/// application close before `connected` (this side's TLS handshake done) is not even Common's
+/// (it closes with one only after its handshake). An unproven refusal reads as another device at
+/// `addr` (`peer_unauthorized`), never as revoked or held, so it never ends a dial walk
+/// (`AppState::peer_connection_via` in the daemon).
+fn unproven(c: &ConnectionError, shown: bool, connected: bool, addr: SocketAddr, expected: &PeerId) -> CommonError {
+    let e = map_conn_error(c);
+    let refusal = matches!(
+        e.code,
+        ErrorCode::PeerRevoked | ErrorCode::PeerUnauthorized | ErrorCode::PeerHeld
+    );
+    let proven = match c {
+        ConnectionError::TransportError(_) => shown || !refusal,
+        ConnectionError::ApplicationClosed(_) if !connected => e.code == ErrorCode::PeerLost,
+        _ => !refusal,
+    };
+    if proven {
         return e;
     }
-    tracing::debug!(%addr, code = %e.code, message = %e.message, "refusal before the pinned key was shown");
+    tracing::debug!(%addr, code = %e.code, message = %e.message, "refusal before the device proved its key");
     CommonError::new(
         ErrorCode::PeerUnauthorized,
         format!("the device at {addr} did not prove it is {}", expected.short_label()),
@@ -568,6 +605,8 @@ impl Node {
             rejections: Mutex::new(RejectionLog::new(Instant::now())),
             dial_failures: Mutex::new(HashMap::new()),
             held: Mutex::new(HashMap::new()),
+            held_control: OnceLock::new(),
+            held_conns: Mutex::new(vec![]),
         });
         tracing::info!(addr = %endpoint.local_addr()?, "peer endpoint listening");
         // The loop holds only a Weak: dropping the last Node closes the endpoint (Drop) and ends it.
@@ -631,12 +670,19 @@ impl Node {
         )
     }
 
+    /// Hello, then Capabilities; `None` for the peer's capabilities when the connection is held
+    /// (E5, minor [`HELD_EXCHANGE_MINOR`]): the acceptor that holds the connector (`held`) answers
+    /// its Capabilities with `peer_held` instead of its own, and the connector reads that answer.
+    /// A held connector of an older minor gets `peer_held` as an error (closed with `CLOSE_HELD`).
+    /// `proven` is set once the peer's Hello was read (see [`unproven`]).
     async fn control_exchange(
         &self,
         conn: &quinn::Connection,
         peer: PeerId,
         connector: bool,
-    ) -> Result<(ControlStream, Capabilities, u32)> {
+        held: bool,
+        proven: &mut bool,
+    ) -> Result<(ControlStream, Option<Capabilities>, u32)> {
         let lost = |m: &str| CommonError::new(ErrorCode::PeerLost, m);
         let (mut send, mut recv) = if connector {
             conn.open_bi().await
@@ -660,6 +706,7 @@ impl Node {
             }
             None => return Err(lost("peer closed the control stream before Hello")),
         };
+        *proven = true;
         if theirs.peer_id != peer.0 {
             return Err(CommonError::new(
                 ErrorCode::PeerUnauthorized,
@@ -678,6 +725,11 @@ impl Node {
             Some(ControlMessage {
                 body: Some(Body::Capabilities(c)),
             }) => c,
+            Some(ControlMessage {
+                body: Some(Body::Error(e)),
+            }) if connector && e.code == ErrorCode::PeerHeld.as_str() => {
+                return Ok((ControlStream { send, recv }, None, minor));
+            }
             Some(_) => {
                 return Err(CommonError::new(
                     ErrorCode::ProtocolIncompatible,
@@ -687,25 +739,45 @@ impl Node {
             None => return Err(lost("peer closed the control stream before Capabilities")),
         };
         let caps = verify_capabilities(&signed, &peer)?;
+        if !connector && held {
+            let e = app_error(u64::from(CLOSE_HELD), b"held");
+            if minor < HELD_EXCHANGE_MINOR {
+                return Err(e);
+            }
+            let msg = ErrorMsg {
+                code: e.code.as_str().into(),
+                message: e.message,
+            };
+            write_frame(&mut send, &Body::Error(msg).into()).await?;
+            return Ok((ControlStream { send, recv }, None, minor));
+        }
         if !connector {
             write_frame(&mut send, &Body::Capabilities(mine).into()).await?;
         }
-        Ok((ControlStream { send, recv }, caps, minor))
+        Ok((ControlStream { send, recv }, Some(caps), minor))
     }
 
     /// The control exchange with a deadline; on failure the connection is closed with the typed
-    /// code, and a close received from the peer explains the failure instead of our read error.
+    /// code, and a close received from the peer explains the failure instead of our read error. On
+    /// the connector, a refusal closed before the peer's Hello was read proves nothing
+    /// ([`unproven`]): only then are its Initial keys gone and its peer the key's holder.
     async fn finish_handshake(
         &self,
         conn: &quinn::Connection,
         peer: PeerId,
         connector: bool,
-    ) -> Result<(ControlStream, Capabilities, u32)> {
-        let r = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.control_exchange(conn, peer, connector))
-            .await
-            .unwrap_or_else(|_| Err(CommonError::new(ErrorCode::Timeout, "control handshake timed out")));
+        held: bool,
+    ) -> Result<(ControlStream, Option<Capabilities>, u32)> {
+        let mut proven = !connector;
+        let r = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            self.control_exchange(conn, peer, connector, held, &mut proven),
+        )
+        .await
+        .unwrap_or_else(|_| Err(CommonError::new(ErrorCode::Timeout, "control handshake timed out")));
         r.map_err(|e| {
             let e = match conn.close_reason() {
+                Some(reason) if !proven => unproven(&reason, true, true, conn.remote_address(), &peer),
                 Some(reason) => map_conn_error(&reason),
                 None => e,
             };
@@ -868,14 +940,29 @@ impl Node {
             conn.close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
             return rejected(Some(&peer), e);
         }
-        if self.is_held(&peer) {
+        let held = self.is_held(&peer);
+        if held && self.held_control.get().is_none() {
             conn.close(VarInt::from_u32(CLOSE_HELD), b"held");
             return self.held_refused(&peer, &addr);
         }
-        let registered = self
-            .finish_handshake(&conn, peer, false)
-            .await
-            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor, false)?, minor)));
+        let registered = match self.finish_handshake(&conn, peer, false, held).await {
+            // Held (E5): revocations only, then the close the peer reads as `peer_held`.
+            Ok((control, None, _)) => match self.held_exchange(&conn, peer, control, true).await {
+                Ok(()) => {
+                    conn.close(VarInt::from_u32(CLOSE_HELD), b"held");
+                    return self.held_refused(&peer, &addr);
+                }
+                // The store refused it meanwhile (F-06-05).
+                Err(e) => {
+                    conn.close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+                    return rejected(Some(&peer), e);
+                }
+            },
+            Ok((control, Some(caps), minor)) => self
+                .register(conn, peer, control, caps, minor, false)
+                .map(|r| (r, minor)),
+            Err(e) => Err(e),
+        };
         match registered {
             // An inbound connection is never retired here (only its initiator retires it), so it
             // is always handed to `accept`; a duplicate is closed by the peer once idle.
@@ -896,10 +983,14 @@ impl Node {
 
     /// E5: close every connection to `peer` with [`CLOSE_HELD`] (audited `peer_disconnected`,
     /// reason `by_user`) and refuse it in both directions until [`Node::release`] or this Node
-    /// stops (networking turned off or restarted, the service restarted). The hold lives in this
-    /// Node's memory (owner decision 3); a process with its own Node (`common run --peer` builds a
-    /// client-only one) asks the running daemon (`GET /api/peers` `held`) and holds the device in
-    /// its Node before dialling, so [`Node::connect`] refuses it there too.
+    /// stops (the daemon carries its holds over a restart that keeps networking on: [`Node::held`]).
+    /// The hold lives in this Node's memory (owner decision 3); a process with its own Node
+    /// (`common run --peer` builds a client-only one) asks the running daemon (`GET /api/peers`
+    /// `held`) and holds the device in its Node before dialling, so [`Node::connect`] refuses it
+    /// there too. Revocations still cross it: each connection the held device opens carries them
+    /// both ways before it is closed ([`HeldControl`], from [`HELD_EXCHANGE_MINOR`]).
+    // ponytail: the held device's redials carry the exchange, so two devices holding each other
+    // exchange nothing until one connects; a holder-side exchange dial if that ever matters.
     pub fn hold(&self, peer: &PeerId) {
         lock(&self.held).insert(*peer, false);
         self.close_peer(peer, CLOSE_HELD, "by_user");
@@ -912,6 +1003,92 @@ impl Node {
 
     pub fn is_held(&self, peer: &PeerId) -> bool {
         lock(&self.held).contains_key(peer)
+    }
+
+    /// The peers held now ([`Node::hold`]).
+    pub fn held(&self) -> Vec<PeerId> {
+        lock(&self.held).keys().copied().collect()
+    }
+
+    /// What a held peer's connections carry (see [`HeldControl`]); the first call wins.
+    pub fn set_held_control(&self, c: Box<dyn HeldControl>) {
+        let _ = self.held_control.set(c);
+    }
+
+    /// ADR-0003 D7 across a hold, on the control stream after `peer_held`: the holder writes what
+    /// is due at the peer and ends its stream; the held side reads to that end, then writes its own
+    /// and ends its stream; the holder reads to that end, then closes. Each side's records are read
+    /// before the close that drops unread data. Bounded by [`HANDSHAKE_TIMEOUT`]. The store is
+    /// asked again before this side writes and before each frame read is applied, and a revoke or
+    /// unpair meanwhile closes the connection ([`Node::close_peer`]), as on a registered one
+    /// (F-06-05): `Err` is the store's refusal, and the caller closes with it.
+    async fn held_exchange(
+        &self,
+        conn: &quinn::Connection,
+        peer: PeerId,
+        mut control: ControlStream,
+        holder: bool,
+    ) -> Result<()> {
+        {
+            let mut g = lock(&self.held_conns);
+            // An exchange whose dial was dropped mid-way left its entry: closed ones go here.
+            g.retain(|(_, c)| c.close_reason().is_none());
+            g.push((peer, conn.clone()));
+        }
+        let hook = self.held_control.get().map(Box::as_ref);
+        let run = async {
+            if holder {
+                self.held_offer(hook, peer, &mut control).await?;
+            }
+            while let Ok(Some(msg)) = read_frame(&mut control.recv, MAX_CONTROL_FRAME).await {
+                allowed(&self.peers, &peer)?;
+                if let Some(h) = hook {
+                    h.received(self, peer, msg).await;
+                }
+            }
+            if !holder {
+                self.held_offer(hook, peer, &mut control).await?;
+            }
+            Ok(())
+        };
+        let r = tokio::time::timeout(HANDSHAKE_TIMEOUT, run).await.unwrap_or(Ok(()));
+        lock(&self.held_conns).retain(|(_, c)| c.stable_id() != conn.stable_id());
+        r
+    }
+
+    /// One side's turn in [`Node::held_exchange`]: what `hook` says is due at `peer`, then the end
+    /// of this side's stream; nothing to a peer the store no longer allows.
+    async fn held_offer(
+        &self,
+        hook: Option<&dyn HeldControl>,
+        peer: PeerId,
+        control: &mut ControlStream,
+    ) -> Result<()> {
+        allowed(&self.peers, &peer)?;
+        if let Some(h) = hook {
+            if !h.offer(peer, control).await {
+                return Ok(());
+            }
+        }
+        let _ = control.send.finish();
+        Ok(())
+    }
+
+    /// E5 on the held side: `peer` holds this device and answered its Capabilities with
+    /// `peer_held`. After the revocation exchange ([`Node::held_exchange`]) the holder closes; the
+    /// error is that close (`peer_held`). Nothing is registered: this device never shows it
+    /// connected.
+    async fn held_by_peer(&self, conn: &quinn::Connection, peer: PeerId, control: ControlStream) -> CommonError {
+        if let Err(e) = self.held_exchange(conn, peer, control, false).await {
+            conn.close(VarInt::from_u32(close_code(&e)), e.code.as_str().as_bytes());
+            return e;
+        }
+        let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.closed()).await;
+        let e = conn
+            .close_reason()
+            .map_or_else(|| app_error(u64::from(CLOSE_HELD), b"held"), |r| map_conn_error(&r));
+        conn.close(VarInt::from_u32(CLOSE_OK), b"held");
+        e
     }
 
     /// `PolicyDenied` while `peer` is held: no dial path of this Node (its sync loop, requests and
@@ -1003,24 +1180,17 @@ impl Node {
             Ok(c) => c,
             // The handshake never completed: nothing answered at `addr`.
             Err(ConnectionError::TimedOut) => return Err(no_answer(addr, self.config.idle_timeout_ms)),
-            Err(e) => {
-                return Err(unproven(
-                    map_conn_error(&e),
-                    shown.load(Ordering::SeqCst),
-                    addr,
-                    &expected,
-                ))
-            }
+            Err(e) => return Err(unproven(&e, shown.load(Ordering::SeqCst), false, addr, &expected)),
         };
         let peer = tls::peer_id_of(&conn)?;
-        let registered = self
-            .finish_handshake(&conn, peer, true)
-            .await
-            .and_then(|(control, caps, minor)| Ok((self.register(conn, peer, control, caps, minor, true)?, minor)));
-        let (pc, minor) = match registered? {
-            ((pc, true), minor) => (pc, minor),
+        let (control, caps, minor) = self.finish_handshake(&conn, peer, true, false).await?;
+        let Some(caps) = caps else {
+            return Err(self.held_by_peer(&conn, peer, control).await);
+        };
+        let (pc, minor) = match self.register(conn, peer, control, caps, minor, true)? {
+            (pc, true) => (pc, minor),
             // Retired as a duplicate of the connection returned instead.
-            ((pc, false), _) => return Ok(pc),
+            (pc, false) => return Ok(pc),
         };
         tracing::info!(peer = %peer.short_label(), %addr, minor, "peer connected (outbound)");
         self.audit(
@@ -1106,6 +1276,9 @@ impl Node {
         };
         for c in &victims {
             c.conn.close(VarInt::from_u32(code), reason.as_bytes());
+        }
+        for (_, c) in lock(&self.held_conns).iter().filter(|(p, _)| p == id) {
+            c.close(VarInt::from_u32(code), reason.as_bytes());
         }
         if !victims.is_empty() {
             self.audit(
@@ -1234,6 +1407,56 @@ mod tests {
         ] {
             assert_eq!(close_code(&CommonError::new(ec, "")), code);
             assert_eq!(map_conn_error(&app(code)).code, ec);
+        }
+    }
+
+    /// No close received before the device proved its key is its verdict, whatever it carries and
+    /// whether or not the key was shown: Initial packets that close the dial can be forged by
+    /// anything on the path until the dialler sends its first Handshake packet (after the device's
+    /// whole flight). Before this side's handshake completed, an application close is not even
+    /// Common's, so every code reads as another device; after it, only the refusals (held,
+    /// revoked, unauthorized) do, and a protocol or frame-size close keeps its diagnosis.
+    #[test]
+    fn a_close_before_the_device_proved_its_key_proves_nothing() {
+        let addr: SocketAddr = "10.0.0.9:8193".parse().unwrap();
+        let id = PeerId([7; 32]);
+        let app = |code: u32| {
+            ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+                error_code: VarInt::from_u32(code),
+                reason: b"x".as_slice().into(),
+            })
+        };
+        let unauthorized =
+            |e: &CommonError| e.code == ErrorCode::PeerUnauthorized && e.message.contains("did not prove");
+        for code in [
+            CLOSE_HELD,
+            CLOSE_REVOKED,
+            CLOSE_UNAUTHORIZED,
+            CLOSE_PROTOCOL,
+            CLOSE_FRAME_TOO_LARGE,
+        ] {
+            for shown in [false, true] {
+                let e = unproven(&app(code), shown, false, addr, &id);
+                assert!(unauthorized(&e), "{code:#x} shown={shown}: {e}");
+            }
+        }
+        for code in [CLOSE_HELD, CLOSE_REVOKED, CLOSE_UNAUTHORIZED] {
+            let e = unproven(&app(code), true, true, addr, &id);
+            assert!(unauthorized(&e), "{code:#x} after the handshake: {e}");
+        }
+        assert_eq!(
+            unproven(&app(CLOSE_PROTOCOL), true, true, addr, &id).code,
+            ErrorCode::ProtocolIncompatible
+        );
+        assert_eq!(unproven(&app(0), true, false, addr, &id).code, ErrorCode::PeerLost);
+        let revoked = ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: TransportErrorCode::crypto(A::CertificateRevoked.into()),
+            frame_type: None,
+            reason: Default::default(),
+        });
+        for (shown, connected) in [(false, false), (true, false), (true, true)] {
+            let e = unproven(&revoked, shown, connected, addr, &id);
+            assert!(unauthorized(&e), "shown={shown} connected={connected}: {e}");
         }
     }
 
