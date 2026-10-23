@@ -161,6 +161,3 @@ Unit, SINGLE-HOST and physical tests as listed in the WP-04 plan (commits C1–C
 
 ## 8. Verification record
 Empty until C1–C8, R0, S1 and P1 exist.
-```
-
----
