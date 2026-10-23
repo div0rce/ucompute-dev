@@ -1,0 +1,14 @@
+daemon API run (not app UI): disconnect, connect, Sharing, revoke and pairing go through the two daemons' loopback APIs
+A mous 8983-9a1e-e341  |  B JESS-HP b792-12f0-7455
+PASS baseline: connected, A -> B gives the golden completion {"status": 200, "ms": 76.9, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"}
+PASS disconnect: A shows B held and not connected, B shows A not connected {"status": 200, "ms": 3.1, "a_after_s": 0.001, "b_after_s": 0.016}
+FAIL disconnect: B is told it was disconnected on purpose (peer_held) {"b_last_error": {}}
+PASS held: A's own request to B is refused on A, before anything is sent {"status": 403, "code": "policy_denied", "ms": 1.8}
+PASS held: B's request to A is refused (peer_held) {"status": 403, "code": "peer_held", "ms": 41.2}
+PASS held: no reconnection for 30 s and at most one audit line on A for B's attempts {"reconnected_after_s": null, "held_rejections": 1}
+FAIL held: turning Sharing off and on keeps the hold {"reconnected_after_s": 0.506, "held": false}
+PASS connect: ends the hold, both sides connected {"status": 200, "ms": 0.3, "both_after_s": 0.021, "held": false}
+PASS connect: A -> B gives the golden completion again {"status": 200, "ms": 103.7}
+PASS revoke while held: A unpins B, B's request to A is refused {"revoke_status": 200, "b_status": 403, "b_code": "peer_revoked"}
+PASS re-pair after revoking a held device: connected, not held {"join_status": 200, "connected_after_s": 0.785, "held": false}
+FAILED: disconnect: B is told it was disconnected on purpose (peer_held), held: turning Sharing off and on keeps the hold

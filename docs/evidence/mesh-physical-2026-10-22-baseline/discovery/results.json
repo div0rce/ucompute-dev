@@ -1,0 +1,314 @@
+{
+  "driven": "daemon API run (not app UI): every step goes through the two daemons' loopback APIs",
+  "a": {
+    "connections": 1,
+    "device_name": "mous",
+    "dial_addr": "10.75.79.236:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8983-9a1e-e341"
+  },
+  "b": {
+    "connections": 1,
+    "device_name": "JESS-HP",
+    "dial_addr": "10.75.120.9:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "b792-12f0-7455"
+  },
+  "steps": [
+    {
+      "step": "state: each daemon reports its own host name",
+      "ok": true,
+      "t": "2026-10-22T21:49:13Z",
+      "names": {
+        "A": "mous",
+        "B": "JESS-HP"
+      },
+      "dial_addr": {
+        "A": "10.75.79.236:8193",
+        "B": "10.75.120.9:8193"
+      }
+    },
+    {
+      "step": "state: A sees the other with 1-2 routable addresses, best first",
+      "ok": null,
+      "na": "the network carries no mDNS (multicast dropped), so nothing can be seen nearby",
+      "t": "2026-10-22T21:49:13Z"
+    },
+    {
+      "step": "state: B sees the other with 1-2 routable addresses, best first",
+      "ok": null,
+      "na": "the network carries no mDNS (multicast dropped), so nothing can be seen nearby",
+      "t": "2026-10-22T21:49:13Z"
+    },
+    {
+      "step": "state: last seen advances while connected (E5)",
+      "ok": true,
+      "t": "2026-10-22T21:50:18Z",
+      "before": "2026-10-22T21:48:53Z",
+      "after": "2026-10-22T21:49:53Z"
+    },
+    {
+      "step": "manual: an unpaired id is refused before any packet (requirement 8)",
+      "ok": false,
+      "t": "2026-10-22T21:50:20Z",
+      "status": 403,
+      "ms": 3.7,
+      "b_new_audit": []
+    },
+    {
+      "step": "manual: a hint with no Common device falls through to the pinned address and is not saved",
+      "ok": true,
+      "t": "2026-10-22T21:50:20Z",
+      "status": 200,
+      "ms": 0.5,
+      "hint": "192.0.2.1:8193",
+      "pinned": "10.75.120.9:8193"
+    },
+    {
+      "step": "manual: the address shown on B connects A to B (requirement 5)",
+      "ok": true,
+      "t": "2026-10-22T21:50:20Z",
+      "status": 200,
+      "ms": 0.3,
+      "addr": "10.75.120.9:8193"
+    },
+    {
+      "step": "manual: no peer was added on either side",
+      "ok": true,
+      "t": "2026-10-22T21:50:20Z"
+    },
+    {
+      "step": "pair A shows the code, B joins: wrong code refused, right code pairs",
+      "ok": true,
+      "t": "2026-10-22T21:50:21Z",
+      "pair_addr": "10.75.79.236:49429",
+      "wrong": [
+        401,
+        "pairing failed: closed by peer (code 0x5046 pairing_failed)",
+        111.6
+      ],
+      "right": [
+        200,
+        "mous",
+        143.0
+      ]
+    },
+    {
+      "step": "pair B shows the code, A joins: wrong code refused, right code pairs",
+      "ok": true,
+      "t": "2026-10-22T21:50:21Z",
+      "pair_addr": "10.75.120.9:61923",
+      "wrong": [
+        401,
+        "pairing failed: closed by peer (code 0x5046 pairing_failed)",
+        31.1
+      ],
+      "right": [
+        200,
+        "JESS-HP",
+        36.1
+      ]
+    },
+    {
+      "step": "pair: connected again after re-pairing, named by host name",
+      "ok": true,
+      "t": "2026-10-22T21:50:21Z",
+      "seconds": 0.02,
+      "a_calls_b": "JESS-HP",
+      "b_calls_a": "mous"
+    },
+    {
+      "step": "quit: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-22T21:50:23Z",
+      "seconds": 1.04,
+      "health": "disconnected",
+      "lost_reason": "closed_by_peer",
+      "cmd_output": "SUCCESS: Attempted to run the scheduled task \"CommonTestQuit\"."
+    },
+    {
+      "step": "quit: B's daemon closed the connection itself (graceful stop, not the kill fallback)",
+      "ok": true,
+      "t": "2026-10-22T21:50:23Z",
+      "lost_reason": "closed_by_peer"
+    },
+    {
+      "step": "quit: A drops B from nearby within seconds (goodbye sent on quit, E6)",
+      "ok": null,
+      "na": "the network carries no mDNS (multicast dropped), so nothing can be seen nearby",
+      "t": "2026-10-22T21:50:23Z"
+    },
+    {
+      "step": "quit: B's daemon and engine processes end",
+      "ok": true,
+      "t": "2026-10-22T21:50:28Z",
+      "seconds": 3.5,
+      "procs": "0"
+    },
+    {
+      "step": "quit: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-22T21:50:28Z",
+      "last_error": {
+        "addr": "10.75.120.9:8193",
+        "at_utc": "2026-10-22T21:50:27Z",
+        "code": "peer_lost",
+        "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193",
+        "message": "no answer from 10.75.120.9:8193 within 4 s"
+      }
+    },
+    {
+      "step": "quit: connecting at a dead hint fails with a reason and saves nothing",
+      "ok": true,
+      "t": "2026-10-22T21:50:37Z",
+      "status": 502,
+      "code": "peer_lost",
+      "ms": 8103.1,
+      "message": "no answer from 10.75.120.9:8193 within 4 s",
+      "pinned": "10.75.120.9:8193"
+    },
+    {
+      "step": "quit: one audit line for B while it is away, not one per redial (E4)",
+      "ok": false,
+      "t": "2026-10-22T21:52:37Z",
+      "audit_lines": 2,
+      "watched_s": 136,
+      "lines": [
+        {
+          "fields": {
+            "addr": "10.75.120.9:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+          "ts_utc": "2026-10-22T21:50:27Z"
+        },
+        {
+          "fields": {
+            "addr": "192.0.2.1:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+          "ts_utc": "2026-10-22T21:50:32Z"
+        }
+      ]
+    },
+    {
+      "step": "quit: B restarted, A reconnects (backoff reset by discovery)",
+      "ok": true,
+      "t": "2026-10-22T21:52:45Z",
+      "seconds_after_start": 7.59,
+      "seen_nearby_after": null
+    },
+    {
+      "step": "crash: A shows B as not connected",
+      "ok": true,
+      "t": "2026-10-22T21:52:51Z",
+      "seconds": 4.6,
+      "health": "reconnecting",
+      "lost_reason": "timed_out",
+      "cmd_output": ""
+    },
+    {
+      "step": "crash: B's signed record may stay cached, but A never shows it as connected",
+      "ok": true,
+      "t": "2026-10-22T21:52:51Z",
+      "cached_record": null,
+      "health": "reconnecting"
+    },
+    {
+      "step": "crash: B's daemon and engine processes end",
+      "ok": true,
+      "t": "2026-10-22T21:52:55Z",
+      "seconds": 1.8,
+      "procs": "0"
+    },
+    {
+      "step": "crash: A explains why B is unreachable",
+      "ok": true,
+      "t": "2026-10-22T21:52:56Z",
+      "last_error": {
+        "addr": "10.75.120.9:8193",
+        "at_utc": "2026-10-22T21:52:55Z",
+        "code": "peer_lost",
+        "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193",
+        "message": "no answer from 10.75.120.9:8193 within 4 s"
+      }
+    },
+    {
+      "step": "crash: one audit line for B while it is away, not one per redial (E4)",
+      "ok": false,
+      "t": "2026-10-22T21:54:56Z",
+      "audit_lines": 3,
+      "watched_s": 131,
+      "lines": [
+        {
+          "fields": {
+            "addr": "10.75.120.9:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+          "ts_utc": "2026-10-22T21:50:27Z"
+        },
+        {
+          "fields": {
+            "addr": "192.0.2.1:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+          "ts_utc": "2026-10-22T21:50:32Z"
+        },
+        {
+          "fields": {
+            "addr": "10.75.120.9:8193",
+            "direction": "outbound",
+            "reason": "peer_lost"
+          },
+          "kind": "peer_rejected",
+          "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+          "ts_utc": "2026-10-22T21:52:55Z"
+        }
+      ]
+    },
+    {
+      "step": "crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)",
+      "ok": null,
+      "na": "the network carries no mDNS (multicast dropped), so nothing can be seen nearby",
+      "t": "2026-10-22T21:54:56Z"
+    },
+    {
+      "step": "crash: B restarted, A reconnects (backoff reset by discovery)",
+      "ok": true,
+      "t": "2026-10-22T21:55:05Z",
+      "seconds_after_start": 8.19,
+      "seen_nearby_after": null
+    }
+  ]
+}

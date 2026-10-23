@@ -1,0 +1,29 @@
+daemon API run (not app UI): every step goes through the two daemons' loopback APIs
+A mous 8983-9a1e-e341 10.75.79.236:8193  |  B JESS-HP b792-12f0-7455 10.75.120.9:8193
+PASS state: each daemon reports its own host name {"names": {"A": "mous", "B": "JESS-HP"}, "dial_addr": {"A": "10.75.79.236:8193", "B": "10.75.120.9:8193"}}
+N/A  state: A sees the other with 1-2 routable addresses, best first (the network carries no mDNS (multicast dropped), so nothing can be seen nearby)
+N/A  state: B sees the other with 1-2 routable addresses, best first (the network carries no mDNS (multicast dropped), so nothing can be seen nearby)
+PASS state: last seen advances while connected (E5) {"before": "2026-10-22T21:48:53Z", "after": "2026-10-22T21:49:53Z"}
+FAIL manual: an unpaired id is refused before any packet (requirement 8) {"status": 403, "ms": 3.7, "b_new_audit": []}
+PASS manual: a hint with no Common device falls through to the pinned address and is not saved {"status": 200, "ms": 0.5, "hint": "192.0.2.1:8193", "pinned": "10.75.120.9:8193"}
+PASS manual: the address shown on B connects A to B (requirement 5) {"status": 200, "ms": 0.3, "addr": "10.75.120.9:8193"}
+PASS manual: no peer was added on either side {}
+PASS pair A shows the code, B joins: wrong code refused, right code pairs {"pair_addr": "10.75.79.236:49429", "wrong": [401, "pairing failed: closed by peer (code 0x5046 pairing_failed)", 111.6], "right": [200, "mous", 143.0]}
+PASS pair B shows the code, A joins: wrong code refused, right code pairs {"pair_addr": "10.75.120.9:61923", "wrong": [401, "pairing failed: closed by peer (code 0x5046 pairing_failed)", 31.1], "right": [200, "JESS-HP", 36.1]}
+PASS pair: connected again after re-pairing, named by host name {"seconds": 0.02, "a_calls_b": "JESS-HP", "b_calls_a": "mous"}
+PASS quit: A shows B as not connected {"seconds": 1.04, "health": "disconnected", "lost_reason": "closed_by_peer", "cmd_output": "SUCCESS: Attempted to run the scheduled task \"CommonTestQuit\"."}
+PASS quit: B's daemon closed the connection itself (graceful stop, not the kill fallback) {"lost_reason": "closed_by_peer"}
+N/A  quit: A drops B from nearby within seconds (goodbye sent on quit, E6) (the network carries no mDNS (multicast dropped), so nothing can be seen nearby)
+PASS quit: B's daemon and engine processes end {"seconds": 3.5, "procs": "0"}
+PASS quit: A explains why B is unreachable {"last_error": {"addr": "10.75.120.9:8193", "at_utc": "2026-10-22T21:50:27Z", "code": "peer_lost", "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193", "message": "no answer from 10.75.120.9:8193 within 4 s"}}
+PASS quit: connecting at a dead hint fails with a reason and saves nothing {"status": 502, "code": "peer_lost", "ms": 8103.1, "message": "no answer from 10.75.120.9:8193 within 4 s", "pinned": "10.75.120.9:8193"}
+FAIL quit: one audit line for B while it is away, not one per redial (E4) {"audit_lines": 2, "watched_s": 136, "lines": [{"fields": {"addr": "10.75.120.9:8193", "direction": "outbound", "reason": "peer_lost"}, "kind": "peer_rejected", "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "ts_utc": "2026-10-22T21:50:27Z"}, {"fields": {"addr": "192.0.2.1:8193", "direction": "outbound", "reason": "peer_lost"}, "kind": "peer_rejected", "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "ts_utc": "2026-10-22T21:50:32Z"}]}
+PASS quit: B restarted, A reconnects (backoff reset by discovery) {"seconds_after_start": 7.59, "seen_nearby_after": null}
+PASS crash: A shows B as not connected {"seconds": 4.6, "health": "reconnecting", "lost_reason": "timed_out", "cmd_output": ""}
+PASS crash: B's signed record may stay cached, but A never shows it as connected {"cached_record": null, "health": "reconnecting"}
+PASS crash: B's daemon and engine processes end {"seconds": 1.8, "procs": "0"}
+PASS crash: A explains why B is unreachable {"last_error": {"addr": "10.75.120.9:8193", "at_utc": "2026-10-22T21:52:55Z", "code": "peer_lost", "hint": "the device may be asleep or on another network, or a firewall may block UDP port 8193", "message": "no answer from 10.75.120.9:8193 within 4 s"}}
+FAIL crash: one audit line for B while it is away, not one per redial (E4) {"audit_lines": 3, "watched_s": 131, "lines": [{"fields": {"addr": "10.75.120.9:8193", "direction": "outbound", "reason": "peer_lost"}, "kind": "peer_rejected", "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "ts_utc": "2026-10-22T21:50:27Z"}, {"fields": {"addr": "192.0.2.1:8193", "direction": "outbound", "reason": "peer_lost"}, "kind": "peer_rejected", "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "ts_utc": "2026-10-22T21:50:32Z"}, {"fields": {"addr": "10.75.120.9:8193", "direction": "outbound", "reason": "peer_lost"}, "kind": "peer_rejected", "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "ts_utc": "2026-10-22T21:52:55Z"}]}
+N/A  crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement) (the network carries no mDNS (multicast dropped), so nothing can be seen nearby)
+PASS crash: B restarted, A reconnects (backoff reset by discovery) {"seconds_after_start": 8.19, "seen_nearby_after": null}
+FAILED: manual: an unpaired id is refused before any packet (requirement 8), quit: one audit line for B while it is away, not one per redial (E4), crash: one audit line for B while it is away, not one per redial (E4)

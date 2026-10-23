@@ -1,0 +1,44 @@
+{
+  "http://127.0.0.1:8192": {
+    "groups": [
+      {
+        "members": [
+          "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"
+        ],
+        "name": "home",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      },
+      {
+        "members": [
+          "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6"
+        ],
+        "name": "kyle",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      }
+    ],
+    "privacy": "trusted_group",
+    "serve_peers": true
+  },
+  "http://127.0.0.1:18302": {
+    "groups": [
+      {
+        "members": [
+          "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf"
+        ],
+        "name": "home",
+        "policy": {
+          "allow_pooled_inference": false,
+          "allow_remote_inference": true
+        }
+      }
+    ],
+    "privacy": "local_only",
+    "serve_peers": true
+  }
+}

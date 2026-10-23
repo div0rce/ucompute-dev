@@ -1,0 +1,174 @@
+{
+  "driven": "daemon API run (not app UI): disconnect, connect, Sharing, revoke and pairing go through the two daemons' loopback APIs",
+  "a": {
+    "connections": 1,
+    "device_name": "mous",
+    "dial_addr": "10.75.79.236:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "8983-9a1e-e341"
+  },
+  "b": {
+    "connections": 1,
+    "device_name": "JESS-HP",
+    "dial_addr": "10.75.120.9:8193",
+    "enabled": true,
+    "listen_addr": "0.0.0.0:8193",
+    "mdns": true,
+    "peer_id": "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79",
+    "peer_quota": {
+      "max_concurrent": 4,
+      "requests_per_minute": 120,
+      "tokens_per_minute": 200000
+    },
+    "peer_slots": 3,
+    "serve_peers": true,
+    "short_label": "b792-12f0-7455"
+  },
+  "before": {
+    "privacy": {
+      "A": "trusted_group",
+      "B": "trusted_group"
+    },
+    "a_serve_peers": true,
+    "groups": {
+      "A": [
+        {
+          "members": [],
+          "name": "home",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        },
+        {
+          "members": [
+            "80048246a87f8f56fb529e4efd27ed829d200ab9d65d324456d4a70d2127dba6"
+          ],
+          "name": "kyle",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        },
+        {
+          "members": [
+            "b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"
+          ],
+          "name": "two-machine",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        }
+      ],
+      "B": [
+        {
+          "members": [
+            "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf"
+          ],
+          "name": "home",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        },
+        {
+          "members": [
+            "89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf"
+          ],
+          "name": "two-machine",
+          "policy": {
+            "allow_pooled_inference": false,
+            "allow_remote_inference": true
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "step": "baseline: connected, A -> B gives the golden completion",
+      "ok": true,
+      "status": 200,
+      "ms": 76.9,
+      "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79"
+    },
+    {
+      "step": "disconnect: A shows B held and not connected, B shows A not connected",
+      "ok": true,
+      "status": 200,
+      "ms": 3.1,
+      "a_after_s": 0.001,
+      "b_after_s": 0.016
+    },
+    {
+      "step": "disconnect: B is told it was disconnected on purpose (peer_held)",
+      "ok": false,
+      "b_last_error": {}
+    },
+    {
+      "step": "held: A's own request to B is refused on A, before anything is sent",
+      "ok": true,
+      "status": 403,
+      "code": "policy_denied",
+      "ms": 1.8
+    },
+    {
+      "step": "held: B's request to A is refused (peer_held)",
+      "ok": true,
+      "status": 403,
+      "code": "peer_held",
+      "ms": 41.2
+    },
+    {
+      "step": "held: no reconnection for 30 s and at most one audit line on A for B's attempts",
+      "ok": true,
+      "reconnected_after_s": null,
+      "held_rejections": 1
+    },
+    {
+      "step": "held: turning Sharing off and on keeps the hold",
+      "ok": false,
+      "reconnected_after_s": 0.506,
+      "held": false
+    },
+    {
+      "step": "connect: ends the hold, both sides connected",
+      "ok": true,
+      "status": 200,
+      "ms": 0.3,
+      "both_after_s": 0.021,
+      "held": false
+    },
+    {
+      "step": "connect: A -> B gives the golden completion again",
+      "ok": true,
+      "status": 200,
+      "ms": 103.7
+    },
+    {
+      "step": "revoke while held: A unpins B, B's request to A is refused",
+      "ok": true,
+      "revoke_status": 200,
+      "b_status": 403,
+      "b_code": "peer_revoked"
+    },
+    {
+      "step": "re-pair after revoking a held device: connected, not held",
+      "ok": true,
+      "join_status": 200,
+      "connected_after_s": 0.785,
+      "held": false
+    }
+  ]
+}

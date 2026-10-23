@@ -1,0 +1,17 @@
+daemon API run (not app UI): pairing, groups and requests go through the two daemons' loopback APIs
+A 8983-9a1e-e341 listen 0.0.0.0:8193  |  B b792-12f0-7455 listen 0.0.0.0:8193
+N/A  discovery: each daemon lists the other (mDNS) (the network carries no mDNS (multicast dropped), so nothing can be seen nearby)
+PASS pairing: wrong code refused {"status": 401, "code": "pairing_failed", "ms": 59.6}
+PASS pairing: right code pins both sides and they connect {"pair_addr": "10.75.79.236:63803", "join_ms": 97.6, "connected_after_s": 0.021}
+PASS group and privacy set on both {}
+PASS remote execution A -> B (B serves) {"cold": {"status": 200, "ms": 98.8, "golden": true, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "engine_ttft_ms": 36.560834, "decode_tok_s": 502.1}, "warm": {"status": 200, "ms": 79.3, "golden": true, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "engine_ttft_ms": 17.307875, "decode_tok_s": 535.2}, "stream": {"text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big", "golden": true, "chunks": 33, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "client_first_text_ms": 16.8, "total_ms": 83.1}}
+PASS remote execution B -> A (A serves) {"cold": {"status": 200, "ms": 283.8, "golden": true, "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf", "engine_ttft_ms": 93.32650000000001, "decode_tok_s": 199.0}, "warm": {"status": 200, "ms": 192.2, "golden": true, "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf", "engine_ttft_ms": 12.835299999999998, "decode_tok_s": 274.1}, "stream": {"text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big", "golden": true, "chunks": 33, "target": "peer:89839a1ee34196ae52bdf83f7e9416f8017ea357496b8f28e2126f5f6befd2cf", "client_first_text_ms": 56.4, "total_ms": 211.8}}
+PASS local_only: peer request refused on the sender {"status": 403, "ms": 3.1}
+PASS audit on A has no prompt text {"hits": [], "remote_entries": 40}
+PASS audit on B has no prompt text {"hits": [], "remote_entries": 20}
+PASS revocation: B disconnected and refused {"b_disconnected_after_s": 0.053, "b_request_status": 403, "b_error": "peer_revoked"}
+PASS re-pair after revocation {"connected_after_s": 0.422}
+PASS B killed: A notices the loss {"seconds": 4.032}
+PASS B restarted: the two reconnect {"seconds_after_restart": 8.114, "seconds_after_kill": 12.1}
+PASS remote execution A -> B after B restarted {"cold": {"status": 200, "ms": 127.2, "golden": true, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "engine_ttft_ms": 34.370208999999996, "decode_tok_s": 395.7}, "warm": {"status": 200, "ms": 79.4, "golden": true, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "engine_ttft_ms": 17.197750000000003, "decode_tok_s": 520.1}, "stream": {"text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big", "golden": true, "chunks": 33, "target": "peer:b79212f0745535eace288c2450ca9d66609efb803103eff95ac096de645b7c79", "client_first_text_ms": 19.2, "total_ms": 73.9}}
+ALL PASS (1 N/A)

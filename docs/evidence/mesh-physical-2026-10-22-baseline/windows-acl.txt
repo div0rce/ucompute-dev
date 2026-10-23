@@ -1,0 +1,12 @@
+<home>\identity\device.key | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\identity\device.pub | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\identity\peers.json | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\identity\peers.json.lock | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\models\manifests\qwen2.5-0.5b-instruct-q4_k_m.json | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\config.json | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+<home>\serve.json | owner=Jess-hp\jessg | protected=False | NT AUTHORITY\SYSTEM:FullControl:inh=True; BUILTIN\Administrators:FullControl:inh=True; Jess-hp\jessg:FullControl:inh=True
+whoami groups:
+NT AUTHORITY\Local account and member of Administrators group Mandatory group, Enabled by default, Enabled group
+BUILTIN\Administrators Mandatory group, Enabled by default, Enabled group, Group owner
+BUILTIN\Users Mandatory group, Enabled by default, Enabled group
+NT AUTHORITY\Authenticated Users Mandatory group, Enabled by default, Enabled group

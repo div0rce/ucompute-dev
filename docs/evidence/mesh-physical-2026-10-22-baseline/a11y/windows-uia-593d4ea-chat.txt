@@ -1,0 +1,126 @@
+﻿window "UCompute" 
+  pane "" 
+    pane "UCompute" 
+      pane "" disabled
+      region "UCompute - Web content" 
+        region "" 
+          region "" focusable
+          region "" 
+            region "" 
+              document "UCompute" id=RootWebArea focusable
+                link "Skip to content" focusable offscreen
+                navigation "Sections" 
+                  text "UCompute" 
+                  list "" 
+                    list item "Dashboard" 
+                      link "Dashboard" focusable
+                    list item "Devices" 
+                      link "Devices" focusable
+                    list item "Models" 
+                      link "Models" focusable
+                    list item "Jobs" 
+                      link "Jobs" focusable
+                    list item "Chat" 
+                      link "Chat" focusable FOCUSED
+                    list item "Activity" 
+                      link "Activity" focusable
+                    list item "Settings" 
+                      link "Settings" focusable
+                main "" id=main focusable
+                  region "Chat" 
+                    section header "" 
+                      heading "Chat" id=_r_6i_
+                      text "Local only: replies run on this computer" 
+                      text "Model" 
+                      combo box "Model" focusable
+                      tool bar "Chat actions" 
+                        button "New conversation" focusable
+                    log "Conversation" 
+                      article "You" 
+                        text "Once upon a time, a little rabbit" 
+                      article "Model" 
+                        text " "I don't like this farm. It is very dirty. I don't like the pond".
+Daddy: "I understand, but it's important to take care of the environment."
+He explained.
+"Then, you need to be careful when you go and take care of things around you. You need to be dependable and take care of the environment. Don't forget to give it a try and learn something new."
+Portin: "I'm worried. I don't want to" 
+                        text "Done." 
+                        text " " 
+                        text "Ran on Mous" 
+                        text "TinyStories 15M (Q4_0) — test fixture" 
+                        text "112 tokens" 
+                        text "TTFT 2,325 ms" 
+                        text "508.3 tok/s" 
+                        text "measured by " 
+                        text "Mous" 
+                        text "; GPU/CPU not reported" 
+                    status "" 
+                      text "Reply complete" 
+                    text "Message" 
+                    edit "Message" help=Write a message. Enter sends, Shift+Enter adds a line. focusable
+                    button "Send" disabled
+                    complementary "Run details" 
+                      heading "Run" 
+                      button "Hide run details" focusable
+                      heading "Destination" 
+                      list "" 
+                        term "Device" 
+                          text "Device" 
+                        text "This computer" 
+                        term "State" 
+                          text "State" 
+                        text "Listening · 1 connected" 
+                        term "Can run there" 
+                          text "Can run there" 
+                        text "Available" 
+                        term "Hardware" 
+                          text "Hardware" 
+                        text "Intel(R) Core(TM) Ultra 7 258V · 31.5 GB" 
+                        term "Loaded model" 
+                          text "Loaded model" 
+                        text "Qwen2.5 0.5B Instruct (Q4_K_M) · Vulkan0 (Intel(R) Arc(TM) 140V GPU (16GB))" 
+                      heading "Last reply" 
+                      list "" 
+                        term "Prompt tokens" 
+                          text "Prompt tokens" 
+                        text "16" 
+                        term "Completion tokens" 
+                          text "Completion tokens" 
+                        text "112" 
+                        term "TTFT" 
+                          text "TTFT" 
+                        text "2,325 ms" 
+                        term "Prompt" 
+                          text "Prompt" 
+                        text "21 ms" 
+                        term "Prompt speed" 
+                          text "Prompt speed" 
+                        text "770.7 tok/s" 
+                        term "Decode" 
+                          text "Decode" 
+                        text "218 ms" 
+                        term "Decode speed" 
+                          text "Decode speed" 
+                        text "508.3 tok/s" 
+                        term "Finish reason" 
+                          text "Finish reason" 
+                        text "—" 
+                      text "Measured by Mous; GPU/CPU not reported." 
+                footer "Status" 
+                  group "" focusable
+                    text "Running" 
+                  link "Qwen2.5 0.5B Instruct (Q4_K_M) · Vulkan0 (Intel(R) Arc(TM) 140V GPU (16GB))" focusable
+                  link "In use 0/4 · Waiting 0" focusable
+                  link "1 device connected" focusable
+                  link "Sharing on" focusable
+                  group "" focusable
+                    text "Received" 
+                    text "< 1 KB/s" 
+                    text "Sent" 
+                    text "< 1 KB/s" 
+                  link "Privacy mode: Local only" focusable
+                  link "Disk 758 GB free" focusable
+                group "" offscreen
+                  text "Download finished: Qwen2.5 0.5B Instruct (Q4_K_M)" offscreen
+              region "" 
+UIA_DONE 121 elements
