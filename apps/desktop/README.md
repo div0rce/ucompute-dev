@@ -61,8 +61,9 @@ Swarm or Cloud controls exist (D-019).
     {name}, or {name} no longer trusts this computer. Nothing was trusted or saved.") and nothing changes.
     A refusal reached before the device has proved its key on the control stream reads the same way, because it
     cannot be told from one forged on the path: a device that revoked this computer, or one held by a minor-0
-    build (every build committed so far), shows `peer_unauthorized` on a new dial, not `peer_revoked` or
-    "Disconnected by <device>".
+    build (every build before 3df9438), shows `peer_unauthorized` on a new dial, not `peer_revoked` or
+    "Disconnected by <device>". So does a claimed protocol mismatch before that proof, with "update Common on
+    both devices" in its hint (780c2b9).
     Unpaired devices never get this action. With nothing nearby the view says why: networking off, discovery off
     on this computer, or a network that stops devices finding each other (many campus and office Wi-Fi
     networks), with pairing by address as the way on.
@@ -115,9 +116,13 @@ a read that fails or stops early shows nothing, never "no rule". Connected netwo
 are named (set them to Private in Windows Settings if you trust them), and so are domain networks (their
 administrator decides). Both reads keep their errors (`-ErrorAction SilentlyContinue -ErrorVariable`) and the script throws any error
 that is not a not-found (`CmdletizationQuery_NotFound*`) before its `end` marker, so a failed read never reads as
-"no rule"; only the script text is unit-tested, it has not yet run under PowerShell on Windows. When the app
-adopted a daemon it did not start, or the daemon it started has exited, it neither checks nor adds a rule (the
-adopted message; Allow refuses). After Allow succeeds, focus moves to the outcome.
+"no rule"; only the script text is unit-tested, it has not yet run under PowerShell on Windows. The app counts
+the daemon as its own only once its own child has printed `listening on http://127.0.0.1:8192` (stdout or
+stderr) and while it runs; while it is still starting the firewall commands wait up to 20 s (ffe1a47). When the
+app adopted a daemon it did not start, another daemon holds 8192 while its own is still starting, or the daemon
+it started has exited, it neither checks nor adds a rule (the adopted message; Allow refuses). After Allow
+succeeds, focus moves to the outcome; while Windows asks, Allow is `aria-disabled` (not `disabled`), so after a
+cancel or failure focus stays on it and it is described by its `role=alert` outcome (ffe1a47).
 A join where nothing answered shows the daemon's hint (a firewall on the other device) instead of "check the
 code".
 
@@ -231,11 +236,15 @@ the app's arguments no longer parse fails a test and the build.
 Daemon lifecycle:
 - At launch the shell probes `GET /health` on 127.0.0.1:8192. If nothing answers it spawns the bundled
   `common` with those arguments through `tauri-plugin-shell`. If the daemon exits before it is healthy, the
-  shell says so at once (exit code 2 means it rejected its command line) instead of waiting 20 s.
+  shell says so at once (exit code 2 means it rejected its command line) instead of waiting 20 s. The daemon
+  is the app's own only once that child prints `listening on http://127.0.0.1:8192` (the CLI prints it right
+  after the bind; the shell reads stdout and stderr) and until it exits (ffe1a47): a daemon that answers
+  `/health` before then may be another one holding the port.
 - Quit (Cmd+Q, closing the window, or SIGTERM/SIGINT/SIGHUP to the app) runs `RunEvent::Exit`: the shell asks
-  the daemon to stop (SIGTERM on macOS and Linux; `POST /api/shutdown` on Windows, which has no SIGTERM), so it
-  unloads the model, stops the llama.cpp engine and sends the mDNS goodbye, and waits up to 10 s before killing
-  it. (A plain kill used to leave the engine running orphaned, and on Windows left the device listed as nearby
+  the daemon to stop (SIGTERM to its own child on macOS and Linux; on Windows, which has no SIGTERM,
+  `POST /api/shutdown` only when its own child has bound the port, otherwise it kills the child, so it never
+  asks another daemon to stop), so it unloads the model, stops the llama.cpp engine and sends the mDNS
+  goodbye, and waits up to 10 s before killing it. (A plain kill used to leave the engine running orphaned, and on Windows left the device listed as nearby
   on other computers for about two minutes.)
 - If the app dies without running that (force quit, crash), `--exit-with-parent` makes the daemon notice
   within about a second and shut down the same way.

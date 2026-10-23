@@ -2,6 +2,8 @@
 
 The daemon (`common serve`) exposes an OpenAI-compatible HTTP API on `http://127.0.0.1:8192` by default. The authoritative, versioned description is the OpenAPI 3.1 document served at `GET /openapi.json` and kept in `crates/common-api/openapi.json`; a test asserts every served route appears in it and vice versa (F-09-04), and `openapi-spec-validator` validates it.
 
+Right after the bind, before peer networking starts, `common serve` prints exactly `listening on http://<addr>` on stdout. The desktop shell counts a daemon as its own only after its own child prints that line (ffe1a47; it reads the child's stdout and stderr and matches after trimming trailing whitespace); a desktop test (`the_listening_line_for_our_address_marks_the_bind`, `apps/desktop/src-tauri/src/lib.rs`) reads the CLI's source line, no CLI test pins it.
+
 ## Secure defaults
 
 - Binds `127.0.0.1` only. A non-loopback `--host` without `--api-key` is refused before anything is bound.
@@ -75,9 +77,9 @@ Peer networking is **off by default**. The settings live in `COMMON_HOME/config.
 
 Every address is only a hint. Whatever answers must present the key pinned at pairing inside the TLS handshake; another device at that address is refused (`peer_unauthorized`, "did not prove it is <name>") and nothing is stored. `last_addr` changes only after a handshake at that address returned the connection. An id that is not paired here is refused before any packet is sent.
 
-- A refusal is the device's own answer only after this device has read the device's Hello on the control stream. Until then a close, a TLS alert such as `certificate_revoked` as well as an application code, cannot be told from one forged on the path (QUIC Initial packets, whose keys come from the public connection id, are still read), even when the pinned key was shown and the handshake completed. Such a refusal is reported as `peer_unauthorized` ("did not prove it is <name>") and the next address is tried.
+- A refusal is the device's own answer only after this device has read the device's Hello on the control stream. Until then a close, a TLS alert such as `certificate_revoked` as well as an application code, cannot be told from one forged on the path (QUIC Initial packets, whose keys come from the public connection id, are still read), even when the pinned key was shown and the handshake completed. Such a refusal is reported as `peer_unauthorized` ("did not prove it is <name>") and the next address is tried. Since 780c2b9 a close that claims a protocol mismatch reads the same way, with the hint "if it is that device, update Common on both devices", and so does a frame-size close (`FT`), which before kept its `frame_too_large` diagnosis; 426 `protocol_incompatible` is only a proven mismatch (the device's Hello was read, or this device's own negotiation failed).
 - A proven refusal ends the dial: `peer_held` sent on the control stream, a close after the Hello, or this device's own verdict (`peer_revoked` for a device revoked here). The remaining addresses are not tried, so a later timeout cannot replace that answer in `last_error`.
-- So a device that revoked this one reads `peer_unauthorized` here on a new dial, not `peer_revoked`; and a device held by a minor-0 build (every build committed so far), which closes before its Hello, reads `peer_unauthorized`, not `peer_held`.
+- So a device that revoked this one reads `peer_unauthorized` here on a new dial, not `peer_revoked`; and a device held by a minor-0 build (every build before 3df9438, which includes every installed app so far), which closes before its Hello, reads `peer_unauthorized`, not `peer_held`.
 - Discovered or pinned IPv6 addresses are not dialled from an endpoint bound to IPv4 (the default `0.0.0.0`). An address given in `…/connect` is always tried.
 - The daemon redials every paired device that has no connection, with backoff 1, 2, 4 … 300 s, reset by a connection, a new mDNS address or `…/connect`, and writes a `peer_rejected` audit line only for the first failure with a given code at a given address since the device's last connection, not one per redial.
 
@@ -121,15 +123,15 @@ Same OpenAI error shape as above.
 | Code | HTTP | When |
 |---|---|---|
 | `policy_denied` | 403 | privacy is `local_only` or `swarm_allowed`; peer networking is off; `trusted_group` was not acknowledged; the serving device does not serve peers; this device disconnected the target device (`…/disconnect`) |
-| `peer_unauthorized` | 403 | the device is not paired, the short label is unknown, or no group allows remote inference with it (on either side); or the device that answered at an address did not prove it is the paired device (a refusal closed before it proved its key, a revocation by that device included, reads this way) |
+| `peer_unauthorized` | 403 | the device is not paired, the short label is unknown, or no group allows remote inference with it (on either side); or the device that answered at an address did not prove it is the paired device (a refusal closed before it proved its key, a revocation by that device, a claimed protocol mismatch or a frame-size close included, reads this way) |
 | `peer_revoked` | 403 | the device is revoked here, or it closed a connection with that code after proving its key (a revocation met on a new dial reads `peer_unauthorized`) |
 | `peer_held` | 403 | the other device disconnected this one (`…/disconnect` there); it must connect again from its side. Builds without the hold read the same close as `peer_lost` ("closed by peer"); a minor-1 build held by a minor-0 build reads `peer_unauthorized`, because that holder closes before sending its Hello |
 | `pairing_failed` | 401 | wrong code, relayed connection, the QR names another device, or the window expired |
 | `pairing_locked` | 429 | more than 5 failed attempts within 60 s; open a new window |
 | `overloaded` | 429 | a peer quota, the serving device's peer share or its engine slots are used up (409 from `POST /api/pair/start` while a window is open) |
 | `peer_lost` | 502 | no known address, the device is unreachable, or the connection dropped mid-request |
-| `protocol_incompatible` | 426 | the devices speak different protocol majors; update Common |
-| `frame_too_large` | 413 | a peer frame exceeded its bound |
+| `protocol_incompatible` | 426 | the devices speak different protocol majors, proven: the other device's Hello was read, or this device's own negotiation failed (a mismatch claimed before the Hello reads `peer_unauthorized` with an update hint); update Common |
+| `frame_too_large` | 413 | a peer frame exceeded its bound (a frame-size close before the other device's Hello reads `peer_unauthorized`) |
 | `integrity_mismatch` | 422 | the serving device has a different file for that model |
 | `model_not_found` | 404 | this device knows no hash for the model |
 | `timeout` | 504 | the peer sent nothing within the timeouts |
