@@ -769,11 +769,21 @@ mod tests {
         assert_eq!(kept, ["PATH", "HOME", "LANG"]);
     }
 
+    /// `free_port` binds and drops, so another socket in this parallel test binary can take the port
+    /// before we bind it again (AddrInUse seen once in a full run); a port that is never bindable in
+    /// three tries is a real failure. The engine start itself retries once on "couldn't bind".
     #[tokio::test]
     async fn free_port_is_bindable_and_nonzero() {
-        let p = free_port().await.unwrap();
-        assert!(p > 0);
-        tokio::net::TcpListener::bind(("127.0.0.1", p)).await.unwrap();
+        let mut last = None;
+        for _ in 0..3 {
+            let p = free_port().await.unwrap();
+            assert!(p > 0);
+            match tokio::net::TcpListener::bind(("127.0.0.1", p)).await {
+                Ok(_) => return,
+                Err(e) => last = Some(e),
+            }
+        }
+        panic!("free_port gave three ports that could not be bound: {last:?}");
     }
 
     #[test]

@@ -411,35 +411,66 @@ fn sigint_with_a_stuck_engine_kills_it_after_the_grace_and_exits_130() {
 
 /// `common serve` on a free port with {MODEL} loaded, and its engine's pid; `None` after a skip.
 #[cfg(unix)]
+/// A 200 from this port's `/health` (a raw HTTP/1.1 request; any other listener fails it).
+fn health_ok(port: u16) -> bool {
+    use std::io::Write;
+    let Ok(mut c) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = c.set_read_timeout(Some(Duration::from_secs(2)));
+    if write!(
+        c,
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut resp = String::new();
+    c.read_to_string(&mut resp).is_ok() && resp.starts_with("HTTP/1.1 200") && resp.contains("\"status\":\"ok\"")
+}
+
 fn serve_with_engine() -> Option<(Reaped, u32)> {
     use std::io::Write;
     use std::net::TcpStream;
     if !assets_present() {
         return None;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_common"))
-        .args(["serve", "--port", &port.to_string()])
-        .env("COMMON_HOME", home())
-        .env_remove("RUST_LOG")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map(Reaped)
-        .expect("spawn common serve");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut conn = loop {
-        if let Ok(c) = TcpStream::connect(("127.0.0.1", port)) {
-            break c;
+    // The port is picked by binding and dropping, so another test's socket can take it before serve
+    // binds it (ECONNRESET on the first write, seen once in a full run): only a 200 from /health while
+    // our child is still running counts as "serve is up", and a serve that exits early (port taken) is
+    // retried on a new port.
+    let (mut child, port) = 'start: {
+        for _ in 0..3 {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let mut child = Command::new(env!("CARGO_BIN_EXE_common"))
+                .args(["serve", "--port", &port.to_string()])
+                .env("COMMON_HOME", home())
+                .env_remove("RUST_LOG")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map(Reaped)
+                .expect("spawn common serve");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while child.try_wait().unwrap().is_none() {
+                if health_ok(port) {
+                    break 'start (child, port);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "serve did not answer /health on {port} within 30 s"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        assert!(Instant::now() < deadline, "serve did not listen on {port} within 30 s");
-        assert!(child.try_wait().unwrap().is_none(), "serve exited early");
-        std::thread::sleep(Duration::from_millis(100));
+        panic!("serve exited early three times (ports taken?)");
     };
+    let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
     conn.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
     write!(conn, "POST /api/models/{MODEL}/load HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
     let mut resp = String::new();
