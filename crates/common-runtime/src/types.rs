@@ -34,9 +34,39 @@ pub struct LoadRequest {
     #[serde(default)]
     pub embeddings: bool,
     pub timeouts: Timeouts,
-    /// Extra engine-specific args (e.g. `--rpc host:port` for M4). Validated by the adapter.
+    /// Extra engine-specific args. Validated by the adapter; split and RPC flags are reserved (use `split`).
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Split this model across devices with llama.cpp RPC (WP-04, ADR-0005 D2). The placement comes
+    /// from `stages` alone: `device` and `n_gpu_layers` are ignored, and a split never falls back to
+    /// the CPU or to a local load.
+    #[serde(default)]
+    pub split: Option<Split>,
+}
+
+/// A static layer split. `--rpc` is rendered from `rpc_ports` only, as `127.0.0.1:<port>`: an RPC
+/// endpoint is always a loopback port the daemon's bridge owns, never an address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Split {
+    /// Loopback ports in `--rpc` order: the first is llama.cpp's `RPC0`, the next `RPC1`, ...
+    pub rpc_ports: Vec<u16>,
+    /// The planner's stages in order, covering blocks `0..n_layer`; the last also takes the output layer.
+    pub stages: Vec<SplitStage>,
+    /// The model's block count (GGUF `block_count`); the load refuses a plan for another model.
+    pub n_layer: u32,
+    /// Load without mmap (`-lm none`; b11609 has no `--no-mmap`).
+    #[serde(default)]
+    pub no_mmap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SplitStage {
+    /// llama.cpp device name: `RPC0`, `RPC1`, ... or a local device such as `MTL0`.
+    pub device: String,
+    /// First block of the stage.
+    pub first_block: u32,
+    /// One past the stage's last block.
+    pub end_block: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -64,6 +94,9 @@ pub struct LoadedModelInfo {
     pub load_ms: f64,
     /// Engine process id for memory measurement.
     pub pid: Option<u32>,
+    /// A split load's stages, proved from the engine log (`split::check_buffers`). None for a local load.
+    #[serde(default)]
+    pub split: Option<Vec<SplitStage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

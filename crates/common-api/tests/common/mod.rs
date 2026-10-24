@@ -82,6 +82,43 @@ pub struct Server {
     pub addr: SocketAddr,
     pub state: Arc<AppState>,
     task: tokio::task::JoinHandle<Result<()>>,
+    /// The state directory of a [`fixture_home_server`], removed with the server.
+    dir: Option<tempfile::TempDir>,
+    /// A [`fixture_home_server`]'s turn on the engine, held until the server is dropped.
+    turn: Option<tokio::sync::MutexGuard<'static, ()>>,
+}
+
+/// Real-engine servers take turns. On a CPU-only host (sentinel: 16 threads, the CPU engine) ten
+/// engines of four threads each at once ran stories15M at 375 ms per token (2.7 tokens/s; the
+/// same test alone finishes in under 1 s), and the streaming jobs test missed its 30 s bound.
+static ENGINE_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// AppState over the fixture COMMON_HOME's engine and models whose identity, peers, settings and
+/// audit live in `dir`: a test never runs as the real home's device or under its `config.json`.
+pub fn serving_app(home: &std::path::Path, dir: &std::path::Path, config: ApiConfig) -> Arc<AppState> {
+    let real = Paths::at(home);
+    let backend = common_runtime::backend_by_name("llama.cpp", engine_dir(&real), real.clone()).unwrap();
+    let manager = ModelManager::new(
+        real.clone(),
+        Store::new(real),
+        backend,
+        common_hardware::probe().unwrap(),
+    );
+    app_with(config, Paths::at(dir), Arc::new(manager))
+}
+
+/// A server on [`serving_app`] with a fresh state directory. Regression (sentinel, 2026-10-24): on
+/// the real home, whose `config.json` an acceptance daemon had left at `network_enabled: true`,
+/// every server of a test binary started a peer endpoint on the same fixed port, and each one
+/// that found it taken waited out the 2 s rebind wait before `serve_on` served HTTP, so the first
+/// `/api/status` of `engine_state_shows_a_real_load_in_progress_on_fixture` took 2.01 s.
+pub async fn fixture_home_server(config: ApiConfig, home: &std::path::Path) -> Server {
+    let turn = ENGINE_TURN.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut srv = Server::start(serving_app(home, dir.path(), config)).await;
+    srv.dir = Some(dir);
+    srv.turn = Some(turn);
+    srv
 }
 
 impl Server {
@@ -89,7 +126,13 @@ impl Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(serve_on(state.clone(), listener, std::future::pending()));
-        Server { addr, state, task }
+        Server {
+            addr,
+            state,
+            task,
+            dir: None,
+            turn: None,
+        }
     }
 
     pub fn url(&self, path: &str) -> String {

@@ -1,6 +1,7 @@
 //! Real inference through the API on the pinned llama-server b11609 with the fixture models from
 //! COMMON_HOME (default: the repo's `.common`). Nothing is mocked; every test skips loudly when the
-//! engine or a fixture is missing. Each test owns its own server and engine process.
+//! engine or a fixture is missing. Each test owns its own server and engine process; they take
+//! turns (`fixture_home_server`).
 
 mod common;
 
@@ -15,8 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 async fn fixture_server(config: ApiConfig) -> Option<Server> {
-    let home = fixture_home()?;
-    Some(Server::start(app(config, home, common_hardware::probe().unwrap())).await)
+    Some(fixture_home_server(config, &fixture_home()?).await)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,9 +271,10 @@ async fn client_disconnect_cancels_engine_on_fixture() {
             ..Timeouts::default()
         },
         extra_args: vec![],
+        split: None,
     };
+    let srv = fixture_home_server(ApiConfig::default(), &home).await;
     let loaded = backend.load_llama(req).await.unwrap();
-    let srv = Server::start(app(ApiConfig::default(), home, common_hardware::probe().unwrap())).await;
     seed_slot(&srv.state, MODEL_ID, loaded.clone()).await;
 
     let body = json!({"model": MODEL_ID, "prompt": PROMPT, "max_tokens": 1500, "stream": true});
@@ -328,7 +329,7 @@ async fn qwen_chat_template_and_json_schema() {
         eprintln!("SKIP: {CHAT_MODEL_ID} not downloaded under {}", home.display());
         return;
     }
-    let srv = Server::start(app(ApiConfig::default(), home, common_hardware::probe().unwrap())).await;
+    let srv = fixture_home_server(ApiConfig::default(), &home).await;
     let c = client();
     let body = json!({
         "model": CHAT_MODEL_ID,
@@ -543,6 +544,46 @@ async fn openai_js_client_smoke() {
     eprintln!("--- openai js client stdout ---\n{stdout}--- stderr ---\n{stderr}");
     assert!(out.status.success(), "openai js client smoke failed ({})", out.status);
     assert!(stdout.contains("ALL CHECKS PASSED"));
+    srv.stop().await;
+}
+
+/// The fixture servers keep their own settings: a fixture home whose `config.json` says networking
+/// is on (an acceptance daemon left sentinel's so) with the peer port taken must not delay HTTP.
+/// Sentinel, before: every real-engine server waited out the 2 s rebind wait on the fixed peer port
+/// before serving, and the load-in-progress test's first `/api/status` took 2.01 s. No engine needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn fixture_servers_ignore_the_home_settings_and_answer_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.json"), r#"{"network_enabled": true}"#).unwrap();
+    let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = ApiConfig {
+        network: common_network::NetworkConfig {
+            listen_port: held.local_addr().unwrap().port(),
+            bind_addr: "127.0.0.1".into(),
+            mdns: false,
+            ..Default::default()
+        },
+        ..ApiConfig::default()
+    };
+    let srv = fixture_home_server(config, home.path()).await;
+    let t = Instant::now();
+    let c = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let status = c.get(srv.url("/api/status")).send().await.expect("status within 1 s");
+    assert_eq!(status.status(), 200);
+    let net: Value = c
+        .get(srv.url("/api/network"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(net["enabled"], false, "{net}");
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     srv.stop().await;
 }
 

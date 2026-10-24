@@ -147,7 +147,7 @@ pub enum GroupsCmd {
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyChoice {
-    /// Requests never leave this device (default)
+    /// Refuses every off-device request (default). Downloading a model or the engine still uses the internet
     LocalOnly,
     /// Requests may run on paired devices in a trusted group (also enables peer networking)
     TrustedDevices,

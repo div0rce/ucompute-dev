@@ -91,8 +91,9 @@ impl LlamaCppBackend {
         log_path: PathBuf,
     ) -> Result<Engine> {
         let port = process::free_port().await?;
-        let args = process::build_args(req, port, key_path, gpu);
-        let mut child = process::spawn(&self.server_binary(), &args, &log_path)?;
+        let args = process::build_args(req, port, key_path, gpu)?;
+        let env = process::engine_environment(req);
+        let mut child = process::spawn(&self.server_binary(), &args, env, &log_path)?;
         tracing::info!(pid = child.id(), port, gpu, log = %log_path.display(), "llama-server started");
         let client = reqwest::Client::builder().no_proxy().build().map_err(transport)?;
         if let Err(e) = process::wait_ready(&mut child, &client, port, deadline, &log_path, &api_key).await {
@@ -108,6 +109,26 @@ impl LlamaCppBackend {
             log_path,
             proof,
         })
+    }
+
+    /// The one start of a split engine, kept only when its log proves the plan. Ok carries the
+    /// devices as the log names them; a mismatch stops the engine and fails the load.
+    async fn start_split(&self, req: &LoadRequest, block_count: u32, deadline: Instant) -> Result<(Engine, String)> {
+        let plan = req.split.as_ref().expect("a split request");
+        if plan.n_layer != block_count {
+            return Err(CommonError::invalid(format!(
+                "split plan is for {} blocks, the model has {block_count}",
+                plan.n_layer
+            )));
+        }
+        let e = self.attempt(req, true, deadline).await?;
+        match prove_split(&process::read_log(&e.log_path), plan) {
+            Ok(devices) => Ok((e, devices)),
+            Err(err) => {
+                process::stop(e.child).await;
+                Err(err)
+            }
+        }
     }
 
     /// Typed `load` that keeps the concrete type (tests poll `/slots` through it).
@@ -136,7 +157,14 @@ impl LlamaCppBackend {
         std::fs::create_dir_all(self.paths.logs())?;
 
         let mut fallback_reason = None;
+        let mut split_devices = None;
         let (engine, gpu) = match req.device {
+            // ADR-0005 D2/D7: a split has one attempt, no CPU and no local fallback (no silent substitution).
+            _ if req.split.is_some() => {
+                let (e, devices) = self.start_split(&req, meta.block_count, deadline).await?;
+                split_devices = Some(devices);
+                (e, true)
+            }
             DevicePreference::Cpu => (self.attempt(&req, false, deadline).await?, false),
             DevicePreference::Gpu => {
                 let e = self.attempt(&req, true, deadline).await.map_err(|e| match e.code {
@@ -179,7 +207,9 @@ impl LlamaCppBackend {
                 DevicePreference::Gpu => "gpu",
             }
             .into(),
-            device_actual: if gpu {
+            device_actual: if let Some(devices) = &split_devices {
+                devices.clone()
+            } else if gpu {
                 engine.proof.device.clone().unwrap_or_default()
             } else {
                 "cpu".into()
@@ -195,6 +225,8 @@ impl LlamaCppBackend {
             context_note: None,
             load_ms: started.elapsed().as_secs_f64() * 1000.0,
             pid: engine.child.id(),
+            // proved by `prove_split` above, or the load failed
+            split: req.split.as_ref().map(|s| s.stages.clone()),
         };
         tracing::info!(model = %info.model_id, device = %info.device_actual, offloaded = info.offloaded_layers, total = info.total_layers, n_ctx = info.n_ctx, load_ms = info.load_ms, "model loaded");
         Ok(Arc::new(LoadedLlama {
@@ -206,6 +238,24 @@ impl LlamaCppBackend {
             log_path: engine.log_path,
         }))
     }
+}
+
+/// The split engine's log must prove the plan (`split::check_buffers` at `-lv 4`: the devices in
+/// `--device` order, each device's KV share its planned block count). Ok carries the devices as the
+/// log names them, e.g. `RPC0 (127.0.0.1:50052), MTL0`. Err is `BackendFailed` naming the mismatch.
+fn prove_split(log: &str, plan: &Split) -> Result<String> {
+    let p = split::parse_buffers(log);
+    split::check_buffers(&p, &split::stage_tuples(plan), plan.n_layer as usize).map_err(|why| {
+        CommonError::new(
+            ErrorCode::BackendFailed,
+            format!("split placement does not match the plan: {why}"),
+        )
+    })?;
+    Ok(p.devices
+        .iter()
+        .map(|(d, ep)| ep.as_ref().map_or(d.clone(), |ep| format!("{d} ({ep})")))
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// Auto mode tries the CPU after any failed GPU start: the GGUF header was validated before the
@@ -988,6 +1038,191 @@ mod tests {
             child: tokio::sync::Mutex::new(None),
             log_path: PathBuf::new(),
         }
+    }
+
+    // ---- split loads (WP-04 C2) against a FAKE engine ----
+
+    /// SYNTHETIC GGUF header with stories15M's shape (6 blocks); not a model.
+    #[cfg(unix)]
+    fn synthetic_gguf(path: &Path) {
+        fn s(v: &str) -> Vec<u8> {
+            [(v.len() as u64).to_le_bytes().as_slice(), v.as_bytes()].concat()
+        }
+        fn kv_u32(k: &str, v: u32) -> Vec<u8> {
+            [s(k), 4u32.to_le_bytes().to_vec(), v.to_le_bytes().to_vec()].concat()
+        }
+        let kvs = [
+            [s("general.architecture"), 8u32.to_le_bytes().to_vec(), s("llama")].concat(),
+            kv_u32("llama.block_count", 6),
+            kv_u32("llama.context_length", 128),
+            kv_u32("llama.embedding_length", 288),
+            kv_u32("llama.attention.head_count", 6),
+        ];
+        let mut g = [b"GGUF".as_slice(), &3u32.to_le_bytes(), &0u64.to_le_bytes()].concat();
+        g.extend((kvs.len() as u64).to_le_bytes());
+        g.extend(kvs.concat());
+        g.resize(g.len().next_multiple_of(32) + 64, 0);
+        std::fs::write(path, g).unwrap();
+    }
+
+    /// FAKE `llama-server` (python3, not llama.cpp): appends `<pid> <argv>` to `starts` for every
+    /// start, writes `log` as its engine log, then either exits 1 or answers `/health` with ok.
+    #[cfg(unix)]
+    fn fake_engine(dir: &Path, log: &str, serve: bool) -> (LlamaCppBackend, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let engine = dir.join("engine");
+        std::fs::create_dir_all(&engine).unwrap();
+        let fixture = dir.join("fixture.log");
+        std::fs::write(&fixture, log).unwrap();
+        let starts = dir.join("starts");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import os, sys, http.server
+a = sys.argv[1:]
+if "--version" in a:
+    print("version: 0 (FAKE engine)")
+    sys.exit(0)
+with open({starts:?}, "a") as f:
+    f.write(str(os.getpid()) + " " + " ".join(a) + "\n")
+sys.stderr.write(open({fixture:?}).read())
+sys.stderr.flush()
+if not {serve}:
+    sys.exit(1)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{{"status":"ok"}}')
+    def log_message(self, *x):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_forever()
+"#,
+            starts = starts.display().to_string(),
+            fixture = fixture.display().to_string(),
+            serve = if serve { "True" } else { "False" },
+        );
+        let bin = engine.join("llama-server");
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let model = dir.join("tiny.gguf");
+        synthetic_gguf(&model);
+        let backend = LlamaCppBackend::new(engine, Paths::at(dir.join("home")));
+        (backend, model, starts)
+    }
+
+    #[cfg(unix)]
+    fn split_req(model: &Path, stages: &[(&str, u32, u32)]) -> LoadRequest {
+        LoadRequest {
+            model_id: "tiny".into(),
+            model_path: model.to_path_buf(),
+            model_sha256: String::new(),
+            device: DevicePreference::Auto,
+            n_ctx: 128,
+            n_gpu_layers: None,
+            threads: Some(1),
+            parallel_slots: 1,
+            kv_type: common_models::KvType::F16,
+            embeddings: false,
+            timeouts: Timeouts {
+                load: Duration::from_secs(20),
+                ..Timeouts::default()
+            },
+            extra_args: vec![],
+            split: Some(Split {
+                rpc_ports: vec![49167],
+                stages: stages
+                    .iter()
+                    .map(|&(d, a, b)| SplitStage {
+                        device: d.into(),
+                        first_block: a,
+                        end_block: b,
+                    })
+                    .collect(),
+                n_layer: 6,
+                no_mmap: false,
+            }),
+        }
+    }
+
+    #[cfg(unix)]
+    fn starts(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// ADR-0005 D2/D7: a split engine that fails to start is the load's error. The same failure on a
+    /// local Auto load is retried on the CPU (the control), so the test would see a fallback.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn split_never_falls_back_to_cpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, model, log) = fake_engine(dir.path(), "error: failed to connect to RPC0\n", false);
+        let e = backend
+            .load_llama(split_req(&model, &[("RPC0", 0, 3), ("MTL0", 3, 6)]))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
+        let s = starts(&log);
+        assert_eq!(s.len(), 1, "one engine start, no CPU or local retry: {s:?}");
+        assert!(
+            s[0].contains("--rpc 127.0.0.1:49167") && !s[0].contains("--device none"),
+            "{s:?}"
+        );
+        // control: without the split, Auto retries on the CPU after the same failure
+        std::fs::remove_file(&log).unwrap();
+        let mut local = split_req(&model, &[]);
+        local.split = None;
+        assert!(backend.load_llama(local).await.is_err());
+        let s = starts(&log);
+        assert_eq!(s.len(), 2, "{s:?}");
+        assert!(s[1].contains("--device none"), "{s:?}");
+    }
+
+    /// A ready split engine whose `-lv 4` log (real b11609 lines: RPC0 holds [0,3), MTL0 [3,6))
+    /// does not prove the plan is stopped and the load fails naming the mismatch; the matching plan
+    /// loads and reports the stages and devices as proved.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn split_load_fails_on_a_placement_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, model, log) = fake_engine(
+            dir.path(),
+            include_str!("llamacpp/fixtures/b11609-rpc-split-lv4-A.log"),
+            true,
+        );
+        let e = backend
+            .load_llama(split_req(&model, &[("RPC0", 0, 2), ("MTL0", 2, 6)]))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
+        assert!(e.message.contains("split placement does not match the plan"), "{e}");
+        assert!(
+            e.message.contains("RPC0 holds 2.98 layers of KV, the plan gives it 2"),
+            "{e}"
+        );
+        let s = starts(&log);
+        assert_eq!(s.len(), 1, "no fallback after a placement mismatch: {s:?}");
+        let pid: u32 = s[0].split(' ').next().unwrap().parse().unwrap();
+        assert!(!process::alive(pid), "the mismatched engine was stopped");
+
+        let stages = [("RPC0", 0, 3), ("MTL0", 3, 6)];
+        let loaded = backend.load_llama(split_req(&model, &stages)).await.unwrap();
+        let info = loaded.info();
+        assert_eq!(info.device_actual, "RPC0 (127.0.0.1:49167), MTL0");
+        assert_eq!(info.split, split_req(&model, &stages).split.map(|s| s.stages));
+        assert_eq!(info.fallback_reason, None);
+        loaded.unload().await.unwrap();
+        // a plan for another model is refused before any start
+        let mut other = split_req(&model, &[("RPC0", 0, 3), ("MTL0", 3, 7)]);
+        other.split.as_mut().unwrap().n_layer = 7;
+        let e = backend.load_llama(other).await.err().unwrap();
+        assert!(e.message.contains("plan is for 7 blocks, the model has 6"), "{e}");
+        assert_eq!(starts(&log).len(), 2);
     }
 
     /// F-08-01: a backend that stops sending is a typed Timeout within the configured bound.

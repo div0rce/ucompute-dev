@@ -325,6 +325,63 @@ fn refresh_loop(mut wait: impl FnMut(Instant) -> Wake, mut refresh: impl FnMut()
     }
 }
 
+/// The browse thread's receiver: listening, browsing again at the next check (a browse that
+/// failed while the daemon still runs, e.g. `Error::Again` with its command queue full), or ended
+/// (the daemon shut down).
+enum Listen<R> {
+    On(R),
+    Retry,
+    Gone,
+}
+
+fn listen<R>(r: mdns_sd::Result<R>) -> Listen<R> {
+    match r {
+        Ok(rx) => Listen::On(rx),
+        Err(mdns_sd::Error::DaemonShutdown) => Listen::Gone,
+        Err(e) => {
+            tracing::warn!(error = %e, "mdns browse failed; retrying at the next check");
+            Listen::Retry
+        }
+    }
+}
+
+/// The browse thread: `recv(rx, due)` waits on the current browse's receiver until `due`; every
+/// `every`, `requery(rx)` keeps the receiver (`Some`) or has stopped that browse (`None`), and then
+/// `browse()` starts a new one. A failed browse is retried at the next check rather than ending
+/// discovery; the loop returns once the daemon is gone.
+fn browse_loop<R>(
+    first: R,
+    mut browse: impl FnMut() -> mdns_sd::Result<R>,
+    mut recv: impl FnMut(&R, Instant) -> Wake,
+    mut requery: impl FnMut(R) -> Option<R>,
+    every: Duration,
+) {
+    let state = RefCell::new(Listen::On(first));
+    refresh_loop(
+        |due| match &*state.borrow() {
+            Listen::On(rx) => recv(rx, due),
+            Listen::Retry => {
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                Wake::Deadline
+            }
+            Listen::Gone => Wake::Closed,
+        },
+        || {
+            let next = match state.replace(Listen::Retry) {
+                Listen::On(rx) => match requery(rx) {
+                    Some(rx) => Listen::On(rx),
+                    None => listen(browse()),
+                },
+                Listen::Retry => listen(browse()),
+                Listen::Gone => Listen::Gone,
+            };
+            *state.borrow_mut() = next;
+        },
+        every,
+        every,
+    )
+}
+
 impl Advertiser {
     /// Advertise (signed TXT: v, id, pair, pairport, proto, ts, sig). Dropping stops the advert.
     /// Inert (`active() == false`) when mDNS is disabled. A specific `config.bind_addr` (e.g.
@@ -599,47 +656,32 @@ impl Browser {
                 ServiceEvent::ServiceRemoved(_, fullname) => forget(&mut lock(&map), &fullname),
                 _ => {}
             };
-            // `None` once the daemon is gone: the loop ends.
-            let rx = RefCell::new(Some(rx));
             let mut last_requery = None;
-            refresh_loop(
-                |due| {
-                    let r = match rx.borrow().as_ref() {
-                        Some(rx) => rx.recv_deadline(due),
-                        None => return Wake::Closed,
-                    };
-                    match r {
-                        Ok(ev) => {
-                            handle(ev);
-                            Wake::Other
-                        }
-                        Err(e) => wake(Err(e)),
+            browse_loop(
+                rx,
+                || d.browse(SERVICE_TYPE),
+                |rx, due| match rx.recv_deadline(due) {
+                    Ok(ev) => {
+                        handle(ev);
+                        Wake::Other
                     }
+                    Err(e) => wake(Err(e)),
                 },
                 // Re-query: a new browse after `stop_browse` (which empties mdns-sd's cache for the
                 // type) sends a query without known answers, so every live peer answers in full.
-                || {
+                |old| {
                     let now = Instant::now();
                     if !requery_due(&lock(&map), now_unix(), now, last_requery) {
-                        return;
+                        return Some(old);
                     }
                     last_requery = Some(now);
                     if let Err(e) = d.stop_browse(SERVICE_TYPE) {
                         tracing::warn!(error = %e, "mdns re-query skipped");
-                        return;
+                        return Some(old);
                     }
-                    let old = rx.borrow_mut().take();
-                    for ev in old.iter().flat_map(|old| old.try_iter()) {
-                        handle(ev);
-                    }
-                    // ponytail: a failed browse (daemon gone, or its command queue full) ends
-                    // browsing until networking restarts; retry here if a full queue is ever seen.
-                    match d.browse(SERVICE_TYPE) {
-                        Ok(new) => *rx.borrow_mut() = Some(new),
-                        Err(e) => tracing::warn!(error = %e, "mdns browse ended"),
-                    }
+                    old.try_iter().for_each(&handle);
+                    None
                 },
-                CHECK,
                 CHECK,
             )
         });
@@ -1240,6 +1282,61 @@ mod tests {
         assert_eq!(wake(Ok(DaemonEvent::Respond("en0".into()))), Wake::Other);
         assert_eq!(wake(Err(RecvTimeoutError::Timeout)), Wake::Deadline);
         assert_eq!(wake(Err(RecvTimeoutError::Disconnected)), Wake::Closed);
+    }
+
+    /// Round 6b: a browse that fails after `stop_browse` (`Error::Again`, the daemon's command
+    /// queue full) is retried at the next check instead of ending discovery until networking
+    /// restarts; only a daemon that shut down ends the loop.
+    #[test]
+    fn a_failed_browse_is_retried_at_the_next_check() {
+        use std::sync::mpsc;
+        let recv = |rx: &mpsc::Receiver<u32>, got: &mut Vec<u32>, due: Instant| match rx
+            .recv_timeout(due.saturating_duration_since(Instant::now()))
+        {
+            Ok(ev) => {
+                got.push(ev);
+                Wake::Other
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Wake::Deadline,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Wake::Closed,
+        };
+        let run = |results: Vec<mdns_sd::Result<u32>>| {
+            let (_tx0, rx0) = mpsc::channel::<u32>();
+            let mut results = results.into_iter();
+            let (mut browses, mut got) = (0, vec![]);
+            let got_ref = std::cell::RefCell::new(&mut got);
+            browse_loop(
+                rx0,
+                || {
+                    browses += 1;
+                    // The next browse's receiver holds one event, then disconnects (ends the loop).
+                    results
+                        .next()
+                        .expect("no browse after the loop should have ended")
+                        .map(|ev| {
+                            let (tx, rx) = mpsc::channel();
+                            tx.send(ev).unwrap();
+                            rx
+                        })
+                },
+                |rx, due| recv(rx, &mut got_ref.borrow_mut(), due),
+                |_old| None,
+                Duration::from_millis(10),
+            );
+            (browses, got)
+        };
+        let t0 = Instant::now();
+        assert_eq!(run(vec![Err(mdns_sd::Error::Again), Ok(7)]), (2, vec![7]));
+        assert_eq!(
+            run(vec![
+                Err(mdns_sd::Error::Msg("signal".into())),
+                Err(mdns_sd::Error::Again),
+                Ok(8)
+            ]),
+            (3, vec![8])
+        );
+        assert_eq!(run(vec![Err(mdns_sd::Error::DaemonShutdown)]), (1, vec![]));
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 
     /// D1 interface change: the Mac moved between the hotspot and eduroam on its own. A re-sign

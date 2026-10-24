@@ -9,6 +9,8 @@
 //!
 //! The lifecycle test uses the real pinned llama-server and the stories15M fixture (skips loudly
 //! when absent; `COMMON_REQUIRE_FIXTURES=1` fails instead). Nothing is mocked.
+// Unix only: symlinked homes and signals (libc::kill, waitpid).
+#![cfg(unix)]
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

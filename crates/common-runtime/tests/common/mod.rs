@@ -59,6 +59,7 @@ pub fn load_req(model: &Path, device: DevicePreference) -> LoadRequest {
             ..Timeouts::default()
         },
         extra_args: vec![],
+        split: None,
     }
 }
 

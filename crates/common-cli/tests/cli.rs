@@ -3,12 +3,17 @@
 //! fail instead under `COMMON_REQUIRE_FIXTURES=1` (the evidence job): a green run always ran.
 
 use serde_json::Value;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+// The signal and reaper tests are Unix only.
+#[cfg(unix)]
+use std::{
+    io::Read,
+    process::Stdio,
+    sync::atomic::{AtomicBool, Ordering::SeqCst},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const MODEL: &str = "stories15M-q4_0";
 const BLOB: &str = "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739";
@@ -305,18 +310,31 @@ fn replay_without_saved_prompt_is_invalid_request() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
-/// Detached engines (ppid 1) started from our pinned binary; `ps` zombie rows show `(llama-server)` and never match.
+/// Engines started from our pinned binary that nothing owns, by the reaper's rule: the parent is
+/// not a `common` process and not in the engine's process group (pid 1, or on Linux a subreaper
+/// such as `systemd --user`, adopted it after its `common` died). Another test binary's engines on
+/// the same COMMON_HOME share their harness's group and do not count. `ps` zombie rows show
+/// `(llama-server)` and never match.
 #[cfg(unix)]
 fn orphaned_engines() -> Vec<String> {
     let bin = home().join("backends/llama.cpp/b11609/llama-server");
-    let out = Command::new("ps").args(["-axo", "ppid=,args="]).output().unwrap();
-    text(&out.stdout)
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pgid=,ucomm=,args="])
+        .output()
+        .unwrap();
+    let out = text(&out.stdout);
+    let rows: Vec<Vec<&str>> = out
         .lines()
-        .filter(|l| {
-            let mut f = l.split_whitespace();
-            f.next() == Some("1") && f.next().is_some_and(|a| Path::new(a) == bin)
-        })
-        .map(str::to_string)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f.len() >= 5)
+        .collect();
+    let owned = |e: &[&str]| {
+        rows.iter()
+            .any(|p| p[0] == e[1] && (p[3] == "common" || (p[0] != "1" && p[2] == e[2])))
+    };
+    rows.iter()
+        .filter(|f| Path::new(f[4]) == bin && !owned(f))
+        .map(|f| f.join(" "))
         .collect()
 }
 
@@ -655,4 +673,73 @@ fn require_fixtures_turns_a_missing_asset_into_a_failure() {
     assert!(!ok && out.contains("COMMON_REQUIRE_FIXTURES=1: missing asset"), "{out}");
     let (ok, out) = run("0");
     assert!(ok && out.contains("SKIP: missing asset"), "{out}");
+}
+
+/// `common setup --fixtures` pulls the `fixture` models and, under `COMMON_REQUIRE_FIXTURES=1`, the
+/// `test-suite` ones too. No network: a fresh home borrows the verified engine and the fixture
+/// blobs from COMMON_HOME, and an unreachable HTTPS proxy fails any download at once, so only the
+/// strict run (which needs a test-suite model this home lacks) fails.
+#[cfg(unix)]
+#[test]
+fn setup_fixtures_honours_require_fixtures() {
+    let catalog: Value = serde_json::from_str(include_str!("../../../catalog/models.json")).expect("catalog is JSON");
+    let tagged = |tag: &str| -> Vec<(String, String)> {
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["tags"].as_array().unwrap().iter().any(|t| t == tag))
+            .map(|m| (m["id"].as_str().unwrap().into(), m["sha256"].as_str().unwrap().into()))
+            .collect()
+    };
+    let (fixtures, suite) = (tagged("fixture"), tagged("test-suite"));
+    assert!(fixtures.len() >= 2 && !suite.is_empty());
+    let src = home();
+    for (_, sha) in &fixtures {
+        let blob = src.join(format!("models/blobs/sha256-{sha}"));
+        if !blob.is_file() {
+            return skip(&format!("missing asset {}", blob.display()));
+        }
+    }
+    let fresh = std::env::temp_dir().join(format!("common-setup-fixtures-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fresh);
+    std::fs::create_dir_all(fresh.join("models/blobs")).unwrap();
+    std::os::unix::fs::symlink(src.join("backends"), fresh.join("backends")).unwrap();
+    for (_, sha) in &fixtures {
+        let name = format!("models/blobs/sha256-{sha}");
+        std::os::unix::fs::symlink(src.join(&name), fresh.join(&name)).unwrap();
+    }
+    let setup = |require: Option<&str>| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_common"));
+        c.args(["setup", "--fixtures"])
+            .env("COMMON_HOME", &fresh)
+            .env_remove("RUST_LOG")
+            .env_remove("COMMON_REQUIRE_FIXTURES");
+        for v in ["NO_PROXY", "no_proxy"] {
+            c.env_remove(v);
+        }
+        for v in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            c.env(v, "http://127.0.0.1:9");
+        }
+        if let Some(r) = require {
+            c.env("COMMON_REQUIRE_FIXTURES", r);
+        }
+        c.output().expect("spawn common")
+    };
+    let o = setup(None);
+    let out = text(&o.stdout);
+    assert!(o.status.success(), "{out}{}", text(&o.stderr));
+    assert_eq!(out.matches("model    ").count(), fixtures.len(), "{out}");
+    for (id, _) in &fixtures {
+        assert!(out.contains(&format!("model    {id} verified")), "{out}");
+    }
+    let o = setup(Some("1"));
+    let err = text(&o.stderr);
+    assert!(
+        !o.status.success(),
+        "the strict run must also pull the test-suite models: {}",
+        text(&o.stdout)
+    );
+    assert!(err.contains("error[download_failed]"), "{err}");
+    let _ = std::fs::remove_dir_all(&fresh);
 }

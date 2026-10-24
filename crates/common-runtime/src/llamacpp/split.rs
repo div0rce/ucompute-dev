@@ -327,6 +327,74 @@ pub fn check_buffers(p: &BufferProof, stages: &[(&str, usize, usize)], n_layer: 
     Ok(())
 }
 
+// ---- the launch (WP-04 C2): a typed `Split` to engine arguments ----
+
+/// `127.0.0.1:<port>,...`: the only form `--rpc` is ever given. An endpoint is a loopback port the
+/// daemon's bridge owns (ADR-0005 D2), so the type carries ports, never addresses.
+pub fn rpc_endpoints(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(|p| format!("127.0.0.1:{p}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The plan's stages as `(device, first block, end block)`, the form the mapping and the proof take.
+pub fn stage_tuples(s: &crate::types::Split) -> Vec<(&str, usize, usize)> {
+    s.stages
+        .iter()
+        .map(|t| (t.device.as_str(), t.first_block as usize, t.end_block as usize))
+        .collect()
+}
+
+/// The split branch of the engine command line: `--rpc` over loopback ports, the mapping
+/// (`--device`, `--tensor-split`, `--split-mode layer`), `-ngl 999` (with Common's `--fit off`, the
+/// mapping is exact only when every layer is offloaded) and `-lm none` when no mmap is asked.
+/// Err names what is wrong with the plan.
+pub fn launch_args(s: &crate::types::Split) -> Result<Vec<String>, String> {
+    if s.rpc_ports.is_empty() || s.rpc_ports.contains(&0) {
+        return Err("a split needs at least one RPC port, none of them 0".into());
+    }
+    if let Some(p) = s
+        .rpc_ports
+        .iter()
+        .enumerate()
+        .find_map(|(i, p)| s.rpc_ports[..i].contains(p).then_some(p))
+    {
+        return Err(format!("RPC port {p} given twice"));
+    }
+    if let Some(d) = s
+        .stages
+        .iter()
+        .map(|t| t.device.as_str())
+        .find(|d| d.is_empty() || !d.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        return Err(format!("{d:?} is not a llama.cpp device name"));
+    }
+    // RPCk is the k-th `--rpc` endpoint; every endpoint must carry a stage, or the engine connects
+    // to a server that holds nothing
+    for k in 0..s.rpc_ports.len() {
+        if !s.stages.iter().any(|t| t.device == format!("RPC{k}")) {
+            return Err(format!("RPC{k} (port {}) has no stage", s.rpc_ports[k]));
+        }
+    }
+    if let Some(t) = s.stages.iter().find(|t| {
+        t.device
+            .strip_prefix("RPC")
+            .and_then(|k| k.parse::<usize>().ok())
+            .is_some_and(|k| k >= s.rpc_ports.len())
+    }) {
+        return Err(format!("{} has no RPC port", t.device));
+    }
+    let mut a = vec!["--rpc".to_string(), rpc_endpoints(&s.rpc_ports)];
+    a.extend(rpc_split_args(&stage_tuples(s), s.n_layer as usize)?);
+    a.extend(["-ngl".to_string(), "999".to_string()]);
+    if s.no_mmap {
+        a.extend(["-lm".to_string(), "none".to_string()]);
+    }
+    Ok(a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

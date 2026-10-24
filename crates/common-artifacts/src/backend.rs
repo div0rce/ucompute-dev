@@ -665,6 +665,8 @@ mod tests {
         }
     }
 
+    // Retargets symlinks with std::os::unix; the Windows pins are zips without links.
+    #[cfg(unix)]
     #[tokio::test]
     async fn safe_archive_extracts_verifies_and_detects_tampering() {
         let archive = gz_archive(&[
@@ -765,7 +767,7 @@ mod tests {
         let Some(paths) = common_home() else { return };
         let pin = llama_pin();
         let dir = verify_backend(&paths, &pin).unwrap();
-        assert_eq!(dir, paths.backends().join("llama.cpp").join("b11609"));
+        assert_eq!(dir, paths.backends().join("llama.cpp").join(&pin.release));
         assert!(binary(&dir, "llama-server").is_file());
         assert!(is_executable(&std::fs::metadata(binary(&dir, "llama-server")).unwrap()));
         let mut n = 0;

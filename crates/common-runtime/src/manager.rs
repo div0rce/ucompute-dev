@@ -27,13 +27,25 @@ pub struct ModelManager {
     /// Memory usable right now, sampled before every load (F-01-03): the probe in `hardware` is
     /// a snapshot from daemon start. `None` falls back to that snapshot. Tests swap in a fixed figure.
     pub available_memory: fn() -> Option<u64>,
-    /// Unexpected engine exits per model in the last [`RESTART_WINDOW`], for the restart bound.
-    exits: std::sync::Mutex<Vec<(String, Instant)>>,
+    /// Unexpected engine exits in the last [`RESTART_WINDOW`], for the restart bound.
+    exits: std::sync::Mutex<Vec<Exit>>,
 }
 
-/// At most this many unexpected engine exits of one model within [`RESTART_WINDOW`], counting exits
-/// during a load (before the engine was ready) and after it; after that a load of that model is
-/// refused until the window has passed, instead of restarting in a loop.
+/// One unexpected engine exit, keyed by model and requested device: three failed `--device gpu`
+/// starts say nothing about the CPU engine. `code` and `hint` are the failure's own, so a model
+/// whose file breaks every start is still refused as `ModelFileInvalid`.
+struct Exit {
+    model_id: String,
+    device: DevicePreference,
+    at: Instant,
+    code: ErrorCode,
+    hint: Option<String>,
+}
+
+/// At most this many unexpected engine exits of one model on one requested device within
+/// [`RESTART_WINDOW`], counting exits during a load (before the engine was ready) and after it;
+/// after that a load of that model on that device is refused until the window has passed, instead
+/// of restarting in a loop.
 pub const MAX_RESTARTS: usize = 3;
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
 
@@ -178,35 +190,54 @@ impl ModelManager {
             at_utc: common_artifacts::store::utc_now(),
         };
         tracing::warn!(model = %exit.model_id, pid = ?exit.pid, reason = %exit.reason, in_flight = exit.in_flight, "engine exited unexpectedly; slot freed, the next request starts it again");
-        lock(&self.exits).push((s.model_id, Instant::now()));
-        let mut v = lock(&self.view);
-        v.loaded = None;
-        v.last_exit = Some(exit);
+        let device = s.opts.device.unwrap_or_else(|| self.default_device());
+        self.record_exit(exit, device, ErrorCode::BackendFailed, None);
+        lock(&self.view).loaded = None;
     }
 
-    /// `BackendFailed` once `model_id`'s engine has exited [`MAX_RESTARTS`] times within
-    /// [`RESTART_WINDOW`], so a model that crashes on every start is not restarted in a loop.
-    fn restart_allowed(&self, model_id: &str) -> Result<()> {
+    /// Count `exit` toward the restart bound and show it as the last exit.
+    fn record_exit(&self, exit: EngineExit, device: DevicePreference, code: ErrorCode, hint: Option<String>) {
+        lock(&self.exits).push(Exit {
+            model_id: exit.model_id.clone(),
+            device,
+            at: Instant::now(),
+            code,
+            hint,
+        });
+        lock(&self.view).last_exit = Some(exit);
+    }
+
+    /// Refused once `model_id`'s engine on `device` has exited [`MAX_RESTARTS`] times within
+    /// [`RESTART_WINDOW`], so a model that crashes on every start is not restarted in a loop:
+    /// the last exit's own code and hint when it named a cause (`ModelFileInvalid` for a broken
+    /// model file, `GpuUnavailable`), else `BackendFailed`.
+    fn restart_allowed(&self, model_id: &str, device: DevicePreference) -> Result<()> {
         let mut exits = lock(&self.exits);
-        exits.retain(|(_, at)| at.elapsed() < RESTART_WINDOW);
-        let recent: Vec<&Instant> = exits
+        exits.retain(|x| x.at.elapsed() < RESTART_WINDOW);
+        let recent: Vec<&Exit> = exits
             .iter()
-            .filter(|(id, _)| id == model_id)
-            .map(|(_, at)| at)
+            .filter(|x| x.model_id == model_id && x.device == device)
             .collect();
+        let (Some(first), Some(last)) = (recent.first(), recent.last()) else {
+            return Ok(());
+        };
         if recent.len() < MAX_RESTARTS {
             return Ok(());
         }
-        let wait = RESTART_WINDOW.saturating_sub(recent[0].elapsed()).as_secs() + 1;
-        Err(CommonError::new(
-            ErrorCode::BackendFailed,
-            format!(
-                "the engine for {model_id} stopped unexpectedly {} times in the last {} s; not starting it again for {wait} s",
-                recent.len(),
-                RESTART_WINDOW.as_secs()
-            ),
-        )
-        .with_hint(format!(
+        let wait = RESTART_WINDOW.saturating_sub(first.at.elapsed()).as_secs() + 1;
+        let message = format!(
+            "the engine for {model_id} stopped unexpectedly {} times in the last {} s; not starting it again for {wait} s",
+            recent.len(),
+            RESTART_WINDOW.as_secs()
+        );
+        if last.code != ErrorCode::BackendFailed {
+            let e = CommonError::new(last.code, message);
+            return Err(match &last.hint {
+                Some(h) => e.with_hint(h.clone()),
+                None => e,
+            });
+        }
+        Err(CommonError::new(ErrorCode::BackendFailed, message).with_hint(format!(
             "check free memory and the engine logs in {}, or load a smaller model",
             self.paths.logs().display()
         )))
@@ -245,7 +276,8 @@ impl ModelManager {
             // ensure_loaded and generate) or a live stream/call never has its engine killed.
             refuse_if_busy(s, Arc::strong_count(&s.model) > 1)?;
         }
-        self.restart_allowed(model_id)?;
+        let device = opts.device.unwrap_or_else(|| self.default_device());
+        self.restart_allowed(model_id, device)?;
         let _loading = LoadingMark::new(&self.view, model_id);
         let (path, sha256) = self.resolve(model_id)?;
         // F-05-01: the bytes handed to the engine are the bytes the manifest promised. Hashing a
@@ -278,8 +310,16 @@ impl ModelManager {
             Err(e) => {
                 // An engine that exits before it is ready counts toward the restart bound like one
                 // that exits after, so a model that crashes on every start is refused too.
-                if e.message.contains(crate::llamacpp::process::EXITED_BEFORE_READY) {
-                    lock(&self.exits).push((model_id.to_string(), Instant::now()));
+                let marker = format!(" {}", crate::llamacpp::process::EXITED_BEFORE_READY);
+                if let Some((head, _)) = e.message.split_once(&marker) {
+                    let exit = EngineExit {
+                        model_id: model_id.to_string(),
+                        pid: None,
+                        reason: head.rsplit_once("exited with ").map_or(head, |(_, r)| r).to_string(),
+                        in_flight: 0,
+                        at_utc: common_artifacts::store::utc_now(),
+                    };
+                    self.record_exit(exit, device, e.code, e.hint.clone());
                 }
                 return Err(e);
             }
@@ -382,6 +422,7 @@ impl ModelManager {
             embeddings: opts.embeddings,
             timeouts: Timeouts::default(),
             extra_args: vec![],
+            split: None,
         };
         Ok((req, plan.reason))
     }
@@ -1090,6 +1131,11 @@ mod tests {
         assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
         assert!(e.message.contains("3 times in the last 60 s"), "{e}");
         assert_eq!(backend.loads.load(SeqCst), MAX_RESTARTS, "not started again");
+        let exit = m.snapshot().last_exit.expect("an exit during load is the last exit");
+        assert_eq!(
+            (exit.model_id.as_str(), exit.reason.as_str(), exit.pid, exit.in_flight),
+            ("tiny", "signal: 6 (SIGABRT)", None, 0)
+        );
 
         let (mut m, backend) = fake_manager(
             HardwareReport::default(),
@@ -1100,6 +1146,86 @@ mod tests {
             m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
         }
         assert_eq!(backend.loads.load(SeqCst), MAX_RESTARTS + 1, "timeouts are not exits");
+    }
+
+    /// Round 6b regression (F-08-04): failed `--device gpu` starts count only against GPU loads of
+    /// that model, so a CPU or Auto load right after still loads; a model whose file breaks every
+    /// start trips the bound as `ModelFileInvalid` with its hint. FAKE backend, real error shapes.
+    #[tokio::test]
+    async fn failed_gpu_starts_leave_cpu_loads_alone() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Broken {
+            loads: AtomicUsize,
+            code: ErrorCode,
+            gpu_only: bool,
+        }
+        #[async_trait::async_trait]
+        impl InferenceBackend for Broken {
+            fn name(&self) -> &str {
+                "fake"
+            }
+            fn version(&self) -> String {
+                String::new()
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::default()
+            }
+            async fn load(&self, req: LoadRequest) -> Result<Arc<dyn LoadedModel>> {
+                self.loads.fetch_add(1, SeqCst);
+                if self.gpu_only && req.device != DevicePreference::Gpu {
+                    let info = LoadedModelInfo {
+                        model_id: req.model_id,
+                        ..Default::default()
+                    };
+                    return Ok(Arc::new(Idle(info, || {})));
+                }
+                Err(CommonError::new(
+                    self.code,
+                    "llama-server exited with exit status: 1 before becoming ready:\nggml_metal_init: error",
+                )
+                .with_hint("the hint of the failure"))
+            }
+        }
+        let broken = |code, gpu_only| {
+            let (mut m, _) = fake_manager(HardwareReport::default(), None);
+            m.available_memory = || Some(1 << 30);
+            let b = Arc::new(Broken {
+                loads: AtomicUsize::new(0),
+                code,
+                gpu_only,
+            });
+            m.backend = b.clone();
+            (m, b)
+        };
+        let on = |d| LoadOptions {
+            device: Some(d),
+            ..Default::default()
+        };
+
+        let (m, b) = broken(ErrorCode::GpuUnavailable, true);
+        for _ in 0..=MAX_RESTARTS {
+            let e = m.ensure_loaded("tiny", on(DevicePreference::Gpu)).await.err().unwrap();
+            assert_eq!(e.code, ErrorCode::GpuUnavailable, "{e}");
+        }
+        assert_eq!(b.loads.load(SeqCst), MAX_RESTARTS, "the 4th GPU start is refused");
+        m.ensure_loaded("tiny", on(DevicePreference::Cpu))
+            .await
+            .expect("a CPU load after three failed GPU starts");
+        assert_eq!(b.loads.load(SeqCst), MAX_RESTARTS + 1);
+        m.unload().await.unwrap();
+        m.ensure_loaded("tiny", LoadOptions::default())
+            .await
+            .expect("an Auto load too");
+
+        let (m, b) = broken(ErrorCode::ModelFileInvalid, false);
+        for _ in 0..MAX_RESTARTS {
+            m.ensure_loaded("tiny", on(DevicePreference::Cpu)).await.err().unwrap();
+        }
+        let e = m.ensure_loaded("tiny", on(DevicePreference::Cpu)).await.err().unwrap();
+        assert_eq!(b.loads.load(SeqCst), MAX_RESTARTS, "not started again");
+        assert_eq!(e.code, ErrorCode::ModelFileInvalid, "{e}");
+        assert_eq!(e.hint.as_deref(), Some("the hint of the failure"));
+        assert!(e.message.contains("3 times in the last 60 s"), "{e}");
     }
 
     #[test]

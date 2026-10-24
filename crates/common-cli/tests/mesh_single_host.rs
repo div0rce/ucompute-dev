@@ -10,6 +10,8 @@
 //! the daemon's API (`serve.json`), and the test checks the daemons themselves: the revoked session
 //! closes within 5 s, the revoked key is refused in the handshake, and a later daemon write keeps
 //! the revocation.
+// Unix only: symlinked homes and signals (libc::kill, waitpid).
+#![cfg(unix)]
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

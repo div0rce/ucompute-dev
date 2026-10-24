@@ -11,12 +11,10 @@ mod common;
 use common::*;
 use common_api::mesh::{Settings, DISCLOSURE};
 use common_api::{ApiConfig, AppState};
-use common_artifacts::Store;
 use common_core::Paths;
 use common_hardware::HardwareReport;
 use common_identity::{DeviceIdentity, PeerId, PeerRecord};
 use common_network::NetworkConfig;
-use common_runtime::manager::ModelManager;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -219,20 +217,6 @@ async fn pair(initiator: &Server, joiner: &Server, i_name: &str, j_name: &str) -
     let other: PeerRecord = serde_json::from_value(status["result"]["peer"].clone()).unwrap();
     assert_eq!((other.id, other.name.as_str()), (joiner.state.identity.id, j_name));
     (me, other.id)
-}
-
-/// A daemon whose identity, peers, audit and settings live in `dir` while its models and engine
-/// are the real COMMON_HOME `home` (read, never written): the serving side of a SINGLE-HOST pair.
-fn serving_app(home: &std::path::Path, dir: &std::path::Path, config: ApiConfig) -> Arc<AppState> {
-    let real = Paths::at(home);
-    let backend = common_runtime::backend_by_name("llama.cpp", engine_dir(&real), real.clone()).unwrap();
-    let manager = ModelManager::new(
-        real.clone(),
-        Store::new(real),
-        backend,
-        common_hardware::probe().unwrap(),
-    );
-    app_with(config, Paths::at(dir), Arc::new(manager))
 }
 
 /// Pin `id` by hand (pairing has its own tests): `addr` is where this device dials it; `None`

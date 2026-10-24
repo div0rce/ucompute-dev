@@ -1,7 +1,7 @@
 //! Engine process plumbing: argument building, environment scrubbing, port choice, spawn,
 //! readiness polling and graceful stop. Nothing here sees prompts or tokens.
 
-use super::logparse;
+use super::{logparse, split};
 use crate::types::LoadRequest;
 use common_core::{CommonError, ErrorCode, Result};
 use std::ffi::OsString;
@@ -69,6 +69,14 @@ const RESERVED_FLAGS: &[&str] = &[
     "--n-gpu-layers",
     "-ot",
     "--override-tensor",
+    "-cmoe",
+    "--cpu-moe",
+    "-ncmoe",
+    "--n-cpu-moe",
+    "--moe-cache-mib",
+    "-ncffn",
+    "--n-cpu-ffn",
+    "--override-kv",
     "-fit",
     "--fit",
     "-fitt",
@@ -95,6 +103,13 @@ const RESERVED_FLAGS: &[&str] = &[
     "-otd",
     "--override-tensor-draft",
     "--spec-draft-override-tensor",
+    "-cmoed",
+    "--cpu-moe-draft",
+    "--spec-draft-cpu-moe",
+    "-ncmoed",
+    "--n-cpu-moe-draft",
+    "--spec-draft-ncmoe",
+    "--spec-draft-n-cpu-moe",
     // verbosity
     "-lv",
     "--verbosity",
@@ -131,7 +146,9 @@ pub fn validate_extra_args(args: &[String]) -> Result<()> {
 /// verbosity. Verified on b11609 that level 4 never writes prompt text to the log.
 /// The API key goes through `--api-key-file` (a 0600 file, see [`write_key_file`]), never argv:
 /// argv is readable by every local user through the process table.
-pub fn build_args(req: &LoadRequest, port: u16, api_key_file: &Path, gpu: bool) -> Vec<String> {
+/// A split load (`req.split`) takes the split branch instead of the GPU or CPU one, so none of
+/// `--device none`, `--no-kv-offload`, `--no-op-offload` or the force-gpu-fail device reach it.
+pub fn build_args(req: &LoadRequest, port: u16, api_key_file: &Path, gpu: bool) -> Result<Vec<String>> {
     let kv = req.kv_type.as_llama_arg();
     let mut a: Vec<String> = vec![
         "-m".into(),
@@ -164,7 +181,9 @@ pub fn build_args(req: &LoadRequest, port: u16, api_key_file: &Path, gpu: bool) 
         "--fit".into(),
         "off".into(),
     ];
-    if gpu {
+    if let Some(s) = &req.split {
+        a.extend(split::launch_args(s).map_err(|e| CommonError::invalid(format!("split plan: {e}")))?);
+    } else if gpu {
         a.extend(["-ngl".to_string(), req.n_gpu_layers.unwrap_or(999).to_string()]);
         if force_gpu_fail() {
             a.extend(["--device".to_string(), "COMMON_TEST_NO_SUCH_DEVICE".to_string()]);
@@ -177,7 +196,18 @@ pub fn build_args(req: &LoadRequest, port: u16, api_key_file: &Path, gpu: bool) 
         a.push("--embeddings".into());
     }
     a.extend(req.extra_args.iter().cloned());
-    a
+    Ok(a)
+}
+
+/// The engine's environment: the scrubbed parent environment and, for a split load,
+/// `GGML_RPC_NO_RDMA=1` so RPC stays on TCP (ADR-0005 D2). The scrub drops every inherited `GGML_`
+/// variable, so this is the only one the engine sees.
+pub fn engine_environment(req: &LoadRequest) -> Vec<(OsString, OsString)> {
+    let mut env = clean_environment(std::env::vars_os());
+    if req.split.is_some() {
+        env.push(("GGML_RPC_NO_RDMA".into(), "1".into()));
+    }
+    env
 }
 
 /// Drop env vars that could redirect the engine's libraries, devices or arguments.
@@ -211,10 +241,11 @@ pub async fn free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
-/// Spawn the engine with stdout+stderr redirected to `log_path` and a scrubbed environment.
+/// Spawn the engine with stdout+stderr redirected to `log_path` and exactly the environment `env`
+/// (see [`engine_environment`]).
 /// The engine writes its whole log to stderr, so one redirected handle is the log; `--log-file`
 /// would be a second writer on the same file.
-pub fn spawn(binary: &Path, args: &[String], log_path: &Path) -> Result<Child> {
+pub fn spawn(binary: &Path, args: &[String], env: Vec<(OsString, OsString)>, log_path: &Path) -> Result<Child> {
     let log = std::fs::File::create(log_path)?;
     let stderr = log.try_clone()?;
     let mut cmd = Command::new(binary);
@@ -224,7 +255,7 @@ pub fn spawn(binary: &Path, args: &[String], log_path: &Path) -> Result<Child> {
     cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     cmd.args(args)
         .env_clear()
-        .envs(clean_environment(std::env::vars_os()))
+        .envs(env)
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(stderr)
@@ -441,6 +472,7 @@ mod tests {
             embeddings: false,
             timeouts: Timeouts::default(),
             extra_args: vec![],
+            split: None,
         }
     }
 
@@ -453,7 +485,7 @@ mod tests {
 
     #[test]
     fn cpu_args() {
-        let a = build_args(&req(), 4242, Path::new(KEY_FILE), false);
+        let a = build_args(&req(), 4242, Path::new(KEY_FILE), false).unwrap();
         assert!(has(&a, &["-m", "/tmp/m.gguf"]));
         assert!(has(&a, &["--host", "127.0.0.1"]));
         assert!(has(&a, &["--port", "4242"]));
@@ -479,13 +511,16 @@ mod tests {
         let mut r = req();
         r.threads = Some(6);
         r.embeddings = true;
-        let a = build_args(&r, 1, Path::new(KEY_FILE), true);
+        let a = build_args(&r, 1, Path::new(KEY_FILE), true).unwrap();
         assert!(has(&a, &["-ngl", "999"]), "all layers by default");
         assert!(!a.iter().any(|x| x == "--device"), "no device override unless forced");
         assert!(has(&a, &["-t", "6"]));
         assert!(a.iter().any(|x| x == "--embeddings"));
         r.n_gpu_layers = Some(3);
-        assert!(has(&build_args(&r, 1, Path::new(KEY_FILE), true), &["-ngl", "3"]));
+        assert!(has(
+            &build_args(&r, 1, Path::new(KEY_FILE), true).unwrap(),
+            &["-ngl", "3"]
+        ));
     }
 
     #[test]
@@ -511,7 +546,7 @@ mod tests {
         let mut r = req();
         r.extra_args = vec!["-ub".into(), "256".into()];
         assert!(validate_extra_args(&r.extra_args).is_ok());
-        let a = build_args(&r, 1, Path::new(KEY_FILE), false);
+        let a = build_args(&r, 1, Path::new(KEY_FILE), false).unwrap();
         assert_eq!(&a[a.len() - 2..], &["-ub", "256"]);
         for bad in ["--rpc 1.2.3.4:1", "a\nb", "", "--host", "--api-key=x", "--port"] {
             let e = validate_extra_args(&[bad.to_string()]).unwrap_err();
@@ -553,6 +588,14 @@ mod tests {
             "-devd",
             "-ngld",
             "-otd",
+            "-cmoe",
+            "--cpu-moe",
+            "-ncmoe",
+            "--n-cpu-moe",
+            "--moe-cache-mib",
+            "-ncffn",
+            "--n-cpu-ffn",
+            "--override-kv",
         ];
         for flag in split {
             for args in [vec![flag.to_string(), "x".to_string()], vec![format!("{flag}=x")]] {
@@ -561,6 +604,150 @@ mod tests {
             }
         }
         assert!(RESERVED_FLAGS.iter().all(|f| f.starts_with('-') && !f.contains('=')));
+    }
+
+    /// Configuration P on stories15M (6 blocks): the RPC stage holds [0,3), MTL0 [3,6) plus output.
+    fn split_req(ports: Vec<u16>, stages: &[(&str, u32, u32)]) -> LoadRequest {
+        let mut r = req();
+        r.split = Some(crate::types::Split {
+            rpc_ports: ports,
+            stages: stages
+                .iter()
+                .map(|&(d, a, b)| crate::types::SplitStage {
+                    device: d.into(),
+                    first_block: a,
+                    end_block: b,
+                })
+                .collect(),
+            n_layer: 6,
+            no_mmap: false,
+        });
+        r
+    }
+
+    fn value_of<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+        args.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    /// WP-04 C2: the split branch carries the lab's mapping unchanged (`split::rpc_split_args`, whose
+    /// placement the engine's own `-lv 5` lines confirmed on b11609), with `-ngl 999` and `--fit off`.
+    #[test]
+    fn split_args_follow_the_lab_mapping() {
+        let mut r = split_req(vec![50052], &[("RPC0", 0, 3), ("MTL0", 3, 6)]);
+        r.n_gpu_layers = Some(3);
+        let a = build_args(&r, 1, Path::new(KEY_FILE), false).unwrap();
+        let lab = split::rpc_split_args(&[("RPC0", 0, 3), ("MTL0", 3, 6)], 6).unwrap();
+        assert!(has(&a, &lab.iter().map(String::as_str).collect::<Vec<_>>()), "{a:?}");
+        assert_eq!(value_of(&a, "--device"), ["RPC0,MTL0"]);
+        assert_eq!(value_of(&a, "--split-mode"), ["layer"]);
+        assert_eq!(
+            value_of(&a, "-ngl"),
+            ["999"],
+            "every layer offloaded; n_gpu_layers is not a split input"
+        );
+        assert_eq!(
+            value_of(&a, "--fit"),
+            ["off"],
+            "with fit on, llama.cpp may move layers itself"
+        );
+        let w: Vec<f32> = value_of(&a, "--tensor-split")[0]
+            .split(',')
+            .map(|x| x.parse().unwrap())
+            .collect();
+        assert_eq!(
+            split::llama_assign(&w, 6),
+            [0, 0, 0, 1, 1, 1, 1],
+            "output layer with MTL0"
+        );
+        assert!(!a.iter().any(|x| x == "-lm"), "mmap unless asked");
+        r.split.as_mut().unwrap().no_mmap = true;
+        let a = build_args(&r, 1, Path::new(KEY_FILE), false).unwrap();
+        assert_eq!(value_of(&a, "-lm"), ["none"], "b11609 has no --no-mmap");
+        assert!(!a.iter().any(|x| x == "--no-mmap"));
+    }
+
+    #[test]
+    fn rpc_endpoints_render_loopback_only() {
+        let r = split_req(vec![50052, 50053], &[("RPC0", 0, 2), ("RPC1", 2, 4), ("MTL0", 4, 6)]);
+        let a = build_args(&r, 1, Path::new(KEY_FILE), true).unwrap();
+        assert_eq!(value_of(&a, "--rpc"), ["127.0.0.1:50052,127.0.0.1:50053"]);
+        for ep in value_of(&a, "--rpc")[0].split(',') {
+            let addr: std::net::SocketAddr = ep.parse().unwrap();
+            assert!(addr.ip().is_loopback() && addr.ip().is_ipv4(), "{ep}");
+        }
+        // the type has no address to give: a host in the plan does not even deserialize
+        let host = serde_json::json!({"rpc_ports": ["10.0.0.7:50052"], "stages": [], "n_layer": 6});
+        assert!(serde_json::from_value::<crate::types::Split>(host).is_err());
+        // plans that would reach a port without a stage, a stage without a port, or smuggle a device list
+        for (ports, stages, why) in [
+            (vec![], vec![("MTL0", 0, 6)], "at least one RPC port"),
+            (vec![0], vec![("RPC0", 0, 3), ("MTL0", 3, 6)], "none of them 0"),
+            (
+                vec![7, 7],
+                vec![("RPC0", 0, 2), ("RPC1", 2, 4), ("MTL0", 4, 6)],
+                "given twice",
+            ),
+            (
+                vec![7, 8],
+                vec![("RPC0", 0, 3), ("MTL0", 3, 6)],
+                "RPC1 (port 8) has no stage",
+            ),
+            (
+                vec![7],
+                vec![("RPC0", 0, 2), ("RPC1", 2, 4), ("MTL0", 4, 6)],
+                "RPC1 has no RPC port",
+            ),
+            (
+                vec![7],
+                vec![("RPC0", 0, 3), ("MTL0,CPU", 3, 6)],
+                "not a llama.cpp device name",
+            ),
+            (vec![7], vec![("RPC0", 0, 3), ("MTL0", 4, 6)], "contiguously"),
+        ] {
+            let e = build_args(&split_req(ports, &stages), 1, Path::new(KEY_FILE), true).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidRequest);
+            assert!(e.message.contains(why), "{why}: {e}");
+        }
+    }
+
+    /// No CPU-branch flag and no second device or offload choice reaches a split engine, whichever
+    /// branch the caller would otherwise take.
+    #[test]
+    fn split_skips_cpu_branch_flags() {
+        let r = split_req(vec![50052], &[("RPC0", 0, 3), ("MTL0", 3, 6)]);
+        for gpu in [false, true] {
+            let a = build_args(&r, 1, Path::new(KEY_FILE), gpu).unwrap();
+            for f in [
+                "none",
+                "--no-kv-offload",
+                "--no-op-offload",
+                "COMMON_TEST_NO_SUCH_DEVICE",
+            ] {
+                assert!(!a.iter().any(|x| x == f), "{f} with gpu={gpu}: {a:?}");
+            }
+            assert_eq!(value_of(&a, "--device").len(), 1, "{a:?}");
+            assert_eq!(value_of(&a, "-ngl"), ["999"]);
+        }
+    }
+
+    #[test]
+    fn split_sets_no_rdma_and_keeps_lv4() {
+        let r = split_req(vec![50052], &[("RPC0", 0, 3), ("MTL0", 3, 6)]);
+        let env = engine_environment(&r);
+        let ggml: Vec<_> = env
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy().starts_with("GGML_"))
+            .collect();
+        assert_eq!(ggml, [&(OsString::from("GGML_RPC_NO_RDMA"), OsString::from("1"))]);
+        assert!(!engine_environment(&req())
+            .iter()
+            .any(|(k, _)| k.to_string_lossy().starts_with("GGML_")));
+        // -lv 5 logs every prompt (lab rpc-dataflow, b11609): the split proof works at Common's -lv 4
+        let a = build_args(&r, 1, Path::new(KEY_FILE), true).unwrap();
+        assert_eq!(value_of(&a, "-lv"), ["4"]);
     }
 
     #[test]

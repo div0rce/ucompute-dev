@@ -77,7 +77,7 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: mesh::GroupsCmd,
     },
-    /// Show or change the privacy mode (local-only is the default and the only private mode)
+    /// Show or change the privacy mode. Local only is the default, and refuses every off-device request
     Privacy(mesh::PrivacyArgs),
     /// Print the audit trail (ids, codes and counts; never prompts)
     Audit(mesh::AuditArgs),
@@ -214,9 +214,10 @@ pub async fn shutdown_signal() -> Stop {
     }
 }
 
-/// Stop `llama-server` processes started from `binary` whose parent is gone (ppid 1): a `common`
-/// that died without unwinding (SIGKILL, crash) leaves its engine behind with the whole model
-/// resident. Returns the pids signalled.
+/// Stop `llama-server` processes started from `binary` whose owner is gone: a `common` that died
+/// without unwinding (SIGKILL, crash) leaves its engine behind with the whole model resident. The
+/// orphan is adopted by pid 1 or, on Linux, by a subreaper (`systemd --user`), so the parent's pid
+/// alone does not tell; see [`orphans`]. Returns the pids signalled.
 /// ponytail: `ps` scan matched on argv[0]; a user's own detached start of the pinned binary counts
 /// as ours. Upgrade: pid registry under COMMON_HOME if that ever bites.
 pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
@@ -228,7 +229,7 @@ pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
     #[cfg(unix)]
     {
         let Ok(out) = std::process::Command::new("ps")
-            .args(["-axo", "pid=,ppid=,args="])
+            .args(["-axo", "pid=,ppid=,pgid=,ucomm=,args="])
             .output()
         else {
             return Vec::new();
@@ -245,24 +246,60 @@ pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
     }
 }
 
-/// Pids in `ps -axo pid=,ppid=,args=` output whose parent is 1 and whose argv[0] is `binary`.
+/// Pids of engines in `ps -axo pid=,ppid=,pgid=,ucomm=,args=` output whose argv[0] is `binary` and
+/// whose parent, in the same listing, does not own them. A parent owns its engine when it is a
+/// `common` process (the daemon, `common run`, the desktop sidecar `common-<triple>`; also when it
+/// is pid 1 in a container) or when it is still in the engine's process group (an engine spawned by
+/// a test harness or any other in-process user of the runtime: an adopting reaper, pid 1 or
+/// `systemd --user`, leads its own group). A parent missing from the listing owns nothing. The
+/// parent is judged by what that pid is now, so a dead daemon's reused pid protects nothing.
 /// `args` is matched as text from its start, not split on whitespace: the default macOS home
 /// (`~/Library/Application Support/Common`) puts a space inside the engine path.
 /// ponytail: `ps` cannot tell a space inside argv[0] from one between arguments; a process named
 /// by a prefix of our path with the rest as its arguments would count as ours.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn orphans(ps: &str, binary: &Path) -> Vec<u32> {
+    struct Row<'a> {
+        pid: u32,
+        ppid: u32,
+        pgid: u32,
+        name: &'a str,
+        args: &'a str,
+    }
+    fn token(s: &str) -> Option<(&str, &str)> {
+        let s = s.trim_start();
+        let (t, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
+        (!t.is_empty()).then_some((t, rest))
+    }
+    fn row(l: &str) -> Option<Row<'_>> {
+        let (pid, rest) = token(l)?;
+        let (ppid, rest) = token(rest)?;
+        let (pgid, rest) = token(rest)?;
+        let (name, args) = token(rest)?;
+        Some(Row {
+            pid: pid.parse().ok()?,
+            ppid: ppid.parse().ok()?,
+            pgid: pgid.parse().ok()?,
+            name,
+            args: args.trim_start(),
+        })
+    }
     let Some(bin) = binary.to_str() else {
         return Vec::new();
     };
-    ps.lines()
-        .filter_map(|l| {
-            let (pid, rest) = l.trim_start().split_once(char::is_whitespace)?;
-            let (ppid, args) = rest.trim_start().split_once(char::is_whitespace)?;
-            let after = args.trim_start().strip_prefix(bin)?;
-            let ours = after.is_empty() || after.starts_with(char::is_whitespace);
-            (ppid.parse::<u32>().ok()? == 1 && ours).then_some(pid.parse().ok()?)
+    let rows: Vec<Row> = ps.lines().filter_map(row).collect();
+    let common = |name: &str| name == "common" || name.starts_with("common-");
+    let owned = |e: &Row| {
+        rows.iter()
+            .find(|p| p.pid == e.ppid)
+            .is_some_and(|p| common(p.name) || (p.pid != 1 && p.pgid == e.pgid))
+    };
+    rows.iter()
+        .filter(|e| {
+            let after = e.args.strip_prefix(bin);
+            after.is_some_and(|a| a.is_empty() || a.starts_with(char::is_whitespace)) && !owned(e)
         })
+        .map(|e| e.pid)
         .collect()
 }
 
@@ -722,11 +759,12 @@ mod tests {
     fn orphans_match_ppid_1_and_argv0_only() {
         let bin = Path::new("/home/x/backends/llama.cpp/b11609/llama-server");
         let ps = "\
-  1     0 /sbin/launchd
- 10     1 /home/x/backends/llama.cpp/b11609/llama-server -m /tmp/a.gguf --port 1
- 11   999 /home/x/backends/llama.cpp/b11609/llama-server -m /tmp/b.gguf --port 2
- 12     1 /usr/local/bin/llama-server --port 3
- 13     1 (llama-server)
+  1     0     1 launchd          /sbin/launchd
+ 10     1    10 llama-server     /home/x/backends/llama.cpp/b11609/llama-server -m /tmp/a.gguf --port 1
+ 11   999    11 llama-server     /home/x/backends/llama.cpp/b11609/llama-server -m /tmp/b.gguf --port 2
+999     1   999 common           /usr/local/bin/common serve
+ 12     1    12 llama-server     /usr/local/bin/llama-server --port 3
+ 13     1    13 llama-server     (llama-server)
 garbage line
 ";
         assert_eq!(
@@ -737,22 +775,67 @@ garbage line
         assert!(orphans("", bin).is_empty());
     }
 
+    /// Linux desktop sessions run `systemd --user` as a subreaper: a crashed daemon's engine is
+    /// adopted by it, not by pid 1, and is still an orphan. Two live daemons' engines, an engine of
+    /// an in-process runtime user (a test harness: same process group) and a container whose pid 1
+    /// is `common` keep theirs; a parent pid now held by something else protects nothing.
+    #[test]
+    fn orphans_judge_the_parent_not_its_pid() {
+        let bin = Path::new("/home/x/.common/backends/llama.cpp/b11609/llama-server");
+        let e = "/home/x/.common/backends/llama.cpp/b11609/llama-server -m /m.gguf";
+        let ps = format!(
+            "\
+    1     0     1 systemd          /sbin/init splash
+ 1500     1  1500 systemd          /usr/lib/systemd/systemd --user
+ 2000  1500  1999 llama-server     {e} --port 1
+ 3000  1500  3000 common           /home/x/bin/common serve --port 8192
+ 3001  3000  3000 llama-server     {e} --port 2
+ 4000  1500  4000 common           /home/x/bin/common serve --port 8193
+ 4001  4000  3999 llama-server     {e} --port 3
+ 5000  1500  5000 common-x86_64-u  /opt/UCompute/common-x86_64-unknown-linux-gnu serve
+ 5001  5000  5000 llama-server     {e} --port 4
+ 6000  1500  6000 real_engine-0a1  /src/target/debug/deps/real_engine-0a1b2c3d4e5f6a7b
+ 6001  6000  6000 llama-server     {e} --port 5
+ 7000  1500  7000 bash             -bash
+ 7001  7000  2999 llama-server     {e} --port 6
+ 8001  8000  8000 llama-server     {e} --port 7
+"
+        );
+        assert_eq!(orphans(&ps, bin), vec![2000, 7001, 8001]);
+        let container = format!(
+            "    1     0     1 common           /usr/bin/common serve\n   20     1     1 llama-server     {e}\n"
+        );
+        assert!(orphans(&container, bin).is_empty(), "pid 1 is the daemon");
+    }
+
     /// The packaged app's engine lives under `~/Library/Application Support/Common`: a space in argv[0].
     #[test]
     fn orphans_match_an_engine_path_with_a_space() {
         let bin = Path::new("/Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server");
         let ps = "\
-68722     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server -m /m.gguf --port 1
-   20     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server
-   21   400 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server --port 2
-   22     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server-old --port 3
-   23     1 /Users/x/Library/Application
+    1     0     1 launchd          /sbin/launchd
+68722     1 68722 llama-server     /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server -m /m.gguf --port 1
+   20     1    20 llama-server     /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server
+  400     1   400 common           /Users/x/Applications/My Apps/Common.app/Contents/MacOS/common serve
+   21   400   400 llama-server     /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server --port 2
+   22     1    22 llama-server-ol  /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server-old --port 3
+   23     1    23 Application      /Users/x/Library/Application
 ";
         assert_eq!(orphans(ps, bin), vec![68722, 20]);
     }
 
-    /// A detached process running under our engine path (a symlink to `sleep`, so it is real and
-    /// signed) is reparented to pid 1 and must be stopped by the reaper.
+    /// Child-process helper for [`reaper_stops_detached_engine`]: sleeps under whatever name it was
+    /// started as.
+    #[test]
+    #[ignore = "child-process helper"]
+    fn sleeper_helper() {
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    /// A detached process running under our engine path (a symlink to this test binary running
+    /// [`sleeper_helper`], so it is real and signed) is reparented to pid 1 or a subreaper and must
+    /// be stopped by the reaper. Not a symlink to `sleep`: Ubuntu's Rust coreutils `sleep` is a
+    /// multicall binary that exits at once when started as `llama-server`.
     #[cfg(unix)]
     #[test]
     fn reaper_stops_detached_engine() {
@@ -760,10 +843,13 @@ garbage line
         let dir = std::env::temp_dir().join(format!("common-cli reap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("llama-server");
-        std::os::unix::fs::symlink("/bin/sleep", &bin).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &bin).unwrap();
         let ok = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("nohup '{}' 300 >/dev/null 2>&1 &", bin.display()))
+            .arg(format!(
+                "nohup '{}' --ignored --exact tests::sleeper_helper >/dev/null 2>&1 &",
+                bin.display()
+            ))
             .status()
             .unwrap()
             .success();
@@ -1003,6 +1089,29 @@ garbage line
             help.contains(&format!(
                 "default: the performance core count on Apple Silicon, else the physical core count, at most {max}"
             )),
+            "{help}"
+        );
+    }
+
+    /// Local only refuses off-device requests; it does not keep downloads off the internet.
+    #[test]
+    fn privacy_help_claims_only_what_is_enforced() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("privacy")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("Local only is the default, and refuses every off-device request"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Downloading a model or the engine still uses the internet"),
+            "{help}"
+        );
+        assert!(
+            !help.contains("never leave") && !help.contains("only private mode"),
             "{help}"
         );
     }
