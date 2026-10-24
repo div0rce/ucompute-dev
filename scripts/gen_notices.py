@@ -59,7 +59,11 @@ def satisfied(expr, allow):
             v = conj() or v
         return v
 
-    return disj()
+    try:
+        ok = disj()
+    except IndexError:  # an operator with nothing after it
+        return False
+    return ok and pos == len(toks)  # anything left over ("MIT and GPL-3.0-only") is not understood: refuse
 
 
 def rust(crates, target):

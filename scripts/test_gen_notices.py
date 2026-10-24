@@ -22,6 +22,12 @@ class Policy(unittest.TestCase):
         self.assertFalse(satisfied("(MIT OR Apache-2.0) AND LGPL-2.1-only", ALLOW))
         self.assertFalse(satisfied("GPL-2.0-only WITH Classpath-exception-2.0", ALLOW))
 
+    def test_expressions_not_fully_understood_are_refused(self):
+        self.assertFalse(satisfied("MIT and GPL-3.0-only", ALLOW))
+        self.assertFalse(satisfied("MIT GPL-3.0-only", ALLOW))
+        self.assertFalse(satisfied("MIT OR", ALLOW))
+        self.assertFalse(satisfied("(MIT", ALLOW))
+
     def test_deny_toml_has_no_copyleft(self):
         self.assertFalse({a for a in allowed() if "GPL" in a})
 
