@@ -14,8 +14,17 @@
 //! Each entry is its id's replay guard: only a strictly newer `ts` replaces it, so a replayed
 //! record cannot add, strip or redirect a dial candidate. A goodbye or expiry (`ServiceRemoved`,
 //! unauthenticated) only hides the entry, so it cannot clear the guard either. A peer that
-//! vanishes without a goodbye leaves the list when mdns-sd expires its SRV record (host TTL
-//! 120 s); the age bound is only a backstop.
+//! vanishes without a goodbye leaves the list once it has not been heard for [`LISTED_SECS`]. A
+//! live peer is heard at every re-sign announcement ([`REFRESH`]); when a listed peer has missed
+//! one ([`OVERDUE`]), the browser re-queries (a fresh browse, so mdns-sd's cache and its
+//! known-answer suppression start empty and every live peer answers in full), at most once per
+//! [`REQUERY_GAP`] (2026-10-23: two missed re-sign announcements aged a live peer out). With every
+//! announcement heard it never re-queries, so mdns-sd's own query backoff (doubling, RFC 6762
+//! section 5.2) is all that is sent; a peer that vanished costs at most two re-queries.
+//!
+//! Only IPv4 addresses are dial candidates (the workload endpoint binds IPv4 only,
+//! [`NetworkConfig::bind_ip`], and IPv6 is neither advertised nor browsed). A peer heard only at
+//! IPv6 addresses is listed apart, with the reason ([`Browser::unreachable`]), and never dialled.
 //!
 //! The advertiser re-signs every [`REFRESH`], and [`IP_SETTLE`] after this host gains or loses an
 //! address (mdns-sd re-announces the new address set within its 5 s interface poll, still with the
@@ -27,10 +36,11 @@ use crate::tls::{store_verdict, Verdict};
 use crate::{NetworkConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 use common_core::{CommonError, ErrorCode, Result};
 use common_identity::{utc_now, DeviceIdentity, PeerId, PeerStore};
-use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{DaemonEvent, IfKind, RecvTimeoutError, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -43,6 +53,20 @@ const REFRESH: Duration = Duration::from_secs(120);
 /// Re-sign this long after the last interface change: more than mdns-sd's 1 s probe (a re-sign
 /// during the probe renamed the instance "x (2)"), and a burst of changes gives one re-sign.
 const IP_SETTLE: Duration = Duration::from_secs(2);
+/// The browser checks this often whether to re-query ([`requery_due`]).
+const CHECK: Duration = Duration::from_secs(10);
+/// A listed peer not heard for this long has missed its last re-sign announcement (one every
+/// [`REFRESH`]).
+const OVERDUE: Duration = Duration::from_secs(REFRESH.as_secs() + 5);
+/// At least this between two re-queries: one restarts mdns-sd's query backoff, about 5 queries
+/// over the next 31 s (1 s, doubling).
+const REQUERY_GAP: Duration = Duration::from_secs(30);
+/// A peer not heard for this long is no longer listed: one missed announcement leaves room for two
+/// re-queries ([`requery_due`]) before the peer drops out.
+pub const LISTED_SECS: u64 = 175;
+const _: () = assert!(OVERDUE.as_secs() + CHECK.as_secs() + REQUERY_GAP.as_secs() < LISTED_SECS);
+// Heard at least every LISTED_SECS, a live peer's record is never older than REFRESH + LISTED_SECS.
+const _: () = assert!(REFRESH.as_secs() + LISTED_SECS < MAX_RECORD_AGE_SECS);
 /// Most addresses kept per discovered peer, best first ([`DiscoveredPeer::addrs`]).
 pub const MAX_DIAL_ADDRS: usize = 2;
 /// Most records the browser keeps (anyone on the LAN can mint ids).
@@ -60,6 +84,27 @@ pub struct DiscoveredPeer {
     pub pairing: bool,
     pub pair_port: Option<u16>,
     pub proto: String,
+    /// True when pinned in the local store (never a trust decision by itself).
+    pub trusted: bool,
+    pub seen_utc: String,
+}
+
+/// Why a peer with a valid signed record has no dial candidate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoAddress {
+    /// Heard only at IPv6 link-local addresses (`fe80::/10`): they need a scope id we do not carry.
+    LinkLocalOnly,
+    /// Heard only at IPv6 addresses, some routable: the workload endpoint is IPv4 only.
+    OtherFamily,
+}
+
+/// A peer seen with a valid signed record but at no address this device can dial: "discovered, no
+/// reachable address". Nothing is dialled from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnreachablePeer {
+    pub id: PeerId,
+    pub reason: NoAddress,
     /// True when pinned in the local store (never a trust decision by itself).
     pub trusted: bool,
     pub seen_utc: String,
@@ -196,7 +241,7 @@ struct AdvertState {
     port: u16,
     pairing_port: Option<u16>,
     /// The bind address when it is one specific IP: the only address advertised. `None`
-    /// (0.0.0.0 / ::): every interface address, as mdns-sd finds them.
+    /// (0.0.0.0): every IPv4 interface address, as mdns-sd finds them.
     bound: Option<IpAddr>,
     instance: String,
     host: String,
@@ -284,7 +329,8 @@ impl Advertiser {
     /// Advertise (signed TXT: v, id, pair, pairport, proto, ts, sig). Dropping stops the advert.
     /// Inert (`active() == false`) when mDNS is disabled. A specific `config.bind_addr` (e.g.
     /// 127.0.0.1 for a SINGLE-HOST run) is the only address advertised, so nobody is told to dial
-    /// an interface nothing listens on; 0.0.0.0 / :: advertises every interface address.
+    /// an interface nothing listens on; 0.0.0.0 advertises every IPv4 interface address (IPv6 is
+    /// not advertised: nothing listens on it).
     pub fn start(
         config: &NetworkConfig,
         identity: Arc<DeviceIdentity>,
@@ -301,11 +347,13 @@ impl Advertiser {
             identity,
             port,
             pairing_port,
-            bound: config.bind_addr.parse().ok().filter(|ip: &IpAddr| !ip.is_unspecified()),
+            bound: config.bind_ip().ok().filter(|ip| !ip.is_unspecified()).map(IpAddr::V4),
             instance: short.clone(),
             host: format!("common-{short}.local."),
             fullname: Mutex::new(String::new()),
         });
+        // Before `monitor`: dropping the IPv6 interfaces is no address change to re-sign for.
+        state.daemon.disable_interface(IfKind::IPv6).map_err(mdns_err)?;
         let events = state.daemon.monitor().map_err(mdns_err)?;
         state.register(true)?;
         tracing::info!(instance = %short, port, pairing = pairing_port.is_some(), "mdns advertising");
@@ -356,6 +404,7 @@ impl Drop for Advertiser {
     }
 }
 
+#[derive(Clone)]
 struct Seen {
     peer: DiscoveredPeer,
     ts: u64,
@@ -363,6 +412,9 @@ struct Seen {
     fullname: String,
     /// Removed by an mDNS goodbye or expiry ([`forget`]): not listed, still the replay guard.
     gone: bool,
+    /// Heard at no address this device can dial: `peer.addrs` is empty (and `peer.addr` a
+    /// placeholder); listed only by [`Browser::unreachable`].
+    unreachable: Option<NoAddress>,
 }
 
 impl Seen {
@@ -371,6 +423,12 @@ impl Seen {
     fn fresh(&self, now_unix: u64) -> bool {
         now_unix.abs_diff(self.ts) <= MAX_RECORD_AGE_SECS
     }
+
+    /// Listed at `now` (`now_unix` on the wall clock): not said goodbye, record still verifiable,
+    /// heard within `max_age`.
+    fn listed(&self, now_unix: u64, now: Instant, max_age: Duration) -> bool {
+        !self.gone && self.fresh(now_unix) && now.saturating_duration_since(self.at) <= max_age
+    }
 }
 
 /// Insert a verified record: stale entries are evicted first; past [`MAX_SEEN`] the oldest entry
@@ -378,12 +436,16 @@ impl Seen {
 /// that is not newer is a replay or the owner re-announcing (mdns-sd re-resolves whenever a cached
 /// record changes): with the entry's own addresses it only marks the device heard (and listed
 /// again after a goodbye); with any other address it is ignored. So a replay cannot add, strip or
-/// redirect a dial candidate, nor roll back the name, pairing window or `ts`.
+/// redirect a dial candidate, nor roll back the name, pairing window or `ts`. The one exception: a
+/// record with the same `ts` fills an entry that has no dial candidate (mdns-sd resolves a record
+/// once per address family it hears it on, so its first copy may carry only link-local
+/// addresses); with nothing to redirect, that is the same as hearing the record first.
 // ponytail: an address the owner lost stays a dial candidate until its next re-sign (IP_SETTLE
 // after the change, else REFRESH); the other candidates are still dialled.
 fn remember(map: &mut HashMap<PeerId, Seen>, new: Seen, now_unix: u64) {
     map.retain(|_, s| s.fresh(now_unix));
-    if let Some(old) = map.get_mut(&new.peer.id).filter(|old| new.ts <= old.ts) {
+    let fills = |old: &Seen| new.ts == old.ts && old.peer.addrs.is_empty() && !new.peer.addrs.is_empty();
+    if let Some(old) = map.get_mut(&new.peer.id).filter(|old| new.ts <= old.ts && !fills(old)) {
         if new.peer.addrs.iter().all(|a| old.peer.addrs.contains(a)) {
             old.at = new.at;
             old.peer.seen_utc = new.peer.seen_utc;
@@ -409,26 +471,50 @@ pub struct Browser {
     store: Arc<PeerStore>,
 }
 
-/// Dial candidates, best first, at most [`MAX_DIAL_ADDRS`]. Loopback and link-local addresses only
-/// when nothing else is advertised (a LAN peer must never be told to dial 127.0.0.1, and a
-/// link-local IPv6 address needs a scope id we do not carry); then IPv4 (what the workload endpoint
-/// binds by default) before IPv6; lowest address first.
+/// Dial candidates, best first, at most [`MAX_DIAL_ADDRS`]: IPv4 addresses only (the workload
+/// endpoint binds IPv4); `Err` says why when that leaves none. Loopback and link-local addresses
+/// only when nothing else is left (a LAN peer must never be told to dial 127.0.0.1); lowest
+/// address first. No addresses at all: `Ok` and empty.
 // ponytail: sequential dials, cap 2; happy-eyeballs if dial latency matters
-fn rank_addrs(ips: impl Iterator<Item = IpAddr>, port: u16) -> Vec<SocketAddr> {
-    let local_only = |ip: &IpAddr| match ip {
-        IpAddr::V4(v) => v.is_loopback() || v.is_link_local(),
-        IpAddr::V6(v) => v.is_loopback() || v.is_unicast_link_local(),
-    };
-    let mut ips: Vec<IpAddr> = ips.collect();
-    if ips.iter().any(|ip| !local_only(ip)) {
-        ips.retain(|ip| !local_only(ip));
+fn rank_addrs(ips: impl Iterator<Item = IpAddr>, port: u16) -> std::result::Result<Vec<SocketAddr>, NoAddress> {
+    let heard: Vec<IpAddr> = ips.collect();
+    let mut v4: Vec<Ipv4Addr> = heard
+        .iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(v) => Some(*v),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if v4.is_empty() && !heard.is_empty() {
+        let link_local = |ip: &IpAddr| matches!(ip, IpAddr::V6(v) if v.is_unicast_link_local());
+        return Err(if heard.iter().all(link_local) {
+            NoAddress::LinkLocalOnly
+        } else {
+            NoAddress::OtherFamily
+        });
     }
-    ips.sort_by_key(|ip| (ip.is_ipv6(), *ip));
-    ips.dedup();
-    ips.into_iter()
+    let local_only = |v: &Ipv4Addr| v.is_loopback() || v.is_link_local();
+    if v4.iter().any(|v| !local_only(v)) {
+        v4.retain(|v| !local_only(v));
+    }
+    v4.sort();
+    v4.dedup();
+    Ok(v4
+        .into_iter()
         .take(MAX_DIAL_ADDRS)
-        .map(|ip| SocketAddr::new(ip, port))
-        .collect()
+        .map(|v| SocketAddr::new(v.into(), port))
+        .collect())
+}
+
+/// Whether the browser should re-query now: some listed entry has missed a re-sign announcement
+/// ([`OVERDUE`]) and the last re-query was at least [`REQUERY_GAP`] ago. A peer that vanished is
+/// re-queried for only while it is still listed.
+fn requery_due(map: &HashMap<PeerId, Seen>, now_unix: u64, now: Instant, last: Option<Instant>) -> bool {
+    let listed = Duration::from_secs(LISTED_SECS);
+    last.is_none_or(|l| now.saturating_duration_since(l) >= REQUERY_GAP)
+        && map
+            .values()
+            .any(|s| s.listed(now_unix, now, listed) && now.saturating_duration_since(s.at) > OVERDUE)
 }
 
 /// A `ServiceRemoved` for `fullname` (goodbye or expiry): hides the entry last seen under that
@@ -464,46 +550,98 @@ impl Browser {
             });
         }
         let daemon = ServiceDaemon::new().map_err(mdns_err)?;
+        // Answers sent over IPv6 carry only IPv6 addresses, which this endpoint cannot dial.
+        daemon.disable_interface(IfKind::IPv6).map_err(mdns_err)?;
         let rx = daemon.browse(SERVICE_TYPE).map_err(mdns_err)?;
-        let map = seen.clone();
+        let (map, d) = (seen.clone(), daemon.clone());
         std::thread::spawn(move || {
-            for ev in rx.iter() {
-                match ev {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let txt = info.txt_properties.clone().into_property_map_str();
-                        let addrs = rank_addrs(info.addresses.iter().map(|a| a.to_ip_addr()), info.port);
-                        match (Advert::verify(&txt, info.port, now_unix()), addrs.first().copied()) {
-                            (Ok(advert), _) if Some(advert.id) == own => {}
-                            (Ok(advert), Some(addr)) => {
-                                let peer = DiscoveredPeer {
-                                    id: advert.id,
-                                    addr,
-                                    addrs,
-                                    pairing: advert.pairing,
-                                    pair_port: advert.pair_port,
-                                    proto: advert.proto,
-                                    trusted: false,
-                                    seen_utc: utc_now(),
-                                };
-                                let seen = Seen {
-                                    peer,
-                                    ts: advert.ts,
-                                    at: Instant::now(),
-                                    fullname: info.fullname.clone(),
-                                    gone: false,
-                                };
-                                remember(&mut lock(&map), seen, now_unix());
-                            }
-                            (Err(e), _) => {
-                                tracing::debug!(name = %info.fullname, error = %e, "discovery record dropped")
-                            }
-                            (_, None) => tracing::debug!(name = %info.fullname, "discovery record without address"),
+            let handle = |ev: ServiceEvent| match ev {
+                ServiceEvent::ServiceResolved(info) => {
+                    let txt = info.txt_properties.clone().into_property_map_str();
+                    let ips = info.addresses.iter().map(|a| a.to_ip_addr());
+                    match (Advert::verify(&txt, info.port, now_unix()), rank_addrs(ips, info.port)) {
+                        (Ok(advert), _) if Some(advert.id) == own => {}
+                        (Ok(_), Ok(addrs)) if addrs.is_empty() => {
+                            tracing::debug!(name = %info.fullname, "discovery record without address")
+                        }
+                        (Ok(advert), ranked) => {
+                            let unreachable = ranked.as_ref().err().copied();
+                            let addrs = ranked.unwrap_or_default();
+                            let peer = DiscoveredPeer {
+                                id: advert.id,
+                                // Never listed without addresses (`unreachable`).
+                                addr: addrs
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), info.port)),
+                                addrs,
+                                pairing: advert.pairing,
+                                pair_port: advert.pair_port,
+                                proto: advert.proto,
+                                trusted: false,
+                                seen_utc: utc_now(),
+                            };
+                            let seen = Seen {
+                                peer,
+                                ts: advert.ts,
+                                at: Instant::now(),
+                                fullname: info.fullname.clone(),
+                                gone: false,
+                                unreachable,
+                            };
+                            remember(&mut lock(&map), seen, now_unix());
+                        }
+                        (Err(e), _) => {
+                            tracing::debug!(name = %info.fullname, error = %e, "discovery record dropped")
                         }
                     }
-                    ServiceEvent::ServiceRemoved(_, fullname) => forget(&mut lock(&map), &fullname),
-                    _ => {}
                 }
-            }
+                ServiceEvent::ServiceRemoved(_, fullname) => forget(&mut lock(&map), &fullname),
+                _ => {}
+            };
+            // `None` once the daemon is gone: the loop ends.
+            let rx = RefCell::new(Some(rx));
+            let mut last_requery = None;
+            refresh_loop(
+                |due| {
+                    let r = match rx.borrow().as_ref() {
+                        Some(rx) => rx.recv_deadline(due),
+                        None => return Wake::Closed,
+                    };
+                    match r {
+                        Ok(ev) => {
+                            handle(ev);
+                            Wake::Other
+                        }
+                        Err(e) => wake(Err(e)),
+                    }
+                },
+                // Re-query: a new browse after `stop_browse` (which empties mdns-sd's cache for the
+                // type) sends a query without known answers, so every live peer answers in full.
+                || {
+                    let now = Instant::now();
+                    if !requery_due(&lock(&map), now_unix(), now, last_requery) {
+                        return;
+                    }
+                    last_requery = Some(now);
+                    if let Err(e) = d.stop_browse(SERVICE_TYPE) {
+                        tracing::warn!(error = %e, "mdns re-query skipped");
+                        return;
+                    }
+                    let old = rx.borrow_mut().take();
+                    for ev in old.iter().flat_map(|old| old.try_iter()) {
+                        handle(ev);
+                    }
+                    // ponytail: a failed browse (daemon gone, or its command queue full) ends
+                    // browsing until networking restarts; retry here if a full queue is ever seen.
+                    match d.browse(SERVICE_TYPE) {
+                        Ok(new) => *rx.borrow_mut() = Some(new),
+                        Err(e) => tracing::warn!(error = %e, "mdns browse ended"),
+                    }
+                },
+                CHECK,
+                CHECK,
+            )
         });
         Ok(Browser {
             daemon: Some(daemon),
@@ -516,21 +654,48 @@ impl Browser {
         self.daemon.is_some()
     }
 
-    /// Peers seen in the last `max_age_secs` with valid signatures. Unsigned/expired records are dropped.
-    pub fn peers(&self, max_age_secs: u64) -> Vec<DiscoveredPeer> {
+    /// The entries listed now (heard in the last `max_age_secs`, valid signatures), by id; stale
+    /// ones are evicted first.
+    fn listed(&self, max_age_secs: u64) -> Vec<(bool, Seen)> {
         let now = now_unix();
         let mut seen = lock(&self.seen);
         seen.retain(|_, s| s.fresh(now));
-        let mut out: Vec<DiscoveredPeer> = seen
+        let mut out: Vec<(bool, Seen)> = seen
             .values()
-            .filter(|s| !s.gone && s.at.elapsed().as_secs() <= max_age_secs)
-            .map(|s| DiscoveredPeer {
-                trusted: store_verdict(&self.store, &s.peer.id) == Verdict::Allowed,
-                ..s.peer.clone()
+            .filter(|s| s.listed(now, Instant::now(), Duration::from_secs(max_age_secs)))
+            .map(|s| {
+                let trusted = store_verdict(&self.store, &s.peer.id) == Verdict::Allowed;
+                (trusted, s.clone())
             })
             .collect();
-        out.sort_by_key(|p| p.id);
+        out.sort_by_key(|(_, s)| s.peer.id);
         out
+    }
+
+    /// Peers seen in the last `max_age_secs` with valid signatures and an address this device can
+    /// dial. Unsigned/expired records are dropped.
+    pub fn peers(&self, max_age_secs: u64) -> Vec<DiscoveredPeer> {
+        self.listed(max_age_secs)
+            .into_iter()
+            .filter(|(_, s)| s.unreachable.is_none())
+            .map(|(trusted, s)| DiscoveredPeer { trusted, ..s.peer })
+            .collect()
+    }
+
+    /// Peers seen in the last `max_age_secs` with valid signatures but no address this device can
+    /// dial, with the reason. Never in [`Browser::peers`], so never dialled from discovery.
+    pub fn unreachable(&self, max_age_secs: u64) -> Vec<UnreachablePeer> {
+        self.listed(max_age_secs)
+            .into_iter()
+            .filter_map(|(trusted, s)| {
+                Some(UnreachablePeer {
+                    id: s.peer.id,
+                    reason: s.unreachable?,
+                    trusted,
+                    seen_utc: s.peer.seen_utc,
+                })
+            })
+            .collect()
     }
 }
 
@@ -674,6 +839,7 @@ mod tests {
             at: Instant::now(),
             fullname: String::new(),
             gone: false,
+            unreachable: None,
         }
     }
 
@@ -714,18 +880,18 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// Best candidate.
     fn pick_addr(ips: impl Iterator<Item = IpAddr>, port: u16) -> Option<SocketAddr> {
-        rank_addrs(ips, port).first().copied()
+        rank_addrs(ips, port).ok()?.first().copied()
     }
 
     #[test]
-    fn pick_addr_prefers_ipv4() {
-        let ips = [ip("fe80::1"), ip("192.168.1.5"), ip("10.0.0.9")];
+    fn pick_addr_takes_the_lowest_ipv4_address() {
+        let ips = [ip("fe80::1"), ip("192.168.1.5"), ip("10.0.0.9"), ip("fd00::5")];
         assert_eq!(
             pick_addr(ips.iter().copied(), 7).unwrap(),
             "10.0.0.9:7".parse::<SocketAddr>().unwrap()
         );
-        assert!(pick_addr(ips[..1].iter().copied(), 7).unwrap().is_ipv6());
         assert!(pick_addr(std::iter::empty(), 7).is_none());
     }
 
@@ -735,12 +901,8 @@ mod tests {
         // 127.0.0.1 sorts below every LAN IPv4 address; it must still lose.
         assert_eq!(pick(&["127.0.0.1", "192.168.1.5"]), ip("192.168.1.5"));
         assert_eq!(pick(&["169.254.3.4", "127.0.0.1", "10.0.0.9"]), ip("10.0.0.9"));
-        // A routable IPv6 address beats IPv4 loopback and link-local.
-        assert_eq!(pick(&["127.0.0.1", "169.254.3.4", "fe80::1", "fd00::5"]), ip("fd00::5"));
-        assert_eq!(pick(&["::1", "fe80::1", "2001:db8::1"]), ip("2001:db8::1"));
-        // Only local addresses: still an answer (SINGLE-HOST tests advertise on loopback), IPv4 first.
-        assert_eq!(pick(&["fe80::1", "127.0.0.1"]), ip("127.0.0.1"));
-        assert_eq!(pick(&["::1"]), ip("::1"));
+        // Only local addresses: still an answer (SINGLE-HOST tests advertise on loopback).
+        assert_eq!(pick(&["fe80::1", "169.254.3.4", "127.0.0.1"]), ip("127.0.0.1"));
     }
 
     /// D2: the Windows laptop advertised its hotspot address plus link-local addresses of
@@ -748,7 +910,7 @@ mod tests {
     /// while a routable one exists.
     #[test]
     fn rank_addrs_keeps_two_routable_addresses() {
-        let rank = |v: &[&str]| rank_addrs(v.iter().map(|s| ip(s)), 8193);
+        let rank = |v: &[&str]| rank_addrs(v.iter().map(|s| ip(s)), 8193).unwrap();
         let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
         assert_eq!(
             rank(&["172.20.10.6", "10.0.0.9", "169.254.3.4", "127.0.0.1"]),
@@ -761,6 +923,152 @@ mod tests {
         );
         assert_eq!(rank(&["169.254.3.4", "127.0.0.1"])[0], sa("127.0.0.1:8193"));
         assert!(rank(&[]).is_empty());
+    }
+
+    /// 2026-10-23: a freshly started Linux daemon (0.0.0.0, IPv4 endpoint) first heard the Mac only
+    /// at IPv6 link-local addresses. Only IPv4 addresses are candidates; with none left the reason
+    /// is typed.
+    #[test]
+    fn rank_addrs_offers_only_ipv4_and_types_the_reason_when_none_is_left() {
+        let rank = |v: &[&str]| rank_addrs(v.iter().map(|s| ip(s)), 8193);
+        let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert_eq!(
+            rank(&["fe80::1", "fe80::18a3:7cff:fe21:9b0e"]),
+            Err(NoAddress::LinkLocalOnly)
+        );
+        assert_eq!(
+            rank(&["fd00::5", "2001:db8::1", "fe80::1", "192.168.1.5"]),
+            Ok(vec![sa("192.168.1.5:8193")])
+        );
+        assert_eq!(rank(&["2001:db8::1", "fe80::1"]), Err(NoAddress::OtherFamily));
+        assert_eq!(rank(&["::1"]), Err(NoAddress::OtherFamily));
+        // IPv4 link-local needs no scope id: still a last resort.
+        assert_eq!(rank(&["169.254.3.4", "fe80::1"]), Ok(vec![sa("169.254.3.4:8193")]));
+        assert_eq!(rank(&[]), Ok(vec![]));
+    }
+
+    fn unreachable_seen(id: PeerId, ts: u64, reason: NoAddress) -> Seen {
+        let mut s = seen(id, "0.0.0.0:8193", ts);
+        s.peer.addrs.clear();
+        s.unreachable = Some(reason);
+        s
+    }
+
+    /// A peer heard only at link-local addresses is "discovered, no reachable address": listed with
+    /// its reason, never as a dial candidate. The same record heard again with a routable address
+    /// (mdns-sd resolves it per address family) makes it dialable at once, not at the next re-sign;
+    /// after that the replay guard holds as before.
+    #[test]
+    fn a_link_local_only_peer_is_unreachable_until_its_record_brings_an_address() {
+        let (_dir, b) = inert_browser();
+        let now = now_unix();
+        let id = PeerId([6; 32]);
+        remember(
+            &mut lock(&b.seen),
+            unreachable_seen(id, now, NoAddress::LinkLocalOnly),
+            now,
+        );
+        assert!(b.peers(LISTED_SECS).is_empty(), "nothing to dial");
+        let u = b.unreachable(LISTED_SECS);
+        assert_eq!((u.len(), u[0].id, u[0].reason), (1, id, NoAddress::LinkLocalOnly));
+        assert_eq!(serde_json::to_value(&u[0]).unwrap()["reason"], "link_local_only");
+        let (lan, evil) = ("192.168.1.20:8193", "10.66.0.1:8193");
+        remember(&mut lock(&b.seen), seen(id, lan, now), now);
+        let listed: Vec<Vec<SocketAddr>> = b.peers(LISTED_SECS).into_iter().map(|p| p.addrs).collect();
+        assert_eq!(listed, vec![vec![lan.parse::<SocketAddr>().unwrap()]]);
+        assert!(b.unreachable(LISTED_SECS).is_empty());
+        remember(&mut lock(&b.seen), seen(id, evil, now), now);
+        remember(
+            &mut lock(&b.seen),
+            unreachable_seen(id, now, NoAddress::LinkLocalOnly),
+            now,
+        );
+        assert_eq!(b.peers(LISTED_SECS)[0].addrs, vec![lan.parse::<SocketAddr>().unwrap()]);
+        assert!(
+            b.unreachable(LISTED_SECS).is_empty(),
+            "an incomplete copy does not hide it"
+        );
+    }
+
+    /// Synthetic clock (seconds from `t0`/`base`) driving `remember` and `requery_due` as the
+    /// browser thread does: peers re-sign every REFRESH (with `lost` announcements dropped), the
+    /// browser checks every CHECK and, when due, re-queries; every peer still alive answers a
+    /// re-query unless its time is in `lost`. Returns the re-query times and, per second, whether
+    /// peer 0 is listed.
+    fn simulate(peers: u8, until: u64, lost: &[u64], silent_from: u64) -> (Vec<u64>, Vec<bool>) {
+        let (t0, base) = (1_760_000_000u64, Instant::now());
+        let refresh = REFRESH.as_secs();
+        let mut map = HashMap::new();
+        let hear = |map: &mut HashMap<PeerId, Seen>, i: u8, t: u64| {
+            // Peer i re-signs at i, i + REFRESH, ...: its current record.
+            let signed = t0 + i as u64 + (t - i as u64) / refresh * refresh;
+            let s = Seen {
+                at: base + Duration::from_secs(t),
+                ..seen(PeerId([i + 1; 32]), &format!("192.168.1.{}:8193", i + 10), signed)
+            };
+            remember(map, s, t0 + t);
+        };
+        let (mut requeries, mut listed, mut last) = (Vec::new(), Vec::new(), None);
+        for t in 0..=until {
+            let now = base + Duration::from_secs(t);
+            for i in 0..peers {
+                let announces = t >= i as u64 && (t - i as u64).is_multiple_of(refresh);
+                if announces && t < silent_from && !(i == 0 && lost.contains(&t)) {
+                    hear(&mut map, i, t);
+                }
+            }
+            if t.is_multiple_of(CHECK.as_secs()) && requery_due(&map, t0 + t, now, last) {
+                last = Some(now);
+                requeries.push(t);
+                // The fresh browse's queries go out over the next few seconds; answered at once here.
+                for i in (0..peers).filter(|_| t < silent_from) {
+                    if !(i == 0 && lost.contains(&t)) {
+                        hear(&mut map, i, t);
+                    }
+                }
+            }
+            let s = map.get(&PeerId([1; 32]));
+            listed.push(s.is_some_and(|s| s.listed(t0 + t, now, Duration::from_secs(LISTED_SECS))));
+        }
+        (requeries, listed)
+    }
+
+    /// RFC 6762 section 5.2: with every announcement heard, the browser never re-queries (only
+    /// mdns-sd's doubling backoff is sent), however many peers. Before, it restarted its browse
+    /// every 30 s (about 5 queries per 30 s per daemon, each answered in full by every peer).
+    #[test]
+    fn the_browser_does_not_re_query_while_every_peer_is_heard() {
+        let (requeries, listed) = simulate(20, 3600, &[], u64::MAX);
+        assert_eq!(requeries, Vec::<u64>::new());
+        assert!(listed.iter().all(|l| *l));
+    }
+
+    /// 2026-10-23 (finding 2): two missed re-sign announcements aged a live peer out. Now a missed
+    /// announcement makes the browser re-query, and the peer stays listed: two announcements lost in
+    /// a row, and once also the first re-query's answers. Each lost announcement costs at most two
+    /// re-queries.
+    #[test]
+    fn a_live_peer_whose_announcements_are_lost_stays_listed() {
+        let refresh = REFRESH.as_secs();
+        // Announcements at 240 and 360 lost; at 1200 lost and the answers to the re-query at 1210.
+        let lost = [2 * refresh, 3 * refresh, 10 * refresh, 1210];
+        let (requeries, listed) = simulate(3, 3600, &lost, u64::MAX);
+        assert!(listed.iter().all(|l| *l), "listed throughout");
+        // Heard at 120 (overdue after 245), by re-query at 250 (overdue after 375), at 1080
+        // (overdue after 1205; the re-query at 1210 unanswered, the next REQUERY_GAP later).
+        assert_eq!(requeries, vec![250, 380, 1210, 1240]);
+    }
+
+    /// A peer that vanished without a goodbye: at most two re-queries, then none; it leaves the
+    /// list LISTED_SECS after it was last heard.
+    #[test]
+    fn a_vanished_peer_costs_two_re_queries_and_leaves_the_list() {
+        let (requeries, listed) = simulate(3, 3600, &[], 1000);
+        assert_eq!(requeries.len(), 2, "{requeries:?}");
+        assert!(requeries.iter().all(|t| (1000..1000 + LISTED_SECS).contains(t)));
+        let last_heard = 960; // peer 0 re-signs at 0, 120, ..., 960
+        assert!(listed[..=(last_heard + LISTED_SECS) as usize].iter().all(|l| *l));
+        assert!(!listed[(last_heard + LISTED_SECS + 1) as usize..].iter().any(|l| *l));
     }
 
     /// Duplicate adverts: a replayed record (same id, not newer) cannot add a dial candidate, not

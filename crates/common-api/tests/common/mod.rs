@@ -187,6 +187,8 @@ pub struct FakeModel {
     pub tokens: u32,
     pub delay: Duration,
     last_cancel: Mutex<Option<CancellationToken>>,
+    /// What `exited` reports: set by [`FakeModel::exit`] to stand in for a killed engine.
+    exit: Mutex<Option<String>>,
 }
 
 impl FakeModel {
@@ -202,7 +204,20 @@ impl FakeModel {
             tokens,
             delay,
             last_cancel: Mutex::new(None),
+            exit: Mutex::new(None),
         })
+    }
+
+    /// [`FakeModel::new`] whose engine is process `pid` (for its resident size).
+    pub fn with_pid(pid: u32) -> Arc<FakeModel> {
+        let mut m = Arc::into_inner(FakeModel::new(1, Duration::ZERO)).unwrap();
+        m.info.pid = Some(pid);
+        Arc::new(m)
+    }
+
+    /// Report the engine as exited on its own with `reason` (as the OS would word it).
+    pub fn exit(&self, reason: &str) {
+        *self.exit.lock().unwrap() = Some(reason.into());
     }
 
     pub fn last_cancel(&self) -> Option<CancellationToken> {
@@ -275,6 +290,10 @@ impl LoadedModel for FakeModel {
 
     async fn unload(&self) -> Result<()> {
         Ok(())
+    }
+
+    fn exited(&self) -> Option<String> {
+        self.exit.lock().unwrap().clone()
     }
 }
 

@@ -56,6 +56,15 @@ impl Catalog {
     pub fn get(&self, id: &str) -> Option<&ModelEntry> {
         self.models.iter().find(|m| m.id == id)
     }
+    /// The models tests load: those tagged `fixture` (two tiny ones, always provisioned) and, with
+    /// `suite`, those tagged `test-suite` (about 3 GB), which the suite also needs under
+    /// `COMMON_REQUIRE_FIXTURES=1`. `scripts/fetch-fixtures.sh` selects the same tags.
+    pub fn fixtures(&self, suite: bool) -> Vec<&ModelEntry> {
+        self.models
+            .iter()
+            .filter(|m| m.tags.iter().any(|t| t == "fixture" || (suite && t == "test-suite")))
+            .collect()
+    }
     pub fn search(&self, query: &str) -> Vec<&ModelEntry> {
         let q = query.to_lowercase();
         self.models
@@ -116,6 +125,48 @@ mod tests {
         assert!(c.search("fixture").iter().any(|m| m.id == "stories260K"));
     }
 
+    /// Every catalog model a test file names is provisioned with the suite's fixtures, so
+    /// `fetch-fixtures.sh` / `common setup --fixtures` under `COMMON_REQUIRE_FIXTURES=1` give the
+    /// strict suite all it loads.
+    #[test]
+    fn suite_fixtures_cover_every_model_the_tests_name() {
+        let c = Catalog::builtin().unwrap();
+        let ids = |suite| c.fixtures(suite).into_iter().map(|m| m.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(false), ["stories15M-q4_0", "stories260K"]);
+        let suite = ids(true);
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut named = std::collections::BTreeSet::new();
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&crates)
+            .unwrap()
+            .map(|e| e.unwrap().path().join("tests"))
+            .filter(|d| d.is_dir())
+            .collect();
+        while let Some(dir) = dirs.pop() {
+            for f in std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+                if f.is_dir() {
+                    dirs.push(f);
+                } else if f.extension().is_some_and(|x| x == "rs") {
+                    let src = std::fs::read_to_string(&f).unwrap();
+                    named.extend(
+                        c.models
+                            .iter()
+                            .filter(|m| src.contains(&format!("\"{}\"", m.id)))
+                            .map(|m| m.id.as_str()),
+                    );
+                }
+            }
+        }
+        assert!(
+            named.contains("smollm2-360m-instruct-q8_0"),
+            "the walk found the test files: {named:?}"
+        );
+        let missing: Vec<_> = named.iter().filter(|id| !suite.contains(id)).collect();
+        assert!(
+            missing.is_empty(),
+            "tests load {missing:?}; tag them test-suite in catalog/models.json"
+        );
+    }
+
     #[test]
     fn entry_defaults() {
         let v = serde_json::json!({
@@ -135,7 +186,12 @@ mod tests {
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.common"));
         let store = Store::new(Paths::at(root));
         if !store.paths.model_manifests().is_dir() {
-            eprintln!("skipped: no COMMON_HOME manifests directory");
+            assert!(
+                std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+                "COMMON_REQUIRE_FIXTURES=1: no manifests directory in {}",
+                store.paths.root.display()
+            );
+            eprintln!("SKIP: no COMMON_HOME manifests directory");
             return;
         }
         let catalog = Catalog::builtin().unwrap();

@@ -1,5 +1,6 @@
 //! Runs the built `common` binary against the real assets in COMMON_HOME (default: the repo's
-//! `.common`). Tests that need the pinned engine or the fixture model skip loudly when absent.
+//! `.common`). Tests that need the pinned engine or the fixture model skip loudly when absent, and
+//! fail instead under `COMMON_REQUIRE_FIXTURES=1` (the evidence job): a green run always ran.
 
 use serde_json::Value;
 use std::io::Read;
@@ -22,12 +23,21 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.common"))
 }
 
+/// Print why a test did not run, or fail under `COMMON_REQUIRE_FIXTURES=1`.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+        "COMMON_REQUIRE_FIXTURES=1: {why}"
+    );
+    eprintln!("SKIP: {why}");
+}
+
 fn assets_present() -> bool {
     let engine = home().join("backends/llama.cpp/b11609/llama-server");
     let blob = home().join(format!("models/blobs/sha256-{BLOB}"));
     for p in [&engine, &blob] {
         if !p.is_file() {
-            eprintln!("SKIP: missing asset {}", p.display());
+            skip(&format!("missing asset {}", p.display()));
             return false;
         }
     }
@@ -157,7 +167,12 @@ fn run_gpu_json_shows_offloaded_layers() {
         .iter()
         .any(|b| b["available"] == true && b["name"] != "cpu")
     {
-        eprintln!("SKIP: no GPU backend on this host");
+        // Only the macOS and Windows pins ship a GPU backend; the Linux pin is CPU only (D-024).
+        if cfg!(any(target_os = "macos", windows)) {
+            skip("no GPU backend on this host");
+        } else {
+            eprintln!("N/A: the pinned llama.cpp build for this OS is CPU only");
+        }
         return;
     }
     let o = common(&[
@@ -305,6 +320,47 @@ fn orphaned_engines() -> Vec<String> {
         .collect()
 }
 
+/// A spawned `common` that is killed, with the engines it started, if it is still running when
+/// this drops: a test that fails mid-run (a timeout's panic) leaves no engine behind. The CLI is
+/// stopped first so it cannot start another engine in between. Derefs to the [`std::process::Child`].
+#[cfg(unix)]
+struct Reaped(std::process::Child);
+
+#[cfg(unix)]
+impl std::ops::Deref for Reaped {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        // Exited and reaped (try_wait keeps the status): its pid may belong to someone else now.
+        if !matches!(self.0.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = self.0.id() as libc::pid_t;
+        // SAFETY: plain syscalls on the child this test spawned (not yet reaped) and its children.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        if let Ok(o) = Command::new("pgrep").args(["-P", &pid.to_string()]).output() {
+            for engine in text(&o.stdout).split_whitespace().filter_map(|p| p.parse().ok()) {
+                unsafe { libc::kill(engine, libc::SIGKILL) };
+            }
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks existence.
@@ -335,14 +391,13 @@ fn sigint_with_a_stuck_engine_kills_it_after_the_grace_and_exits_130() {
     signal_mid_generation("-INT", true);
 }
 
-/// SIGTERM to `common serve` with a model loaded stops that engine process before exiting.
+/// `common serve` on a free port with {MODEL} loaded, and its engine's pid; `None` after a skip.
 #[cfg(unix)]
-#[test]
-fn sigterm_to_serve_stops_the_loaded_engine() {
+fn serve_with_engine() -> Option<(Reaped, u32)> {
     use std::io::Write;
     use std::net::TcpStream;
     if !assets_present() {
-        return;
+        return None;
     }
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -356,6 +411,7 @@ fn sigterm_to_serve_stops_the_loaded_engine() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+        .map(Reaped)
         .expect("spawn common serve");
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut conn = loop {
@@ -371,16 +427,44 @@ fn sigterm_to_serve_stops_the_loaded_engine() {
     let mut resp = String::new();
     conn.read_to_string(&mut resp).unwrap();
     if resp.contains("insufficient_memory") {
-        eprintln!("SKIP: not enough free memory to load {MODEL} right now");
         let _ = child.kill();
-        return;
+        skip(&format!("not enough free memory to load {MODEL} right now"));
+        return None;
     }
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     let body: Value = serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap_or(""))
         .unwrap_or_else(|e| panic!("load body is not JSON ({e}): {resp}"));
     let engine_pid = body["pid"].as_u64().expect("engine pid in LoadedModelInfo") as u32;
     assert!(pid_alive(engine_pid), "engine {engine_pid} running after load");
+    Some((child, engine_pid))
+}
 
+/// The guard the engine-starting tests rely on: dropping a [`Reaped`] CLI that is still running
+/// (as a failed assertion's unwinding does) kills it and the engine it started.
+#[cfg(unix)]
+#[test]
+fn reaped_kills_a_running_cli_and_its_engine() {
+    let Some((child, engine_pid)) = serve_with_engine() else {
+        return;
+    };
+    let cli = child.id();
+    drop(child);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_alive(engine_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!pid_alive(cli), "the CLI {cli} is gone");
+    assert!(!pid_alive(engine_pid), "engine {engine_pid} left running");
+    assert!(orphaned_engines().is_empty(), "{:?}", orphaned_engines());
+}
+
+/// SIGTERM to `common serve` with a model loaded stops that engine process before exiting.
+#[cfg(unix)]
+#[test]
+fn sigterm_to_serve_stops_the_loaded_engine() {
+    let Some((mut child, engine_pid)) = serve_with_engine() else {
+        return;
+    };
     assert!(Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
@@ -417,8 +501,7 @@ fn signal_mid_generation(signal: &str, stall_engine: bool) {
         return;
     }
     if !home().join(format!("models/manifests/{SLOW}.json")).is_file() {
-        eprintln!("SKIP: {SLOW} is not downloaded");
-        return;
+        return skip(&format!("{SLOW} is not downloaded"));
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_common"))
         .args([
@@ -438,6 +521,7 @@ fn signal_mid_generation(signal: &str, stall_engine: bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+        .map(Reaped)
         .expect("spawn common");
     let mut stdout = child.stdout.take().unwrap();
     let streaming = Arc::new(AtomicBool::new(false));
@@ -461,8 +545,11 @@ fn signal_mid_generation(signal: &str, stall_engine: bool) {
             child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
             // Sibling tests load engines in parallel on an 8 GB box; a starved load is not a CLI bug.
             if err.contains("error[insufficient_memory]") {
-                eprintln!("SKIP: not enough free memory to load {SLOW} right now: {}", err.trim());
-                return;
+                let _ = child.kill();
+                return skip(&format!(
+                    "not enough free memory to load {SLOW} right now: {}",
+                    err.trim()
+                ));
             }
             panic!("common exited with {status} before streaming any token: {err}");
         }
@@ -537,4 +624,35 @@ fn closed_stdout_does_not_panic() {
         status.success() || status.code().is_none(),
         "killed by SIGPIPE or finished first, never a panic exit: {status}"
     );
+}
+
+/// The guard itself: with `COMMON_REQUIRE_FIXTURES=1` and no assets, a fixture test FAILS rather
+/// than printing SKIP and passing; without it, the same test skips loudly. Re-runs this test binary
+/// on `models_list_json_has_fixture_with_unknown_license` with COMMON_HOME pointing at an empty location.
+#[test]
+fn require_fixtures_turns_a_missing_asset_into_a_failure() {
+    let empty = std::env::temp_dir().join(format!("common-no-fixtures-{}", std::process::id()));
+    let run = |require: &str| {
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "models_list_json_has_fixture_with_unknown_license",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("COMMON_HOME", &empty)
+            .env("COMMON_REQUIRE_FIXTURES", require)
+            .output()
+            .unwrap();
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        (o.status.success(), out)
+    };
+    let (ok, out) = run("1");
+    assert!(!ok && out.contains("COMMON_REQUIRE_FIXTURES=1: missing asset"), "{out}");
+    let (ok, out) = run("0");
+    assert!(ok && out.contains("SKIP: missing asset"), "{out}");
 }

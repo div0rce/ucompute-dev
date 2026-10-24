@@ -13,5 +13,5 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-# Already in the build (tokio, quinn); one call for free disk space.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Already in the build (tokio, quinn); free disk space and available memory.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }

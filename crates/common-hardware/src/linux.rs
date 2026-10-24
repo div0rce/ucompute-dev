@@ -122,6 +122,11 @@ fn parse_lspci(out: &str) -> Vec<GpuInfo> {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn available_memory() -> Option<u64> {
+    parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?).map(|(_, a)| a)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
     use crate::{cmd, HardwareReport, MemoryInfo};
     use common_core::{CommonError, HostSummary};

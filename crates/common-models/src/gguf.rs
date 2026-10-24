@@ -676,11 +676,16 @@ pub(crate) mod tests {
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.common"));
         let p = root.join("models/blobs").join(format!("sha256-{sha}"));
         if p.exists() {
-            Some(p)
-        } else {
-            eprintln!("SKIP: fixture {} not present", p.display());
-            None
+            return Some(p);
         }
+        // The evidence job: a missing fixture fails, so a green run always parsed the real files.
+        assert!(
+            std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "COMMON_REQUIRE_FIXTURES=1: fixture {} not present",
+            p.display()
+        );
+        eprintln!("SKIP: fixture {} not present", p.display());
+        None
     }
     pub(crate) const STORIES15M: &str = "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739";
     const STORIES260K: &str = "270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d";

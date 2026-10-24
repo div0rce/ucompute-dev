@@ -582,9 +582,7 @@ impl Node {
             return Err(CommonError::new(ErrorCode::PolicyDenied, "network disabled")
                 .with_hint("set [network] enabled = true to listen for paired devices"));
         }
-        let addr: SocketAddr = format!("{}:{}", config.bind_addr, config.listen_port)
-            .parse()
-            .map_err(|e| CommonError::invalid(format!("network bind address: {e}")))?;
+        let addr = SocketAddr::new(config.bind_ip()?.into(), config.listen_port);
         let transport = transport_config(&config);
         let mut sc = tls::server_config(&identity, PeerPolicy::Pinned(peers.clone()), ALPN_WORKLOAD)?;
         sc.transport_config(transport.clone());

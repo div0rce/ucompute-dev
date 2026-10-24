@@ -694,6 +694,7 @@ name = "common-artifacts"
 version = "0.1.0"
 dependencies = [
  "common-core",
+ "common-hardware",
  "flate2",
  "hex",
  "reqwest 0.12.28",

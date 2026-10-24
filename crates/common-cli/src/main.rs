@@ -56,7 +56,8 @@ pub enum Cmd {
     Serve(ServeArgs),
     /// Download and verify the pinned inference engine (and the test fixtures with --fixtures)
     Setup {
-        /// Also pull the stories15M-q4_0 and stories260K fixture models
+        /// Also pull the stories15M-q4_0 and stories260K fixture models; with COMMON_REQUIRE_FIXTURES=1, also
+        /// the catalog models tagged test-suite that the strict test suite loads (about 3 GB)
         #[arg(long)]
         fixtures: bool,
     },
@@ -245,14 +246,22 @@ pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
 }
 
 /// Pids in `ps -axo pid=,ppid=,args=` output whose parent is 1 and whose argv[0] is `binary`.
+/// `args` is matched as text from its start, not split on whitespace: the default macOS home
+/// (`~/Library/Application Support/Common`) puts a space inside the engine path.
+/// ponytail: `ps` cannot tell a space inside argv[0] from one between arguments; a process named
+/// by a prefix of our path with the rest as its arguments would count as ours.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn orphans(ps: &str, binary: &Path) -> Vec<u32> {
+    let Some(bin) = binary.to_str() else {
+        return Vec::new();
+    };
     ps.lines()
         .filter_map(|l| {
-            let mut f = l.split_whitespace();
-            let pid: u32 = f.next()?.parse().ok()?;
-            let ppid: u32 = f.next()?.parse().ok()?;
-            (ppid == 1 && Path::new(f.next()?) == binary).then_some(pid)
+            let (pid, rest) = l.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, args) = rest.trim_start().split_once(char::is_whitespace)?;
+            let after = args.trim_start().strip_prefix(bin)?;
+            let ours = after.is_empty() || after.starts_with(char::is_whitespace);
+            (ppid.parse::<u32>().ok()? == 1 && ours).then_some(pid.parse().ok()?)
         })
         .collect()
 }
@@ -551,14 +560,10 @@ async fn setup(fixtures: bool) -> Result<()> {
     if fixtures {
         let store = Store::new(paths);
         let catalog = common_artifacts::Catalog::builtin()?;
-        for id in ["stories15M-q4_0", "stories260K"] {
-            let entry = catalog.get(id).ok_or_else(|| {
-                CommonError::new(
-                    ErrorCode::ModelNotFound,
-                    format!("{id} is missing from the built-in catalog"),
-                )
-            })?;
-            let m = common_artifacts::pull(&store, entry, &mut progress(id)).await?;
+        // The strict suite (COMMON_REQUIRE_FIXTURES=1) also loads the larger test-suite models.
+        let suite = std::env::var_os("COMMON_REQUIRE_FIXTURES").is_some_and(|v| v == "1");
+        for entry in catalog.fixtures(suite) {
+            let m = common_artifacts::pull(&store, entry, &mut progress(&entry.id)).await?;
             println!(
                 "model    {} verified ({}, license {})",
                 m.id,
@@ -732,12 +737,27 @@ garbage line
         assert!(orphans("", bin).is_empty());
     }
 
+    /// The packaged app's engine lives under `~/Library/Application Support/Common`: a space in argv[0].
+    #[test]
+    fn orphans_match_an_engine_path_with_a_space() {
+        let bin = Path::new("/Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server");
+        let ps = "\
+68722     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server -m /m.gguf --port 1
+   20     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server
+   21   400 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server --port 2
+   22     1 /Users/x/Library/Application Support/Common/backends/llama.cpp/b11609/llama-server-old --port 3
+   23     1 /Users/x/Library/Application
+";
+        assert_eq!(orphans(ps, bin), vec![68722, 20]);
+    }
+
     /// A detached process running under our engine path (a symlink to `sleep`, so it is real and
     /// signed) is reparented to pid 1 and must be stopped by the reaper.
     #[cfg(unix)]
     #[test]
     fn reaper_stops_detached_engine() {
-        let dir = std::env::temp_dir().join(format!("common-cli-reap-{}", std::process::id()));
+        // A space in the path, as under ~/Library/Application Support.
+        let dir = std::env::temp_dir().join(format!("common-cli reap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("llama-server");
         std::os::unix::fs::symlink("/bin/sleep", &bin).unwrap();
@@ -969,6 +989,22 @@ garbage line
             "--peer and --device are exclusive"
         );
         assert!(Cli::try_parse_from(["common", "run", "m", "-p", "x", "--peer", "ab12", "--threads", "2"]).is_err());
+    }
+
+    /// F-01-04: `--threads` help states the default the model manager applies.
+    #[test]
+    fn threads_help_matches_the_default() {
+        let cmd = Cli::command();
+        let run = cmd.find_subcommand("run").unwrap();
+        let arg = run.get_arguments().find(|a| a.get_id() == "threads").unwrap();
+        let help = arg.get_help().unwrap().to_string();
+        let max = common_runtime::manager::MAX_DEFAULT_THREADS;
+        assert!(
+            help.contains(&format!(
+                "default: the performance core count on Apple Silicon, else the physical core count, at most {max}"
+            )),
+            "{help}"
+        );
     }
 
     /// The persisted switch only ever moves towards "on" from the flags; no flag means no write.

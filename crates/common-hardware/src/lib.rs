@@ -20,6 +20,10 @@ mod windows;
 pub struct CpuInfo {
     pub model: String,
     pub physical_cores: u32,
+    /// Performance cores where the CPU mixes core types and the OS reports them (Apple Silicon's
+    /// `hw.perflevel0.physicalcpu`: 4 of the M2's 8); `None` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_cores: Option<u32>,
     pub logical_cores: u32,
     pub arch: String,
     /// ISA features relevant to inference (e.g. `neon`, `avx2`, `avx512`, `amx`).
@@ -247,10 +251,24 @@ fn parse_nvidia_smi(out: &str) -> Vec<GpuInfo> {
         .collect()
 }
 
-/// Free bytes on the volume holding `root` (or its nearest existing ancestor), via `df -Pk`.
+/// Memory usable right now without swapping, sampled fresh (unlike `probe()`'s report, which is
+/// a snapshot): `vm_stat` on macOS, `/proc/meminfo` MemAvailable on Linux, `GlobalMemoryStatusEx`
+/// on Windows (its available figure includes the standby list). A few milliseconds; None when the
+/// source cannot be read. The model manager calls it before every load (F-01-03).
+pub fn available_memory() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    return macos::available_memory();
+    #[cfg(target_os = "linux")]
+    return linux::available_memory();
+    #[cfg(target_os = "windows")]
+    return windows::available_memory();
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Free space for the user on the volume holding `root` (or its nearest existing ancestor).
 #[cfg(windows)]
-fn disk_free(root: &Path) -> Option<u64> {
+pub fn disk_free(root: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let p = root.ancestors().find(|p| p.exists())?;
@@ -262,8 +280,9 @@ fn disk_free(root: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
+/// Free space on the volume holding `root` (or its nearest existing ancestor), via `df -Pk`.
 #[cfg(not(windows))]
-fn disk_free(root: &Path) -> Option<u64> {
+pub fn disk_free(root: &Path) -> Option<u64> {
     // ponytail: shelling out to df avoids a libc dep and unsafe statvfs; swap in when df parsing bites.
     root.ancestors()
         .filter(|p| p.exists())
@@ -299,6 +318,7 @@ mod tests {
             cpu: CpuInfo {
                 model: "Apple M2".into(),
                 physical_cores: 8,
+                performance_cores: Some(4),
                 logical_cores: 8,
                 arch: "aarch64".into(),
                 features: vec!["neon".into()],
@@ -377,6 +397,15 @@ mod tests {
         assert_eq!(parse_df(""), None);
     }
 
+    /// F-01-03: the load-time sample is readable on every supported OS and below total memory.
+    #[test]
+    fn available_memory_is_readable_and_plausible() {
+        if cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows")) {
+            let a = available_memory().expect("available memory readable on this OS");
+            assert!(a > 0 && a < probe().unwrap().memory.total_bytes, "{a}");
+        }
+    }
+
     #[test]
     fn disk_free_walks_up_to_existing_ancestor() {
         let cwd = std::env::current_dir().unwrap();
@@ -396,6 +425,10 @@ mod tests {
         let sysctl = |k: &str| cmd("/usr/sbin/sysctl", &["-n", k]).unwrap();
         assert_eq!(r.cpu.physical_cores.to_string(), sysctl("hw.physicalcpu"));
         assert_eq!(r.cpu.logical_cores.to_string(), sysctl("hw.logicalcpu"));
+        assert_eq!(
+            r.cpu.performance_cores.map(|n| n.to_string()),
+            cmd("/usr/sbin/sysctl", &["-n", "hw.perflevel0.physicalcpu"])
+        );
         assert_eq!(r.memory.total_bytes.to_string(), sysctl("hw.memsize"));
         assert_eq!(r.host.memory_bytes, r.memory.total_bytes);
         assert_eq!(r.host.chip, sysctl("machdep.cpu.brand_string"));

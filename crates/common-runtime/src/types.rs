@@ -198,6 +198,12 @@ pub trait LoadedModel: Send + Sync {
     fn in_flight(&self) -> usize {
         0
     }
+    /// `Some(how it ended)` once the engine has exited on its own (killed, crashed, out of memory),
+    /// never after `unload`. Non-blocking. The `ModelManager` frees the slot of an exited engine
+    /// and reloads on the next request. Backends without a process leave the default.
+    fn exited(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Collect a whole generation into text (+ ids) — convenience for tests and the CLI.

@@ -209,8 +209,8 @@
       "get": {
         "tags": ["mesh"],
         "summary": "Paired, discovered and revoked devices",
-        "description": "`peers` are pinned devices with `connected`, `health`, `last_error` and their groups. `discovered` are devices mDNS currently sees, never this device; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `revocations` are the signed revocations this store holds.",
-        "responses": { "200": { "description": "Peers", "content": { "application/json": { "schema": { "type": "object", "properties": { "peers": { "type": "array", "items": { "$ref": "#/components/schemas/PeerRecord" } }, "discovered": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveredPeer" } }, "revocations": { "type": "array", "items": { "$ref": "#/components/schemas/Revocation" } } } } } } } }
+        "description": "`peers` are pinned devices with `connected`, `health`, `last_error` and their groups. `discovered` are devices mDNS currently sees, never this device; `trusted` is true only when pinned here and never a trust decision by itself (the transport's verifier decides). `unreachable` are devices mDNS sees with a valid signed record but at no address this device can dial (only IPv6 addresses: the peer endpoint is IPv4 only); they are never dialled from discovery. `revocations` are the signed revocations this store holds.",
+        "responses": { "200": { "description": "Peers", "content": { "application/json": { "schema": { "type": "object", "properties": { "peers": { "type": "array", "items": { "$ref": "#/components/schemas/PeerRecord" } }, "discovered": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveredPeer" } }, "unreachable": { "type": "array", "items": { "$ref": "#/components/schemas/UnreachablePeer" } }, "revocations": { "type": "array", "items": { "$ref": "#/components/schemas/Revocation" } } } } } } } }
       }
     },
     "/api/peers/{id}": {
@@ -466,8 +466,13 @@
       },
       "EngineState": {
         "type": "object",
-        "properties": { "state": { "type": "string", "enum": ["idle", "loading", "ready"] }, "loading_model_id": { "type": ["string", "null"] }, "loading_for_ms": { "type": ["integer", "null"] } },
-        "required": ["state", "loading_model_id", "loading_for_ms"]
+        "properties": { "state": { "type": "string", "enum": ["idle", "loading", "ready"] }, "loading_model_id": { "type": ["string", "null"] }, "loading_for_ms": { "type": ["integer", "null"] }, "last_exit": { "oneOf": [{ "$ref": "#/components/schemas/EngineExit" }, { "type": "null" }], "description": "The last engine that exited on its own (killed, crashed) since the daemon started; its slot was freed and the next request starts it again. Null when none has." } },
+        "required": ["state", "loading_model_id", "loading_for_ms", "last_exit"]
+      },
+      "EngineExit": {
+        "type": "object",
+        "properties": { "model_id": { "type": "string" }, "pid": { "type": ["integer", "null"] }, "reason": { "type": "string", "description": "As the OS reported it, e.g. `signal: 9 (SIGKILL)` or `exit status: 1`." }, "in_flight": { "type": "integer", "description": "Streams and calls the exit cut off (each ended with `backend_failed`)." }, "at_utc": { "type": "string" } },
+        "required": ["model_id", "pid", "reason", "in_flight", "at_utc"]
       },
       "LoadedModel": {
         "allOf": [
@@ -497,9 +502,14 @@
         },
         "required": ["id", "client_ref", "kind", "model_id", "target", "origin", "state", "created_at_utc"]
       },
+      "UnreachablePeer": {
+        "type": "object",
+        "properties": { "id": { "type": "string" }, "reason": { "type": "string", "enum": ["link_local_only", "other_family"], "description": "`link_local_only`: heard only at IPv6 link-local addresses; `other_family`: heard only at IPv6 addresses, some routable." }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } },
+        "required": ["id", "reason", "trusted", "seen_utc"]
+      },
       "DiscoveredPeer": {
         "type": "object",
-        "properties": { "id": { "type": "string" }, "addr": { "type": "string", "description": "The best address, `addrs[0]`." }, "addrs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 2, "description": "ip:port addresses from the signed record, best first (routable before loopback and link-local, IPv4 first)." }, "pairing": { "type": "boolean" }, "pair_port": { "type": ["integer", "null"] }, "proto": { "type": "string" }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } }
+        "properties": { "id": { "type": "string" }, "addr": { "type": "string", "description": "The best address, `addrs[0]`." }, "addrs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 2, "description": "IPv4 ip:port addresses from the signed record, best first (routable before loopback and link-local, lowest first)." }, "pairing": { "type": "boolean" }, "pair_port": { "type": ["integer", "null"] }, "proto": { "type": "string" }, "trusted": { "type": "boolean" }, "seen_utc": { "type": "string" } }
       },
       "DialError": {
         "type": "object",

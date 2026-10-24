@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 common-core = { workspace = true }
+# Free disk space for the download preflight.
+common-hardware = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

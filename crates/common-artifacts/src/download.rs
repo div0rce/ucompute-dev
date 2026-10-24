@@ -3,6 +3,8 @@
 //! One downloader serves model blobs and backend archives: stream to `<partial>`, resume with
 //! HTTP `Range`, enforce the pinned byte count, hash, then rename into place. A hash mismatch or
 //! an oversize body deletes the partial; a dropped connection keeps it for the next attempt.
+//! A download that cannot fit is refused before any network traffic, and one that fills the disk
+//! anyway deletes its partial so the space comes back.
 
 use crate::catalog::ModelEntry;
 use crate::hash::{is_sha256_hex, sha256_file};
@@ -10,7 +12,9 @@ use crate::store::{utc_now, ModelManifest, Store};
 use common_core::paths::safe_name;
 use common_core::{CommonError, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -27,12 +31,35 @@ pub struct Progress {
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum gap between two body reads before the attempt fails (the partial stays resumable).
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Space a download must leave free beyond its own bytes (manifests, logs, the next write).
+pub const DISK_MARGIN: u64 = 64 << 20;
+
+/// Free bytes on the volume holding a directory; None when unknown (no preflight then).
+pub(crate) type DiskFree = fn(&Path) -> Option<u64>;
 
 /// Download `entry` into the store. Resumes a partial file via HTTP Range, verifies SHA-256,
 /// deletes the file on mismatch, and is a no-op (zero network bytes) when the blob is already
 /// present and valid. Requires `https://` URLs.
 pub async fn pull(store: &Store, entry: &ModelEntry, progress: &mut dyn FnMut(Progress)) -> Result<ModelManifest> {
-    pull_inner(store, entry, progress, true).await
+    pull_inner(store, entry, progress, true, common_hardware::disk_free).await
+}
+
+/// One download per blob in this process: a second pull of the same model waits for the first,
+/// then finds the blob in place (zero network bytes) instead of writing the same partial.
+// ponytail: in-process only (the daemon's pulls); a CLI pull racing the daemon still shares the
+// partial and one of them ends in a hash mismatch. Lock `<sha256>.lock` with std::fs::File::lock
+// once the workspace MSRV reaches 1.89.
+async fn one_writer(sha256: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    type Locks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+    let m = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(sha256.to_string())
+        .or_default()
+        .clone();
+    m.lock_owned().await
 }
 
 async fn pull_inner(
@@ -40,6 +67,7 @@ async fn pull_inner(
     entry: &ModelEntry,
     progress: &mut dyn FnMut(Progress),
     https_only: bool,
+    disk_free: DiskFree,
 ) -> Result<ModelManifest> {
     if !safe_name(&entry.id) {
         return Err(CommonError::invalid(format!("invalid model id {:?}", entry.id)));
@@ -50,6 +78,7 @@ async fn pull_inner(
             entry.id
         )));
     }
+    let _writer = one_writer(&entry.sha256).await;
     let blob = store.blob_path(&entry.sha256);
     if blob.is_file() {
         let actual = hash_blocking(blob.clone()).await?;
@@ -88,6 +117,7 @@ async fn pull_inner(
         &partial,
         &blob,
         https_only,
+        disk_free,
         progress,
     )
     .await?;
@@ -109,6 +139,8 @@ pub(crate) fn require_https(url: &str) -> Result<()> {
 
 /// Stream `url` into `partial`, resuming from its current length, then verify `bytes` and
 /// `sha256` and rename to `dest`. Returns the bytes fetched over the network by this call.
+/// Refused before any network traffic when the rest of the file plus [`DISK_MARGIN`] does not fit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch(
     url: &str,
     sha256: &str,
@@ -116,6 +148,7 @@ pub(crate) async fn fetch(
     partial: &Path,
     dest: &Path,
     https_only: bool,
+    disk_free: DiskFree,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<u64> {
     for p in [partial.parent(), dest.parent()].into_iter().flatten() {
@@ -126,6 +159,25 @@ pub(crate) async fn fetch(
         // ponytail: a partial at or past the pinned size is an unverified leftover; restart instead of hash-and-promote.
         tokio::fs::remove_file(partial).await?;
         have = 0;
+    }
+    let need = bytes - have;
+    if let Some(free) = partial.parent().and_then(disk_free) {
+        if free < need.saturating_add(DISK_MARGIN) {
+            return Err(CommonError::new(
+                ErrorCode::DownloadFailed,
+                format!(
+                    "not enough disk space: the download needs {} ({need} bytes) plus {} spare, and {} ({free} bytes) is free",
+                    mb(need),
+                    mb(DISK_MARGIN),
+                    mb(free)
+                ),
+            )
+            .with_hint(format!(
+                "free at least {} on the disk holding {}, then run the same command again",
+                mb(need.saturating_add(DISK_MARGIN) - free),
+                partial.parent().unwrap_or(partial).display()
+            )));
+        }
     }
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -179,7 +231,9 @@ pub(crate) async fn fetch(
             Ok(Some(c)) => c,
             Ok(None) => break,
             Err(e) => {
-                file.flush().await?;
+                if let Err(w) = file.flush().await {
+                    return Err(write_failed(w, file, partial, downloaded, bytes).await);
+                }
                 return Err(net(e));
             }
         };
@@ -193,11 +247,18 @@ pub(crate) async fn fetch(
                 format!("body exceeds the pinned size of {bytes} bytes; partial deleted"),
             ));
         }
-        file.write_all(&chunk).await?;
+        if let Err(e) = file.write_all(&chunk).await {
+            return Err(write_failed(e, file, partial, downloaded - chunk.len() as u64, bytes).await);
+        }
         progress(report(downloaded, network, false));
     }
-    file.flush().await?;
-    file.sync_all().await?;
+    let synced = match file.flush().await {
+        Ok(()) => file.sync_all().await,
+        e => e,
+    };
+    if let Err(e) = synced {
+        return Err(write_failed(e, file, partial, downloaded, bytes).await);
+    }
     drop(file);
     if downloaded < bytes {
         return Err(CommonError::new(
@@ -217,6 +278,40 @@ pub(crate) async fn fetch(
     tokio::fs::rename(partial, dest).await?;
     progress(report(downloaded, network, true));
     Ok(network)
+}
+
+/// A failed write. A full disk (or quota) deletes the partial so the space comes back and says so;
+/// anything else is an `Io` error that keeps the partial for a resume.
+async fn write_failed(
+    e: std::io::Error,
+    file: tokio::fs::File,
+    partial: &Path,
+    written: u64,
+    bytes: u64,
+) -> CommonError {
+    use std::io::ErrorKind::{QuotaExceeded, StorageFull};
+    if !matches!(e.kind(), StorageFull | QuotaExceeded) {
+        return e.into();
+    }
+    drop(file);
+    let _ = tokio::fs::remove_file(partial).await;
+    CommonError::new(
+        ErrorCode::DownloadFailed,
+        format!(
+            "the disk filled up after {} of {} ({e}); the partial download was deleted to free the space",
+            mb(written),
+            mb(bytes)
+        ),
+    )
+    .with_hint(format!(
+        "free at least {} on that disk, then run the same command again",
+        mb(bytes.saturating_add(DISK_MARGIN))
+    ))
+}
+
+/// Bytes as decimal megabytes, the unit the rest of Common shows sizes in.
+fn mb(n: u64) -> String {
+    format!("{:.1} MB", n as f64 / 1e6)
 }
 
 async fn hash_blocking(path: PathBuf) -> Result<String> {
@@ -367,9 +462,141 @@ mod tests {
     }
 
     async fn pull_http(store: &Store, e: &ModelEntry) -> (Result<ModelManifest>, Vec<Progress>) {
+        pull_with_free(store, e, common_hardware::disk_free).await
+    }
+
+    /// `pull_http` with a SYNTHETIC free-space figure in place of the real disk's.
+    async fn pull_with_free(store: &Store, e: &ModelEntry, free: DiskFree) -> (Result<ModelManifest>, Vec<Progress>) {
         let mut events = Vec::new();
-        let r = pull_inner(store, e, &mut |p| events.push(p), false).await;
+        let r = pull_inner(store, e, &mut |p| events.push(p), false, free).await;
         (r, events)
+    }
+
+    /// F-01-05 disk-full preflight, SYNTHETIC quota: a pull that cannot fit is refused with the
+    /// needed and free bytes before a single byte crosses the network, and leaves no partial. A
+    /// resume needs room only for the rest of the file.
+    #[tokio::test]
+    async fn pull_that_cannot_fit_is_refused_before_any_network() {
+        let data = data(2 * MIB as usize);
+        let srv = serve(data.clone()).await;
+        let (_d, store) = store();
+        let e = entry(&srv.url, &data);
+        let (r, events) = pull_with_free(&store, &e, |_| Some(MIB)).await;
+        let err = r.unwrap_err();
+        assert_eq!(err.code, ErrorCode::DownloadFailed, "{err}");
+        assert!(
+            err.message.contains("not enough disk space")
+                && err.message.contains(&format!("({} bytes)", 2 * MIB))
+                && err.message.contains(&format!("({MIB} bytes) is free")),
+            "{err}"
+        );
+        assert!(err.hint.as_deref().unwrap().contains("free at least"), "{err:?}");
+        assert!(events.is_empty());
+        assert_eq!(srv.served.load(Ordering::SeqCst), 0, "no network traffic");
+        assert!(!store.paths.partial().join(format!("{}.part", e.sha256)).exists());
+
+        srv.cut.store(MIB + 7, Ordering::SeqCst);
+        assert_eq!(
+            pull_http(&store, &e).await.0.unwrap_err().code,
+            ErrorCode::DownloadFailed
+        );
+        srv.cut.store(u64::MAX, Ordering::SeqCst);
+        let rest = e.bytes - (MIB + 7);
+        let (r, _) = pull_with_free(&store, &e, |_| Some(MIB - 7 + DISK_MARGIN - 1)).await;
+        assert_eq!(r.unwrap_err().code, ErrorCode::DownloadFailed, "one byte short");
+        assert_eq!(rest, MIB - 7);
+        let (r, _) = pull_with_free(&store, &e, |_| Some(MIB - 7 + DISK_MARGIN)).await;
+        r.unwrap();
+        store.verify("test-model").unwrap();
+    }
+
+    /// Two pulls of the same model at once: one writer, one download over the network; the second
+    /// finds the verified blob in place.
+    #[tokio::test]
+    async fn concurrent_pulls_of_one_model_download_once() {
+        let data = data(3 * MIB as usize);
+        let srv = serve(data.clone()).await;
+        let (_d, store) = store();
+        let e = entry(&srv.url, &data);
+        let ((a, ea), (b, eb)) = tokio::join!(pull_http(&store, &e), pull_http(&store, &e));
+        assert_eq!(a.unwrap(), b.unwrap());
+        assert_eq!(srv.served.load(Ordering::SeqCst), e.bytes, "served once");
+        let net = |ev: &Vec<Progress>| ev.last().unwrap().network_bytes;
+        let mut nets = [net(&ea), net(&eb)];
+        nets.sort();
+        assert_eq!(nets, [0, e.bytes]);
+        store.verify("test-model").unwrap();
+    }
+
+    /// A REAL ENOSPC mid-download (the preflight is told the space is unknown, so the write runs
+    /// until the disk is full): a typed error, and the partial is deleted so the space comes back.
+    /// macOS: a 16 MB disk image (SYNTHETIC quota) mounted without privileges. Linux: the partial
+    /// is a symlink to /dev/full, whose writes fail with ENOSPC.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn disk_full_mid_download_deletes_the_partial() {
+        let data = data(32 * MIB as usize);
+        let srv = serve(data.clone()).await;
+        let d = tempfile::tempdir().unwrap();
+        #[cfg(target_os = "macos")]
+        let (home, _mount) = {
+            struct Detach(PathBuf);
+            impl Drop for Detach {
+                fn drop(&mut self) {
+                    let _ = std::process::Command::new("/usr/bin/hdiutil")
+                        .args(["detach", "-force", "-quiet"])
+                        .arg(&self.0)
+                        .status();
+                }
+            }
+            let (img, mnt) = (d.path().join("small.dmg"), d.path().join("mnt"));
+            let ok = |args: &[&std::ffi::OsStr]| {
+                std::process::Command::new("/usr/bin/hdiutil")
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            };
+            assert!(ok(&[
+                "create".as_ref(),
+                "-quiet".as_ref(),
+                "-size".as_ref(),
+                "16m".as_ref(),
+                "-fs".as_ref(),
+                "HFS+".as_ref(),
+                "-volname".as_ref(),
+                "commonfull".as_ref(),
+                img.as_os_str()
+            ]));
+            std::fs::create_dir(&mnt).unwrap();
+            assert!(ok(&[
+                "attach".as_ref(),
+                "-quiet".as_ref(),
+                "-nobrowse".as_ref(),
+                "-mountpoint".as_ref(),
+                mnt.as_os_str(),
+                img.as_os_str()
+            ]));
+            (mnt.join("home"), Detach(mnt))
+        };
+        #[cfg(target_os = "linux")]
+        let home = d.path().join("home");
+        let store = Store::new(Paths::at(&home));
+        let e = entry(&srv.url, &data);
+        let partial = store.paths.partial().join(format!("{}.part", e.sha256));
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::create_dir_all(store.paths.partial()).unwrap();
+            std::os::unix::fs::symlink("/dev/full", &partial).unwrap();
+        }
+        let (r, _) = pull_with_free(&store, &e, |_| None).await;
+        let err = r.unwrap_err();
+        assert_eq!(err.code, ErrorCode::DownloadFailed, "{err}");
+        assert!(err.message.contains("the disk filled up"), "{err}");
+        assert!(err.hint.as_deref().unwrap().contains("free at least"), "{err:?}");
+        assert!(std::fs::symlink_metadata(&partial).is_err(), "partial deleted");
+        assert!(!store.blob_path(&e.sha256).exists());
+        assert!(store.get("test-model").unwrap().is_none());
     }
 
     #[tokio::test]

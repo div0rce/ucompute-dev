@@ -222,3 +222,49 @@ async fn embeddings_and_unreferenced_requests_are_listed_fake() {
     );
     srv.stop().await;
 }
+
+/// F-08-04: a request running when the daemon dies is not `running` after a restart. The registry
+/// is in memory only (`src/jobs.rs`): nothing of a job reaches `COMMON_HOME`, so a daemon started
+/// on that home lists no job of the dead one, neither active nor finished. The "dead" daemon here
+/// is a second `AppState` on the same home while the first still streams, which is all a restarted
+/// process can read; a SIGKILL of the real binary mid-generation is the CLI's real-engine test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_running_when_the_daemon_dies_is_not_running_after_restart_fake() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(app(
+        ApiConfig::default(),
+        dir.path().to_path_buf(),
+        HardwareReport::default(),
+    ))
+    .await;
+    seed_slot(&srv.state, MODEL_ID, FakeModel::new(200, Duration::from_millis(50))).await;
+    let body = json!({ "model": MODEL_ID, "prompt": "once upon", "max_tokens": 200, "stream": true });
+    let mut a = client()
+        .post(srv.url("/v1/completions"))
+        .header("x-common-client-ref", "ref-dies")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(a.status(), 200);
+    a.chunk().await.unwrap().unwrap();
+    let row = by_ref(&jobs(&srv).await, "active", "ref-dies").expect("running");
+    assert_eq!(row["state"], "running", "{row}");
+
+    let restarted = Server::start(app(
+        ApiConfig::default(),
+        dir.path().to_path_buf(),
+        HardwareReport::default(),
+    ))
+    .await;
+    let v = jobs(&restarted).await;
+    assert_eq!(
+        v,
+        json!({ "active": [], "recent": [] }),
+        "nothing of the dead daemon's jobs"
+    );
+    assert!(
+        by_ref(&jobs(&srv).await, "active", "ref-dies").is_some(),
+        "the first one still runs it"
+    );
+}

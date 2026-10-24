@@ -30,7 +30,9 @@ pub mod remote;
 pub mod tls;
 pub mod transport;
 
+use common_core::{CommonError, Result};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
 
 pub const ALPN_WORKLOAD: &[u8] = b"common/1";
 pub const ALPN_PAIRING: &[u8] = b"common-pair/1";
@@ -66,6 +68,25 @@ pub struct NetworkConfig {
     #[serde(default = "default_pair_window_s")]
     pub pairing_window_secs: u64,
 }
+impl NetworkConfig {
+    /// The workload endpoint's bind address: one IPv4 address, `0.0.0.0` for every IPv4 interface.
+    /// IPv6 (`::`, `[::]` or any IPv6 address) is refused: the endpoint, pairing and discovery
+    /// handle IPv4 only (a dual-stack socket would need `IPV6_V6ONLY` cleared, which Windows keeps
+    /// set by default).
+    // ponytail: IPv4 only; support IPv6 by clearing IPV6_V6ONLY on the endpoint and pairing sockets
+    // and letting discovery rank IPv6 addresses again.
+    pub fn bind_ip(&self) -> Result<Ipv4Addr> {
+        let bad = |why: &str| CommonError::invalid(format!("network bind address {:?}: {why}", self.bind_addr));
+        match self.bind_addr.trim_matches(['[', ']']).parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => Ok(ip),
+            Ok(IpAddr::V6(_)) => Err(bad(
+                "IPv6 is not supported; use 0.0.0.0 (every IPv4 interface) or one IPv4 address",
+            )),
+            Err(_) => Err(bad("not an IP address")),
+        }
+    }
+}
+
 fn default_port() -> u16 {
     8193
 }
@@ -122,6 +143,26 @@ pub fn scan_for_plaintext(datagrams: &[Vec<u8>], canaries: &[&str]) -> Vec<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IPv6 binds are refused with a clear error, not by a parse failure deep in pairing.
+    #[test]
+    fn bind_ip_is_ipv4_only() {
+        let bind = |b: &str| {
+            NetworkConfig {
+                bind_addr: b.into(),
+                ..NetworkConfig::default()
+            }
+            .bind_ip()
+        };
+        assert_eq!(bind("0.0.0.0").unwrap(), Ipv4Addr::UNSPECIFIED);
+        assert_eq!(bind("127.0.0.1").unwrap(), Ipv4Addr::LOCALHOST);
+        for v6 in ["::", "[::]", "::1", "[fd00::5]", "fe80::1"] {
+            let e = bind(v6).unwrap_err();
+            assert_eq!(e.code, common_core::ErrorCode::InvalidRequest, "{v6}");
+            assert!(e.message.contains("IPv6 is not supported"), "{v6}: {}", e.message);
+        }
+        assert!(bind("localhost").unwrap_err().message.contains("not an IP address"));
+    }
 
     #[test]
     fn config_default_is_off_and_scan_finds_both_encodings() {

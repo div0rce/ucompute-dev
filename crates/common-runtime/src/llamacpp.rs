@@ -401,6 +401,16 @@ impl LoadedModel for LoadedLlama {
         self.info.pid.and_then(process::rss_bytes)
     }
 
+    fn exited(&self) -> Option<String> {
+        // Locked only by `unload`, which takes the child: nothing to report then.
+        let mut child = self.child.try_lock().ok()?;
+        match child.as_mut()?.try_wait() {
+            Ok(Some(status)) => Some(status.to_string()),
+            Ok(None) => None,
+            Err(e) => Some(format!("cannot be polled: {e}")),
+        }
+    }
+
     async fn unload(&self) -> Result<()> {
         if let Some(child) = self.child.lock().await.take() {
             process::stop(child).await;

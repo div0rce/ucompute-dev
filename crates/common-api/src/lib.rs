@@ -339,8 +339,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Where `serve` will listen, or PolicyDenied for a non-loopback host without an API key.
+/// Where `serve` will listen, or PolicyDenied for a non-loopback host without an API key, or
+/// InvalidRequest for a peer bind address the endpoint cannot use (IPv6, see
+/// [`NetworkConfig::bind_ip`]): refused at startup, not when networking is next turned on.
 pub fn bind_addr(config: &ApiConfig) -> Result<SocketAddr> {
+    config.network.bind_ip()?;
     let ip: IpAddr = config
         .host
         .parse()
@@ -610,6 +613,23 @@ mod tests {
         .is_loopback());
     }
 
+    /// An IPv6 peer bind (`::`, `[::]`) is refused when the daemon starts, with a clear error.
+    #[test]
+    fn ipv6_peer_bind_is_refused_at_startup() {
+        for bind in ["::", "[::]"] {
+            let c = ApiConfig {
+                network: NetworkConfig {
+                    bind_addr: bind.into(),
+                    ..NetworkConfig::default()
+                },
+                ..Default::default()
+            };
+            let e = bind_addr(&c).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidRequest, "{bind}");
+            assert!(e.message.contains("IPv6 is not supported"), "{bind}: {e}");
+        }
+    }
+
     #[test]
     fn non_loopback_without_key_is_policy_denied() {
         let c = ApiConfig {
@@ -678,6 +698,18 @@ mod tests {
         let r = ApiError::from(CommonError::new(ErrorCode::ModelNotFound, "x")).into_response();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
         assert!(r.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    /// F-08-03: every stable code, including any an engine-crash path adds to `ErrorCode::ALL`
+    /// (the core snapshot test makes every new code join it), reaches an API caller with its own
+    /// HTTP status and code string, never a silent fallback.
+    #[test]
+    fn every_error_code_maps_to_its_stable_status_and_code() {
+        for code in ErrorCode::ALL {
+            let e = ApiError::from(CommonError::new(*code, "x"));
+            assert_eq!(e.status.as_u16(), code.http_status(), "{code:?}");
+            assert_eq!(e.error.to_openai_json()["error"]["code"], code.as_str(), "{code:?}");
+        }
     }
 
     #[test]

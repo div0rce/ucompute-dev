@@ -80,7 +80,17 @@ pub async fn ensure_backend(paths: &Paths, pin: &BackendPin, progress: &mut dyn 
     if !archive.is_file() {
         require_https(&pin.url)?;
         let partial = paths.partial().join(format!("{}.part", pin.sha256));
-        fetch(&pin.url, &pin.sha256, pin.bytes, &partial, &archive, true, progress).await?;
+        fetch(
+            &pin.url,
+            &pin.sha256,
+            pin.bytes,
+            &partial,
+            &archive,
+            true,
+            common_hardware::disk_free,
+            progress,
+        )
+        .await?;
     }
     let (paths, pin) = (paths.clone(), pin.clone());
     tokio::task::spawn_blocking(move || {
@@ -486,16 +496,29 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.common"));
         let p = Paths::at(root);
-        p.backends().is_dir().then_some(p)
+        if p.backends().is_dir() {
+            return Some(p);
+        }
+        skip(&format!("no backends directory in {}", p.root.display()));
+        None
     }
 
+    /// A missing asset: SKIP, or a failure under `COMMON_REQUIRE_FIXTURES=1` (the evidence job).
+    fn skip(why: &str) {
+        assert!(
+            std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "COMMON_REQUIRE_FIXTURES=1: {why}"
+        );
+        eprintln!("SKIP: {why}");
+    }
+
+    /// This platform's llama.cpp pin: the one `fetch-fixtures.sh` / `common setup` provisioned.
     fn llama_pin() -> BackendPin {
         BackendPins::builtin()
             .unwrap()
-            .backends
-            .into_iter()
-            .find(|b| b.name == "llama.cpp" && b.platform == "macos-arm64")
-            .unwrap()
+            .for_current_platform("llama.cpp")
+            .expect("llama.cpp is pinned for this platform")
+            .clone()
     }
 
     /// Raw ustar header: `Builder::append` writes it verbatim, so `..`/absolute names get through.
@@ -739,10 +762,7 @@ mod tests {
     /// Against the real pinned llama.cpp b11609 archive + directory in COMMON_HOME (skips if absent).
     #[tokio::test]
     async fn verifies_real_llama_cpp_backend_in_common_home() {
-        let Some(paths) = common_home() else {
-            eprintln!("skipped: no COMMON_HOME backends directory");
-            return;
-        };
+        let Some(paths) = common_home() else { return };
         let pin = llama_pin();
         let dir = verify_backend(&paths, &pin).unwrap();
         assert_eq!(dir, paths.backends().join("llama.cpp").join("b11609"));
@@ -756,15 +776,11 @@ mod tests {
     /// Extract the real archive into a fresh home (no network) and verify the result.
     #[tokio::test]
     async fn extracts_real_llama_cpp_archive_into_fresh_home() {
-        let Some(home) = common_home() else {
-            eprintln!("skipped: no COMMON_HOME backends directory");
-            return;
-        };
+        let Some(home) = common_home() else { return };
         let pin = llama_pin();
         let src = archive_path(&home, &pin);
         if !src.is_file() {
-            eprintln!("skipped: archive {} missing", src.display());
-            return;
+            return skip(&format!("archive {} missing", src.display()));
         }
         let d = tempfile::tempdir().unwrap();
         let paths = Paths::at(d.path().join("home"));
@@ -774,14 +790,20 @@ mod tests {
         let dir = ensure_backend(&paths, &pin, &mut |_| {}).await.unwrap();
         assert!(binary(&dir, "llama-server").is_file());
         assert!(is_executable(&std::fs::metadata(binary(&dir, "llama-server")).unwrap()));
-        assert!(std::fs::symlink_metadata(dir.join("libllama.dylib"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            std::fs::read_link(dir.join("libllama.dylib")).unwrap(),
-            PathBuf::from("libllama.0.dylib")
-        );
+        // The archive's library symlink survives extraction (the Windows zip has none). Linux names
+        // from the ubuntu-x64 b11609 archive: libllama.so -> libllama.so.0.
+        if !cfg!(windows) {
+            let (link, target) = if cfg!(target_os = "macos") {
+                ("libllama.dylib", "libllama.0.dylib")
+            } else {
+                ("libllama.so", "libllama.so.0")
+            };
+            assert!(std::fs::symlink_metadata(dir.join(link))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read_link(dir.join(link)).unwrap(), PathBuf::from(target));
+        }
         assert_eq!(verify_backend(&paths, &pin).unwrap(), dir);
         let leftovers: Vec<_> = std::fs::read_dir(paths.backends().join(&pin.name))
             .unwrap()
@@ -895,13 +917,13 @@ mod tests {
         }
     }
 
-    /// The real llama.cpp Windows release: COMMON_WIN_ENGINE_ZIP=<downloaded zip>. Skips without it.
+    /// The real llama.cpp Windows release: `COMMON_WIN_ENGINE_ZIP=<downloaded zip> cargo test -p
+    /// common-artifacts -- --ignored extracts_real_windows`. Opt-in (no fixture provisions it), so it
+    /// is reported as ignored rather than passing without running.
     #[tokio::test]
+    #[ignore = "needs COMMON_WIN_ENGINE_ZIP=<downloaded llama.cpp Windows release>"]
     async fn extracts_real_windows_llama_cpp_zip() {
-        let Some(zip_path) = std::env::var_os("COMMON_WIN_ENGINE_ZIP").map(PathBuf::from) else {
-            eprintln!("SKIP: set COMMON_WIN_ENGINE_ZIP to a downloaded llama.cpp Windows release");
-            return;
-        };
+        let zip_path = PathBuf::from(std::env::var_os("COMMON_WIN_ENGINE_ZIP").expect("set COMMON_WIN_ENGINE_ZIP"));
         let name = zip_path.file_name().unwrap().to_str().unwrap().to_string();
         let pin = BackendPins::builtin()
             .unwrap()

@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -24,7 +24,28 @@ pub struct ModelManager {
     /// What status endpoints show without waiting on `loaded`, which a load holds for its whole
     /// hash check and engine start ([`ModelManager::snapshot`]).
     view: std::sync::Mutex<EngineView>,
+    /// Memory usable right now, sampled before every load (F-01-03): the probe in `hardware` is
+    /// a snapshot from daemon start. `None` falls back to that snapshot. Tests swap in a fixed figure.
+    pub available_memory: fn() -> Option<u64>,
+    /// Unexpected engine exits per model in the last [`RESTART_WINDOW`], for the restart bound.
+    exits: std::sync::Mutex<Vec<(String, Instant)>>,
 }
+
+/// At most this many unexpected engine exits of one model within [`RESTART_WINDOW`], counting exits
+/// during a load (before the engine was ready) and after it; after that a load of that model is
+/// refused until the window has passed, instead of restarting in a loop.
+pub const MAX_RESTARTS: usize = 3;
+pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
+/// Engine threads when the request does not pin them: the probe's performance cores where it
+/// reports them (Apple Silicon), else its physical cores, at most this. A request (`--threads`)
+/// overrides it.
+// Measured on the M2 (4P+4E, CPU, qwen2.5-0.5b q4_k_m, round 6): -t 8 lost 38% on prompt and
+// 15-34% on decode against -t 4, and three engines at -t 8 ran about 9x slower than at -t 4.
+// llama.cpp's own default there is also the performance-core count.
+// ponytail: hybrid x86 (the Windows laptop's 4P+4LPE) still counts every physical core; read
+// EfficiencyClass from GetLogicalProcessorInformationEx if a measurement there says it loses.
+pub const MAX_DEFAULT_THREADS: u32 = 16;
 
 /// What is loaded, the options it was loaded with (needed to judge "compatible opts"), and who
 /// caused the load and when.
@@ -44,6 +65,20 @@ pub struct EngineView {
     pub loaded: Option<LoadedView>,
     /// The model id a load in progress is for, and when it started.
     pub loading: Option<(String, Instant)>,
+    /// The last engine that exited on its own (killed, crashed); its slot was freed.
+    pub last_exit: Option<EngineExit>,
+}
+
+/// An engine that exited on its own and why, as the OS reported it.
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineExit {
+    pub model_id: String,
+    pub pid: Option<u32>,
+    /// E.g. `signal: 9 (SIGKILL)` or `exit status: 1`.
+    pub reason: String,
+    /// Streams and calls the exit cut off.
+    pub in_flight: usize,
+    pub at_utc: String,
 }
 
 /// `LoadedModelInfo` plus what only the manager knows.
@@ -101,6 +136,8 @@ impl ModelManager {
             hardware,
             loaded: Mutex::new(None),
             view: std::sync::Mutex::new(EngineView::default()),
+            available_memory: common_hardware::available_memory,
+            exits: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -109,11 +146,70 @@ impl ModelManager {
     // ponytail: while a load or a request's brief check holds the slot, `in_flight` is the count
     // last seen with the slot free.
     pub fn snapshot(&self) -> EngineView {
-        let mut v = lock(&self.view);
-        if let Ok(slot) = self.loaded.try_lock() {
+        if let Ok(mut slot) = self.loaded.try_lock() {
+            self.reap(&mut slot);
+            let mut v = lock(&self.view);
             v.loaded = slot.as_ref().map(view_of);
+            return v.clone();
         }
-        v.clone()
+        lock(&self.view).clone()
+    }
+
+    /// Memory usable right now: a fresh sample, or the startup probe when it cannot be read.
+    pub fn available_memory_now(&self) -> u64 {
+        (self.available_memory)().unwrap_or(self.hardware.memory.available_bytes)
+    }
+
+    /// Free the slot of an engine that exited on its own and record why. Its streams and calls
+    /// end with a typed `BackendFailed` (see [`Managed`]); the next request loads a fresh engine.
+    // ponytail: detected when the slot is next touched (every request, status read, unload), not by
+    // a watcher task; the kernel already freed the dead engine's memory.
+    fn reap(&self, slot: &mut Option<Slot>) {
+        let Some(reason) = slot.as_ref().and_then(|s| s.model.exited()) else {
+            return;
+        };
+        let Some(s) = slot.take() else { return };
+        let info = s.model.info();
+        let exit = EngineExit {
+            model_id: s.model_id.clone(),
+            pid: info.pid,
+            reason,
+            in_flight: s.model.in_flight(),
+            at_utc: common_artifacts::store::utc_now(),
+        };
+        tracing::warn!(model = %exit.model_id, pid = ?exit.pid, reason = %exit.reason, in_flight = exit.in_flight, "engine exited unexpectedly; slot freed, the next request starts it again");
+        lock(&self.exits).push((s.model_id, Instant::now()));
+        let mut v = lock(&self.view);
+        v.loaded = None;
+        v.last_exit = Some(exit);
+    }
+
+    /// `BackendFailed` once `model_id`'s engine has exited [`MAX_RESTARTS`] times within
+    /// [`RESTART_WINDOW`], so a model that crashes on every start is not restarted in a loop.
+    fn restart_allowed(&self, model_id: &str) -> Result<()> {
+        let mut exits = lock(&self.exits);
+        exits.retain(|(_, at)| at.elapsed() < RESTART_WINDOW);
+        let recent: Vec<&Instant> = exits
+            .iter()
+            .filter(|(id, _)| id == model_id)
+            .map(|(_, at)| at)
+            .collect();
+        if recent.len() < MAX_RESTARTS {
+            return Ok(());
+        }
+        let wait = RESTART_WINDOW.saturating_sub(recent[0].elapsed()).as_secs() + 1;
+        Err(CommonError::new(
+            ErrorCode::BackendFailed,
+            format!(
+                "the engine for {model_id} stopped unexpectedly {} times in the last {} s; not starting it again for {wait} s",
+                recent.len(),
+                RESTART_WINDOW.as_secs()
+            ),
+        )
+        .with_hint(format!(
+            "check free memory and the engine logs in {}, or load a smaller model",
+            self.paths.logs().display()
+        )))
     }
 
     /// Return the loaded model for `model_id`, loading it first if needed. Errors:
@@ -140,6 +236,7 @@ impl ModelManager {
         }
         // Held across the load: one slot, so loads are serialized and status() waits for the result.
         let mut slot = self.loaded.lock().await;
+        self.reap(&mut slot);
         if let Some(s) = slot.as_ref() {
             if s.model_id == model_id && compatible(&s.opts, &opts) {
                 return Ok(s.model.clone());
@@ -148,6 +245,7 @@ impl ModelManager {
             // ensure_loaded and generate) or a live stream/call never has its engine killed.
             refuse_if_busy(s, Arc::strong_count(&s.model) > 1)?;
         }
+        self.restart_allowed(model_id)?;
         let _loading = LoadingMark::new(&self.view, model_id);
         let (path, sha256) = self.resolve(model_id)?;
         // F-05-01: the bytes handed to the engine are the bytes the manifest promised. Hashing a
@@ -157,12 +255,36 @@ impl ModelManager {
         tokio::task::spawn_blocking(move || store.verify(&id))
             .await
             .map_err(|e| CommonError::internal(format!("hash task failed: {e}")))??;
-        let (req, context_note) = self.plan(model_id, path, sha256, &opts)?;
+        // F-01-03: a sample taken while the engine this load replaces still runs counts that engine
+        // as used. So with one to replace, this first plan only rules out a model that could not fit
+        // even if nothing else ran (the old engine stays loaded); the plan that decides runs on a
+        // fresh sample once the old engine has stopped.
+        // ponytail: a model that fits an idle machine but not this one still stops the old engine
+        // before it is refused; the refusal is then true of what is free.
+        let first = if slot.is_some() {
+            self.hardware.memory.total_bytes.max(self.available_memory_now())
+        } else {
+            self.available_memory_now()
+        };
+        let mut planned = self.plan(model_id, &path, &sha256, &opts, first)?;
         if let Some(prev) = slot.take() {
             lock(&self.view).loaded = None;
             prev.model.unload().await?;
+            planned = self.plan(model_id, &path, &sha256, &opts, self.available_memory_now())?;
         }
-        let model: Arc<dyn LoadedModel> = Arc::new(Managed::new(self.backend.load(req).await?, context_note));
+        let (req, context_note) = planned;
+        let loaded = match self.backend.load(req).await {
+            Ok(m) => m,
+            Err(e) => {
+                // An engine that exits before it is ready counts toward the restart bound like one
+                // that exits after, so a model that crashes on every start is refused too.
+                if e.message.contains(crate::llamacpp::process::EXITED_BEFORE_READY) {
+                    lock(&self.exits).push((model_id.to_string(), Instant::now()));
+                }
+                return Err(e);
+            }
+        };
+        let model: Arc<dyn LoadedModel> = Arc::new(Managed::new(loaded, context_note));
         let s = Slot {
             model_id: model_id.into(),
             opts,
@@ -180,6 +302,7 @@ impl ModelManager {
     /// a caller merely holding the handle (the CLI unloads before dropping it) does not block this.
     pub async fn unload(&self) -> Result<()> {
         let mut slot = self.loaded.lock().await;
+        self.reap(&mut slot);
         if let Some(s) = slot.as_ref() {
             refuse_if_busy(s, false)?;
         }
@@ -194,7 +317,9 @@ impl ModelManager {
 
     /// Currently loaded model info, if any.
     pub async fn status(&self) -> Option<LoadedModelInfo> {
-        self.loaded.lock().await.as_ref().map(|s| s.model.info().clone())
+        let mut slot = self.loaded.lock().await;
+        self.reap(&mut slot);
+        slot.as_ref().map(|s| s.model.info().clone())
     }
 
     /// Blob path + sha256 for `id`, or the typed reason it cannot be used.
@@ -222,16 +347,15 @@ impl ModelManager {
     fn plan(
         &self,
         id: &str,
-        path: PathBuf,
-        sha256: String,
+        path: &Path,
+        sha256: &str,
         opts: &LoadOptions,
+        available: u64,
     ) -> Result<(LoadRequest, Option<String>)> {
-        let meta = common_models::gguf::read_metadata(&path)?;
-        // ponytail: uses the stored probe; re-probe before loading once probe() is known to be cheap.
-        let available = self.hardware.memory.available_bytes;
+        let meta = common_models::gguf::read_metadata(path)?;
         let requested = opts.n_ctx.unwrap_or(meta.context_length.min(4096));
         let budget = (available as f64 * 0.9) as u64;
-        let size = file_size(&path)?;
+        let size = file_size(path)?;
         let plan = common_models::planning::plan_context(&meta, size, Some(requested), budget, true)?;
         if let Some(reason) = &plan.reason {
             tracing::warn!(
@@ -247,12 +371,12 @@ impl ModelManager {
         }
         let req = LoadRequest {
             model_id: id.into(),
-            model_path: path,
-            model_sha256: sha256,
+            model_path: path.to_path_buf(),
+            model_sha256: sha256.to_string(),
             device: opts.device.unwrap_or_else(|| self.default_device()),
             n_ctx: plan.n_ctx,
             n_gpu_layers: None,
-            threads: opts.threads,
+            threads: Some(opts.threads.unwrap_or_else(|| self.default_threads())),
             parallel_slots: opts.parallel_slots.unwrap_or(1),
             kv_type: plan.kv_type,
             embeddings: opts.embeddings,
@@ -260,6 +384,16 @@ impl ModelManager {
             extra_args: vec![],
         };
         Ok((req, plan.reason))
+    }
+
+    /// The probe's performance cores, else its physical cores, at most [`MAX_DEFAULT_THREADS`];
+    /// 4 when the probe has no count.
+    fn default_threads(&self) -> u32 {
+        let cpu = &self.hardware.cpu;
+        match cpu.performance_cores.unwrap_or(cpu.physical_cores) {
+            0 => 4,
+            n => n.min(MAX_DEFAULT_THREADS),
+        }
     }
 
     /// Auto (GPU first, proven by the engine log) unless the probe says only the CPU is usable.
@@ -346,29 +480,48 @@ impl LoadedModel for Managed {
 
     async fn generate(&self, req: GenerateRequest, cancel: CancellationToken) -> Result<GenerateStream> {
         let guard = self.in_use.clone();
-        let stream = self.inner.generate(req, cancel).await?;
+        let stream = match self.inner.generate(req, cancel).await {
+            Ok(s) => s,
+            Err(e) => return Err(explain_exit(self.inner.as_ref(), e).await),
+        };
+        let inner = self.inner.clone();
         // The guard lives inside the stream: dropping the stream releases the model.
         Ok(stream
-            .map(move |ev| {
+            .then(move |ev| {
                 let _keep = &guard;
-                ev
+                let inner = inner.clone();
+                async move {
+                    match ev {
+                        Err(e) => Err(explain_exit(inner.as_ref(), e).await),
+                        ev => ev,
+                    }
+                }
             })
             .boxed())
     }
 
     async fn tokenize(&self, text: &str) -> Result<Vec<u32>> {
         let _guard = self.in_use.clone();
-        self.inner.tokenize(text).await
+        match self.inner.tokenize(text).await {
+            Err(e) => Err(explain_exit(self.inner.as_ref(), e).await),
+            r => r,
+        }
     }
 
     async fn detokenize(&self, ids: &[u32]) -> Result<String> {
         let _guard = self.in_use.clone();
-        self.inner.detokenize(ids).await
+        match self.inner.detokenize(ids).await {
+            Err(e) => Err(explain_exit(self.inner.as_ref(), e).await),
+            r => r,
+        }
     }
 
     async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         let _guard = self.in_use.clone();
-        self.inner.embed(inputs).await
+        match self.inner.embed(inputs).await {
+            Err(e) => Err(explain_exit(self.inner.as_ref(), e).await),
+            r => r,
+        }
     }
 
     fn memory_rss_bytes(&self) -> Option<u64> {
@@ -381,6 +534,36 @@ impl LoadedModel for Managed {
 
     fn in_flight(&self) -> usize {
         Arc::strong_count(&self.in_use) - 1
+    }
+
+    fn exited(&self) -> Option<String> {
+        self.inner.exited()
+    }
+}
+
+/// How long a failed call waits for the OS to report the engine's exit: a killed engine's sockets
+/// close a moment before the process can be reaped.
+const EXIT_GRACE: Duration = Duration::from_millis(250);
+
+/// A `BackendFailed` from an engine that has exited says so, with the exit status and a hint that
+/// a retry starts it again ([`ModelManager::reap`]). Other errors pass through unchanged.
+async fn explain_exit(model: &dyn LoadedModel, e: CommonError) -> CommonError {
+    if e.code != ErrorCode::BackendFailed {
+        return e;
+    }
+    let t = Instant::now();
+    loop {
+        if let Some(how) = model.exited() {
+            return CommonError::new(
+                ErrorCode::BackendFailed,
+                format!("the engine stopped unexpectedly ({how}): {}", e.message),
+            )
+            .with_hint("retry: the next request starts the engine again");
+        }
+        if t.elapsed() >= EXIT_GRACE {
+            return e;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -539,8 +722,9 @@ mod tests {
         assert!(m.status().await.is_none());
     }
 
-    /// FAKE in-test model (no engine): a stream from it never yields, so it stays in flight until dropped.
-    struct Idle(LoadedModelInfo);
+    /// FAKE in-test model (no engine): a stream from it never yields, so it stays in flight until
+    /// dropped. `unload` runs the hook (a test's stand-in for the memory a stopped engine frees).
+    struct Idle(LoadedModelInfo, fn());
 
     #[async_trait::async_trait]
     impl LoadedModel for Idle {
@@ -563,16 +747,20 @@ mod tests {
             None
         }
         async fn unload(&self) -> Result<()> {
+            (self.1)();
             Ok(())
         }
     }
 
     fn managed(note: Option<&str>) -> Arc<dyn LoadedModel> {
         Arc::new(Managed::new(
-            Arc::new(Idle(LoadedModelInfo {
-                model_id: "a".into(),
-                ..Default::default()
-            })),
+            Arc::new(Idle(
+                LoadedModelInfo {
+                    model_id: "a".into(),
+                    ..Default::default()
+                },
+                || {},
+            )),
             note.map(str::to_string),
         ))
     }
@@ -641,6 +829,306 @@ mod tests {
             e.loaded.unwrap().info.model_id,
             "a",
             "a swap that fails before loading keeps the old model"
+        );
+    }
+
+    /// FAKE engine (no process): "exits" with SIGKILL's status once `dead` is set. Its streams fail
+    /// the way a killed engine's do, with a transport error.
+    struct Mortal(LoadedModelInfo, Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl LoadedModel for Mortal {
+        fn info(&self) -> &LoadedModelInfo {
+            &self.0
+        }
+        async fn generate(&self, _: GenerateRequest, _: CancellationToken) -> Result<GenerateStream> {
+            Ok(futures_util::stream::once(async {
+                Err(CommonError::new(
+                    ErrorCode::BackendFailed,
+                    "engine stream failed: connection reset",
+                ))
+            })
+            .boxed())
+        }
+        async fn tokenize(&self, _: &str) -> Result<Vec<u32>> {
+            Ok(vec![1])
+        }
+        async fn detokenize(&self, _: &[u32]) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![])
+        }
+        fn memory_rss_bytes(&self) -> Option<u64> {
+            None
+        }
+        async fn unload(&self) -> Result<()> {
+            Ok(())
+        }
+        fn exited(&self) -> Option<String> {
+            self.1
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| "signal: 9 (SIGKILL)".into())
+        }
+    }
+
+    fn mortal(id: &str) -> (Slot, Arc<std::sync::atomic::AtomicBool>) {
+        let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let info = LoadedModelInfo {
+            model_id: id.into(),
+            pid: Some(4242),
+            ..Default::default()
+        };
+        let model: Arc<dyn LoadedModel> = Arc::new(Managed::new(Arc::new(Mortal(info, dead.clone())), None));
+        (slot(id, model), dead)
+    }
+
+    /// F-08-04: an engine that dies after loading frees its slot even with a stream in flight, the
+    /// stream ends with a typed error naming the exit, the view records it, and the next request
+    /// loads again; a model whose engine keeps dying is refused after MAX_RESTARTS exits.
+    #[tokio::test]
+    async fn dead_engine_frees_the_slot_and_restarts_are_bounded() {
+        let m = manager(HardwareReport::default());
+        let (s, dead) = mortal("a");
+        *m.loaded.lock().await = Some(s);
+        let model = m.ensure_loaded("a", LoadOptions::default()).await.unwrap();
+        let mut stream = model
+            .generate(GenerateRequest::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            m.ensure_loaded("b", LoadOptions::default()).await.err().unwrap().code,
+            ErrorCode::Overloaded,
+            "alive and busy: never replaced"
+        );
+
+        dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let v = m.snapshot();
+        assert!(v.loaded.is_none(), "the dead engine's slot is freed");
+        let exit = v.last_exit.unwrap();
+        assert_eq!((exit.model_id.as_str(), exit.pid, exit.in_flight), ("a", Some(4242), 1));
+        assert!(exit.reason.contains("signal: 9"), "{}", exit.reason);
+        let e = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendFailed);
+        assert!(e.message.contains("stopped unexpectedly (signal: 9"), "{e}");
+        assert!(e.hint.as_deref().unwrap().contains("retry"), "{e:?}");
+        drop((stream, model));
+        assert_eq!(
+            m.ensure_loaded("a", LoadOptions::default()).await.err().unwrap().code,
+            ErrorCode::ModelNotFound,
+            "the next request loads afresh (here: nothing in the store to load)"
+        );
+
+        for _ in 1..MAX_RESTARTS {
+            let (s, dead) = mortal("a");
+            *m.loaded.lock().await = Some(s);
+            dead.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(m.status().await.is_none());
+        }
+        let e = m.ensure_loaded("a", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
+        assert!(e.message.contains("3 times in the last 60 s"), "{e}");
+        assert_eq!(
+            m.ensure_loaded("b", LoadOptions::default()).await.err().unwrap().code,
+            ErrorCode::ModelNotFound,
+            "the bound is per model"
+        );
+        m.unload().await.unwrap();
+    }
+
+    /// FAKE backend (no engine): `load` either fails with `fail`'s message or returns an [`Idle`]
+    /// model; `loads` counts the calls.
+    struct FakeBackend {
+        loads: std::sync::atomic::AtomicUsize,
+        fail: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl InferenceBackend for FakeBackend {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn version(&self) -> String {
+            String::new()
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        async fn load(&self, req: LoadRequest) -> Result<Arc<dyn LoadedModel>> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.fail {
+                Some(msg) => Err(CommonError::new(ErrorCode::BackendFailed, msg)),
+                None => Ok(Arc::new(Idle(
+                    LoadedModelInfo {
+                        model_id: req.model_id,
+                        ..Default::default()
+                    },
+                    || {},
+                ))),
+            }
+        }
+    }
+
+    /// A manager over the FAKE backend with a SYNTHETIC GGUF (not a real model: llama arch,
+    /// stories15M's shape, 64 bytes of tensor data) imported as `tiny`.
+    fn fake_manager(hardware: HardwareReport, fail: Option<&'static str>) -> (ModelManager, Arc<FakeBackend>) {
+        fn s(v: &str) -> Vec<u8> {
+            [(v.len() as u64).to_le_bytes().as_slice(), v.as_bytes()].concat()
+        }
+        fn kv_u32(k: &str, v: u32) -> Vec<u8> {
+            [s(k), 4u32.to_le_bytes().to_vec(), v.to_le_bytes().to_vec()].concat()
+        }
+        fn kv_str(k: &str, v: &str) -> Vec<u8> {
+            [s(k), 8u32.to_le_bytes().to_vec(), s(v)].concat()
+        }
+        let kvs = [
+            kv_str("general.architecture", "llama"),
+            kv_u32("llama.block_count", 6),
+            kv_u32("llama.context_length", 128),
+            kv_u32("llama.embedding_length", 288),
+            kv_u32("llama.feed_forward_length", 768),
+            kv_u32("llama.attention.head_count", 6),
+        ];
+        let mut gguf = [b"GGUF".as_slice(), &3u32.to_le_bytes(), &0u64.to_le_bytes()].concat();
+        gguf.extend((kvs.len() as u64).to_le_bytes());
+        gguf.extend(kvs.concat());
+        while !gguf.len().is_multiple_of(32) {
+            gguf.push(0);
+        }
+        gguf.extend([0u8; 64]);
+        let mut m = manager(hardware);
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("tiny.gguf");
+        std::fs::write(&f, gguf).unwrap();
+        m.store.import(&f, Some("tiny"), None).unwrap();
+        let backend = Arc::new(FakeBackend {
+            loads: Default::default(),
+            fail,
+        });
+        m.backend = backend.clone();
+        (m, backend)
+    }
+
+    /// F-01-03: memory sampled while the engine a load replaces still runs counts that engine as
+    /// used. A swap is planned on a sample taken after the old engine stopped, so a model that fits
+    /// once it is gone loads; a model too large for the whole machine is refused with the old
+    /// engine still loaded. FAKE engines; the "free memory" figure rises when the old one unloads.
+    #[tokio::test]
+    async fn a_swap_is_planned_on_memory_sampled_after_the_old_engine_stopped() {
+        use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+        static FREE: AtomicU64 = AtomicU64::new(0);
+        const GIB: u64 = 1 << 30;
+        let machine = |total_bytes| HardwareReport {
+            memory: common_hardware::MemoryInfo {
+                total_bytes,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let old = || {
+            slot(
+                "old",
+                Arc::new(Idle(LoadedModelInfo::default(), || FREE.store(4 * GIB, SeqCst))),
+            )
+        };
+
+        let (mut m, backend) = fake_manager(machine(8 * GIB), None);
+        m.available_memory = || Some(FREE.load(SeqCst));
+        *m.loaded.lock().await = Some(old());
+        FREE.store(1 << 20, SeqCst); // 1 MiB free while the old engine runs
+        let model = m.ensure_loaded("tiny", LoadOptions::default()).await.unwrap();
+        assert_eq!(model.info().model_id, "tiny");
+        assert_eq!(backend.loads.load(SeqCst), 1);
+        assert_eq!(m.status().await.unwrap().model_id, "tiny");
+
+        // Stopping the old engine freed nothing: the plan on the fresh sample refuses.
+        let (mut m, backend) = fake_manager(machine(8 * GIB), None);
+        m.available_memory = || Some(FREE.load(SeqCst));
+        *m.loaded.lock().await = Some(slot("old", managed(None)));
+        FREE.store(1 << 20, SeqCst);
+        let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::InsufficientMemory, "{e}");
+        assert_eq!(backend.loads.load(SeqCst), 0, "the machine's total never admits a load");
+        assert!(m.status().await.is_none(), "the old engine was stopped to measure");
+
+        // Nothing to replace: the sample decides at once.
+        let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::InsufficientMemory, "{e}");
+        assert_eq!(backend.loads.load(SeqCst), 0);
+
+        let (mut m, backend) = fake_manager(machine(1 << 20), None);
+        m.available_memory = || Some(FREE.load(SeqCst));
+        *m.loaded.lock().await = Some(old());
+        FREE.store(1 << 20, SeqCst);
+        let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::InsufficientMemory, "{e}");
+        assert_eq!(FREE.load(SeqCst), 1 << 20, "the old engine was never stopped");
+        assert_eq!(backend.loads.load(SeqCst), 0);
+        assert!(
+            m.status().await.is_some(),
+            "a load that cannot fit the machine keeps the old engine"
+        );
+    }
+
+    /// F-08-04: an engine that exits during its load counts toward [`MAX_RESTARTS`] like one that
+    /// exits after it: a model that crashes on every start is refused without starting it again.
+    /// A load failure that is not an exit (here a timeout) does not count. FAKE backend.
+    #[tokio::test]
+    async fn exits_during_load_count_toward_the_restart_bound() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut m, backend) = fake_manager(
+            HardwareReport::default(),
+            Some("llama-server exited with signal: 6 (SIGABRT) before becoming ready:\nGGML_ASSERT"),
+        );
+        m.available_memory = || Some(1 << 30);
+        for n in 1..=MAX_RESTARTS {
+            let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+            assert!(e.message.contains("SIGABRT"), "start {n}: {e}");
+            assert_eq!(backend.loads.load(SeqCst), n);
+        }
+        let e = m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
+        assert!(e.message.contains("3 times in the last 60 s"), "{e}");
+        assert_eq!(backend.loads.load(SeqCst), MAX_RESTARTS, "not started again");
+
+        let (mut m, backend) = fake_manager(
+            HardwareReport::default(),
+            Some("llama-server did not become ready within the load timeout"),
+        );
+        m.available_memory = || Some(1 << 30);
+        for _ in 0..=MAX_RESTARTS {
+            m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        }
+        assert_eq!(backend.loads.load(SeqCst), MAX_RESTARTS + 1, "timeouts are not exits");
+    }
+
+    #[test]
+    fn default_threads_follow_performance_then_physical_cores_within_bounds() {
+        let with = |physical_cores, performance_cores| {
+            manager(HardwareReport {
+                cpu: common_hardware::CpuInfo {
+                    physical_cores,
+                    performance_cores,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .default_threads()
+        };
+        assert_eq!(
+            with(8, Some(4)),
+            4,
+            "Apple Silicon M2: 4 performance + 4 efficiency cores"
+        );
+        assert_eq!(
+            with(24, Some(64)),
+            MAX_DEFAULT_THREADS,
+            "performance cores are bounded too"
+        );
+        assert_eq!(
+            (with(8, None), with(3, None), with(64, None), with(0, None)),
+            (8, 3, MAX_DEFAULT_THREADS, 4),
+            "no core types reported: physical cores"
         );
     }
 

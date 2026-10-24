@@ -1,11 +1,14 @@
 //! F-01-03 / F-01-08 evidence: `estimate()` against the pinned llama-server b11609. REAL engine and
-//! REAL fixtures from COMMON_HOME (default: the repo's `.common`); skips loudly when they are missing.
+//! REAL fixtures from COMMON_HOME (default: the repo's `.common`); skips loudly when they are missing,
+//! and fails instead under `COMMON_REQUIRE_FIXTURES=1` (the evidence job).
 //!
 //! Each combination starts the engine with `--load-mode none` (weights are anonymous memory, so
 //! the measurement cannot depend on page-cache state), on the device Common picks by default here
 //! (Metal; the tiny fixtures also on CPU), fills the context with a token prompt so the KV and
-//! compute buffers are actually touched, then reads the kernel's `phys_footprint_peak` for the
-//! process with `/usr/bin/footprint`. The engine's own `model buffer size` /
+//! compute buffers are actually touched, then reads the kernel's peak for the process: macOS
+//! `phys_footprint_peak` with `/usr/bin/footprint`, Linux `VmHWM` (peak resident set; with
+//! `--load-mode none` the weights are resident anonymous memory). Off macOS the pinned build is
+//! CPU only, so the GPU rows run once, on the CPU. The engine's own `model buffer size` /
 //! `llama_kv_cache: size` / `compute buffer size` lines are the per-component truth.
 //!
 //! Why the footprint and not `ps rss`: on this 8 GB machine `rss` for one identical Metal
@@ -56,12 +59,22 @@ fn common_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.common"))
 }
 
+/// A missing asset: SKIP, or a failure under `COMMON_REQUIRE_FIXTURES=1` so a green evidence run
+/// always measured.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("COMMON_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+        "COMMON_REQUIRE_FIXTURES=1: {why}"
+    );
+    eprintln!("SKIP: {why}");
+}
+
 fn blob(sha: &str) -> Option<PathBuf> {
     let p = common_home().join("models/blobs").join(format!("sha256-{sha}"));
     if p.is_file() {
         Some(p)
     } else {
-        eprintln!("SKIP: fixture {} not present", p.display());
+        skip(&format!("fixture {} not present", p.display()));
         None
     }
 }
@@ -101,6 +114,30 @@ fn footprint_peak_bytes(pid: u32) -> Option<u64> {
         _ => 1,
     };
     Some((n * unit as f64) as u64)
+}
+
+/// `VmHWM:   123456 kB` from `/proc/<pid>/status` (the kernel's peak resident set) in bytes.
+fn parse_vmhwm(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+/// The kernel's peak memory for `pid`, or None on an OS without a reader here (Windows).
+fn peak_bytes(pid: u32) -> Option<u64> {
+    if cfg!(target_os = "macos") {
+        footprint_peak_bytes(pid)
+    } else if cfg!(target_os = "linux") {
+        parse_vmhwm(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+    } else {
+        None
+    }
 }
 
 /// Same flags as common-runtime's `process::build_args`, plus `--load-mode none`.
@@ -192,7 +229,7 @@ struct Row {
     weights: f64,
     kv: f64,
     compute: f64,
-    peak_footprint: f64,
+    peak: f64,
     prompt_n: u64,
 }
 
@@ -240,8 +277,7 @@ fn measure(engine: &Path, id: &str, model: &Path, n_ctx: u32, kv: KvType, gpu: b
     let ids = vec!["100"; n_ctx as usize - 40].join(",");
     let body = format!("{{\"prompt\":[{ids}],\"n_predict\":16,\"temperature\":0,\"seed\":42,\"cache_prompt\":false}}");
     let resp = http(port, &key, "POST", "/completion", &body, Duration::from_secs(600)).unwrap_or_default();
-    let peak_footprint =
-        footprint_peak_bytes(pid).unwrap_or_else(|| panic!("{label}: /usr/bin/footprint gave no phys_footprint_peak"));
+    let peak = peak_bytes(pid).unwrap_or_else(|| panic!("{label}: no peak memory reading for pid {pid}"));
     let _ = child.kill();
     let _ = child.wait();
     let prompt_n = resp
@@ -263,7 +299,7 @@ fn measure(engine: &Path, id: &str, model: &Path, n_ctx: u32, kv: KvType, gpu: b
         weights: log_mib_sum(&text, "model buffer size"),
         kv: log_mib_sum(&text, "llama_kv_cache: size"),
         compute: log_mib_sum(&text, "compute buffer size"),
-        peak_footprint: peak_footprint as f64,
+        peak: peak as f64,
         prompt_n,
     }
 }
@@ -276,22 +312,29 @@ fn pct(est: u64, measured: f64) -> f64 {
 fn estimate_matches_engine_log_and_peak_footprint() {
     let engine = common_home().join("backends/llama.cpp/b11609/llama-server");
     if !engine.is_file() {
-        eprintln!("SKIP: pinned llama-server missing at {}", engine.display());
-        return;
+        return skip(&format!("pinned llama-server missing at {}", engine.display()));
     }
-    if !Path::new("/usr/bin/footprint").is_file() {
-        eprintln!("SKIP: /usr/bin/footprint (macOS) is needed to read the kernel's peak footprint");
-        return;
+    if cfg!(target_os = "macos") && !Path::new("/usr/bin/footprint").is_file() {
+        return skip("/usr/bin/footprint (macOS) is needed to read the kernel's peak footprint");
+    }
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return skip("no peak-memory reader for this OS (macOS footprint, Linux VmHWM)");
     }
     let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for &(id, sha, n_ctx, kv, gpu) in COMBOS {
+        // Only the macOS pin has a GPU backend (Metal); elsewhere a GPU row is its CPU twin.
+        let gpu = gpu && cfg!(target_os = "macos");
+        if !seen.insert((id, n_ctx, kv.as_llama_arg(), gpu)) {
+            continue;
+        }
         let Some(model) = blob(sha) else { continue };
         rows.push(measure(&engine, id, &model, n_ctx, kv, gpu));
     }
     eprintln!("\nF-01-03/F-01-08 evidence (llama-server b11609, --load-mode none, context filled; MiB; delta = estimate vs measured)");
     eprintln!(
         "{:<52} {:>8} {:>8} {:>7} {:>8} {:>7} {:>8} {:>7} {:>8} {:>8} {:>7}",
-        "combination", "w_est", "w_eng", "kv_est", "kv_eng", "c_est", "c_eng", "tot_est", "peakFP", "d_kv%", "d_tot%"
+        "combination", "w_est", "w_eng", "kv_est", "kv_eng", "c_est", "c_eng", "tot_est", "peak", "d_kv%", "d_tot%"
     );
     let mut failures = Vec::new();
     for r in &rows {
@@ -299,7 +342,7 @@ fn estimate_matches_engine_log_and_peak_footprint() {
             pct(r.est.weights_bytes, r.weights),
             pct(r.est.kv_cache_bytes, r.kv),
             pct(r.est.compute_buffer_bytes, r.compute),
-            pct(r.est.total_bytes, r.peak_footprint),
+            pct(r.est.total_bytes, r.peak),
         );
         eprintln!(
             "{:<52} {:>8.1} {:>8.1} {:>7.1} {:>8.1} {:>7.1} {:>8.1} {:>7.1} {:>8.1} {:>+7.1} {:>+7.1}",
@@ -311,7 +354,7 @@ fn estimate_matches_engine_log_and_peak_footprint() {
             r.est.compute_buffer_bytes as f64 / MIB,
             r.compute / MIB,
             r.est.total_bytes as f64 / MIB,
-            r.peak_footprint / MIB,
+            r.peak / MIB,
             d_kv,
             d_tot
         );
@@ -337,7 +380,7 @@ fn estimate_matches_engine_log_and_peak_footprint() {
         let _ = d_c;
         check(
             d_tot.abs() <= 15.0,
-            format!("total off by {d_tot:+.1}% of the peak footprint (F-01-03 allows 15%)"),
+            format!("total off by {d_tot:+.1}% of the measured peak (F-01-03 allows 15%)"),
         );
     }
     if rows.len() < 5 {
@@ -352,6 +395,16 @@ fn estimate_matches_engine_log_and_peak_footprint() {
         "estimate outside tolerance:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn vmhwm_parses_proc_status() {
+    let status = "Name:\tllama-server\nVmPeak:\t 2345678 kB\nVmHWM:\t  812345 kB\nVmRSS:\t  800000 kB\n";
+    assert_eq!(parse_vmhwm(status), Some(812_345 * 1024));
+    assert_eq!(parse_vmhwm("VmRSS:\t1 kB\n"), None);
+    assert_eq!(parse_vmhwm("VmHWM:\t12 MB\n"), None, "the kernel always reports kB");
+    #[cfg(target_os = "linux")]
+    assert!(peak_bytes(std::process::id()).unwrap() > 1 << 20);
 }
 
 /// The refusal path with a real GGUF header: a budget below the fixed cost is a typed
@@ -391,4 +444,35 @@ fn real_fixture_refusal_reasons() {
         check_fit(&est, est.total_bytes * 2, 0.10),
         FitVerdict::Fits { .. }
     ));
+}
+
+/// The guard itself: with `COMMON_REQUIRE_FIXTURES=1` and no assets, a fixture test FAILS rather
+/// than printing SKIP and passing; without it, the same test skips loudly. Re-runs this test binary
+/// on `real_fixture_refusal_reasons` with COMMON_HOME pointing at an empty location.
+#[test]
+fn require_fixtures_turns_a_missing_asset_into_a_failure() {
+    let empty = std::env::temp_dir().join(format!("common-no-fixtures-{}", std::process::id()));
+    let run = |require: &str| {
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "real_fixture_refusal_reasons",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("COMMON_HOME", &empty)
+            .env("COMMON_REQUIRE_FIXTURES", require)
+            .output()
+            .unwrap();
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        (o.status.success(), out)
+    };
+    let (ok, out) = run("1");
+    assert!(!ok && out.contains("COMMON_REQUIRE_FIXTURES=1: fixture"), "{out}");
+    let (ok, out) = run("0");
+    assert!(ok && out.contains("SKIP: fixture"), "{out}");
 }

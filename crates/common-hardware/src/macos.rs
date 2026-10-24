@@ -67,6 +67,11 @@ fn parse_gpu_cores(ioreg: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn available_memory() -> Option<u64> {
+    crate::cmd("/usr/bin/vm_stat", &[]).and_then(|o| parse_vm_stat(&o))
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
     use crate::{cmd, CpuInfo, HardwareReport, MemoryInfo};
     use common_core::{CommonError, HostSummary};
@@ -115,15 +120,16 @@ pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
         cpu: CpuInfo {
             model: chip,
             physical_cores: num(&m, "hw.physicalcpu")?,
+            // Its own call: Intel Macs have no perflevels, and one unknown name fails the whole sysctl.
+            performance_cores: cmd("/usr/sbin/sysctl", &["-n", "hw.perflevel0.physicalcpu"])
+                .and_then(|v| v.parse().ok()),
             logical_cores: num(&m, "hw.logicalcpu")?,
             features: features(&m),
             ..Default::default()
         },
         memory: MemoryInfo {
             total_bytes: total,
-            available_bytes: cmd("/usr/bin/vm_stat", &[])
-                .and_then(|o| parse_vm_stat(&o))
-                .unwrap_or(0),
+            available_bytes: available_memory().unwrap_or(0),
             unified: apple_silicon,
         },
         gpus,

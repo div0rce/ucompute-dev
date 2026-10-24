@@ -1,6 +1,8 @@
 //! `GET /api/jobs` (desktop UI 2.0, E3): the requests this daemon runs, sends to a paired device or
 //! serves for one, from the moment the handler starts (before admission) to the end, then the last
 //! 256 finished. In memory only; ids, counts, codes and durations, never prompt or completion text.
+//! So a daemon that dies mid-request leaves no `running` row behind: its restart lists no job of the
+//! old process (F-08-04, `tests/jobs.rs`); the caller saw its stream end.
 
 use crate::AppState;
 use axum::extract::State;

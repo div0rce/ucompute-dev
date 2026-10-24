@@ -592,7 +592,7 @@ async fn engine_state_shows_a_real_load_in_progress_on_fixture() {
         .unwrap();
     assert_eq!(
         v["engine"],
-        json!({"state": "ready", "loading_model_id": null, "loading_for_ms": null})
+        json!({"state": "ready", "loading_model_id": null, "loading_for_ms": null, "last_exit": null})
     );
     assert_eq!(
         (v["loaded"]["model_id"].as_str(), v["loaded"]["loaded_for"].as_str()),

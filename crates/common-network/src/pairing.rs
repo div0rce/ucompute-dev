@@ -368,11 +368,7 @@ pub async fn start(
 ) -> Result<(PairingSession, tokio::task::JoinHandle<Result<PeerRecord>>)> {
     let code = random_code()?;
     let secret = random_secret()?;
-    let ip: IpAddr = node
-        .config
-        .bind_addr
-        .parse()
-        .map_err(|e| CommonError::invalid(format!("network bind address: {e}")))?;
+    let ip: IpAddr = node.config.bind_ip()?.into();
     let sc = tls::server_config(&node.identity, PeerPolicy::AcceptAny, ALPN_PAIRING)?;
     let endpoint = quinn::Endpoint::server(sc, SocketAddr::new(ip, 0))?;
     let port = endpoint.local_addr()?.port();

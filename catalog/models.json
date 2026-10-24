@@ -52,7 +52,7 @@
       "quantization": "Q4_K_M",
       "chat": true,
       "redistribution": "allowed",
-      "tags": ["recommended", "chat"]
+      "tags": ["recommended", "chat", "test-suite"]
     },
     {
       "id": "qwen2.5-0.5b-instruct-q8_0",
@@ -69,7 +69,7 @@
       "quantization": "Q8_0",
       "chat": true,
       "redistribution": "allowed",
-      "tags": ["chat"]
+      "tags": ["chat", "test-suite"]
     },
     {
       "id": "qwen2.5-0.5b-instruct-q2_k",
@@ -86,7 +86,7 @@
       "quantization": "Q2_K",
       "chat": true,
       "redistribution": "allowed",
-      "tags": ["chat"]
+      "tags": ["chat", "test-suite"]
     },
     {
       "id": "qwen2.5-1.5b-instruct-q4_k_m",
@@ -103,7 +103,7 @@
       "quantization": "Q4_K_M",
       "chat": true,
       "redistribution": "allowed",
-      "tags": ["chat"]
+      "tags": ["chat", "test-suite"]
     },
     {
       "id": "smollm2-360m-instruct-q8_0",
@@ -120,7 +120,7 @@
       "quantization": "Q8_0",
       "chat": true,
       "redistribution": "allowed",
-      "tags": ["chat"]
+      "tags": ["chat", "test-suite"]
     },
     {
       "id": "nomic-embed-text-v1.5-q8_0",

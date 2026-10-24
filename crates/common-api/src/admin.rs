@@ -77,7 +77,8 @@ pub async fn hardware() -> std::result::Result<axum::Json<common_hardware::Hardw
     Ok(axum::Json(report))
 }
 
-/// Never waits on a load (E2): the engine is read from `ModelManager::snapshot`.
+/// Never waits on a load (E2): the engine is read from `ModelManager::snapshot`, with the last
+/// engine that exited on its own (`last_exit`, null when none has since the daemon started).
 pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
     let e = st.manager.snapshot();
     let state = match (&e.loading, &e.loaded) {
@@ -91,7 +92,12 @@ pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
     axum::Json(json!({
         "version": common_core::VERSION,
         "uptime_seconds": st.started.elapsed().as_secs(),
-        "engine": { "state": state, "loading_model_id": loading_id, "loading_for_ms": loading_ms },
+        "engine": {
+            "state": state,
+            "loading_model_id": loading_id,
+            "loading_for_ms": loading_ms,
+            "last_exit": e.last_exit,
+        },
         "loaded": e.loaded,
         "queue": {
             "inflight": st.admission.inflight(),
@@ -105,15 +111,26 @@ pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
 /// Store manifests plus catalog entries not downloaded yet, each with a fit estimate for this
 /// device (GGUF-based when the blob is present, file-size-only otherwise).
 pub async fn models(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let loaded = st.manager.snapshot().loaded.map(|v| v.info.model_id);
-    let list = tokio::task::spawn_blocking(move || model_list(&st, loaded.as_deref()))
+    let loaded = st.manager.snapshot().loaded.map(|v| v.info);
+    let list = tokio::task::spawn_blocking(move || model_list(&st, loaded.as_ref()))
         .await
         .map_err(|e| CommonError::internal(format!("listing task failed: {e}")))??;
     Ok(axum::Json(json!({"models": list})))
 }
 
-fn model_list(st: &AppState, loaded: Option<&str>) -> Result<Vec<Value>> {
-    let available = st.manager.hardware.memory.available_bytes;
+fn model_list(st: &AppState, loaded: Option<&common_runtime::LoadedModelInfo>) -> Result<Vec<Value>> {
+    // A fresh sample (F-01-03): the probe in `hardware` is from daemon start. It counts the loaded
+    // engine as used, but a load replaces that engine and decides on a sample taken after it stopped
+    // (`ModelManager::ensure_loaded_for`), so its resident size is added back.
+    // ponytail: RSS overstates what stopping the engine frees (M2, qwen2.5-1.5b on Metal: sample 1146 MiB
+    // + RSS 1258 MiB, 2070 MiB free after the stop), so a borderline model can show as fitting and then
+    // be refused after the old engine stopped; nothing is added on Windows (no RSS there).
+    let engine = loaded
+        .and_then(|i| i.pid)
+        .and_then(common_runtime::llamacpp::process::rss_bytes)
+        .unwrap_or(0);
+    let available = st.manager.available_memory_now().saturating_add(engine);
+    let loaded = loaded.map(|i| i.model_id.as_str());
     let mut out = Vec::new();
     let manifests = st.store.list()?;
     for m in &manifests {

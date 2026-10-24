@@ -31,7 +31,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use common_core::{CommonError, ErrorCode, Paths, Result};
 use common_identity::{utc_now, DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
-use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, MAX_RECORD_AGE_SECS};
+use common_network::discovery::{Advertiser, Browser, DiscoveredPeer, UnreachablePeer, LISTED_SECS};
 use common_network::health::PeerHealth;
 use common_network::pairing;
 use common_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
@@ -277,9 +277,14 @@ impl Net {
     }
 
     pub fn discovered(&self) -> Vec<DiscoveredPeer> {
+        self.browser.as_ref().map_or_else(Vec::new, |b| b.peers(LISTED_SECS))
+    }
+
+    /// Devices mDNS sees at no address this device can dial ("discovered, no reachable address").
+    fn unreachable(&self) -> Vec<UnreachablePeer> {
         self.browser
             .as_ref()
-            .map_or_else(Vec::new, |b| b.peers(MAX_RECORD_AGE_SECS))
+            .map_or_else(Vec::new, |b| b.unreachable(LISTED_SECS))
     }
 
     fn mdns_active(&self) -> bool {
@@ -568,7 +573,7 @@ impl AppState {
                     // registered meanwhile, or the survivor of a crossed dial): `addr` unproven.
                     let dialled = conn.outbound && same_addr(conn.remote_addr, addr);
                     self.touch(id, dialled.then_some(addr));
-                    self.attach(node, conn.clone());
+                    self.attach(conn.clone());
                     return Ok(conn);
                 }
                 Err(e) if matches!(e.code, ErrorCode::PeerHeld | ErrorCode::PeerRevoked) => return Err(e),
@@ -610,7 +615,7 @@ impl AppState {
 
     /// Serve the peer's requests (default deny per request, this daemon's quotas and engine slots)
     /// and run the control loop; once per connection, however often it is handed out.
-    fn attach(self: &Arc<Self>, node: &Arc<Node>, conn: Arc<PeerConnection>) {
+    fn attach(self: &Arc<Self>, conn: Arc<PeerConnection>) {
         let id = conn.conn.stable_id();
         if !lock(&self.attached).insert(id) {
             return;
@@ -630,7 +635,7 @@ impl AppState {
             }
             lock(&st.attached).remove(&id);
         });
-        tokio::spawn(control_loop(self.clone(), node.clone(), conn));
+        tokio::spawn(control_loop(self.clone(), conn));
     }
 
     /// The devices that share a group with `target` here, except `target` and this device: who
@@ -832,7 +837,7 @@ async fn accept_loop(st: Arc<AppState>, node: Arc<Node>) {
         // The source IP is authenticated: QUIC Retry validated it and the TLS key is pinned.
         let pinned = st.peers.get(&conn.peer_id).ok().flatten().and_then(|p| p.last_addr);
         st.touch(conn.peer_id, inbound_hint(conn.remote_addr, pinned.as_deref()));
-        st.attach(&node, conn);
+        st.attach(conn);
     }
 }
 
@@ -1039,7 +1044,7 @@ impl RevocationFanout {
 /// sending records that fail the checks leaves nothing behind. The held-check and the apply run
 /// under `peer_writes`, so two connections delivering the same record at once write one
 /// `peer_revoked` line.
-async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revocation) {
+async fn apply_peer_revocation(st: &AppState, from: PeerId, r: Revocation) {
     if r.peer_id == st.identity.id {
         return;
     }
@@ -1059,10 +1064,16 @@ async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revo
             return;
         }
     }
-    node.disconnect(&r.peer_id, "revoked").await;
     // On the running Node under the `net` lock, not on `node`: a restart (Sharing change) may have
-    // replaced it and carried the hold over before the revocation was stored.
-    let _ = st.on_node(|n| n.release(&r.peer_id)).await;
+    // replaced it, carried the hold over and let the device connect again before the revocation
+    // was stored. A replaced `node` was shut down (all its connections closed) under that lock.
+    {
+        let net = st.net.lock().await;
+        if let Some(n) = &net.node {
+            n.disconnect(&r.peer_id, "revoked").await;
+            n.release(&r.peer_id);
+        }
+    }
     st.audit(
         "peer_revoked",
         Some(&r.peer_id),
@@ -1073,12 +1084,12 @@ async fn apply_peer_revocation(st: &AppState, node: &Node, from: PeerId, r: Revo
 
 /// A control message from `peer`: a revocation is applied ([`apply_peer_revocation`]); `Status`
 /// and unknown messages are ignored in this minor.
-async fn control_received(st: &AppState, node: &Node, peer: PeerId, msg: ControlMessage) {
+async fn control_received(st: &AppState, peer: PeerId, msg: ControlMessage) {
     let Some(Body::Revocation(m)) = msg.body else {
         return;
     };
     match revocation_from_msg(m) {
-        Ok(r) => apply_peer_revocation(st, node, peer, r).await,
+        Ok(r) => apply_peer_revocation(st, peer, r).await,
         Err(e) => {
             tracing::info!(peer = %peer.short_label(), code = %e.code, "malformed revocation ignored");
         }
@@ -1100,10 +1111,10 @@ impl HeldControl for HeldRevocations {
         })
     }
 
-    fn received<'a>(&'a self, node: &'a Node, peer: PeerId, msg: ControlMessage) -> BoxFuture<'a, ()> {
+    fn received<'a>(&'a self, _node: &'a Node, peer: PeerId, msg: ControlMessage) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(st) = self.0.upgrade() {
-                control_received(&st, node, peer, msg).await;
+                control_received(&st, peer, msg).await;
             }
         })
     }
@@ -1113,7 +1124,7 @@ impl HeldControl for HeldRevocations {
 /// store holds (ADR-0003 D7 `revocations_since` on every reconnect), then new ones (local or applied
 /// from another peer), each only where [`RevocationFanout::due`] says, and applies the peer's
 /// ([`control_received`]).
-async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnection>) {
+async fn control_loop(st: Arc<AppState>, conn: Arc<PeerConnection>) {
     let peer = conn.peer_id;
     let mut rx = st.revocations.subscribe();
     let mut guard = conn.control.lock().await;
@@ -1139,7 +1150,7 @@ async fn control_loop(st: Arc<AppState>, node: Arc<Node>, conn: Arc<PeerConnecti
             }
         };
         match frame {
-            Ok(Some(msg)) => control_received(&st, &node, peer, msg).await,
+            Ok(Some(msg)) => control_received(&st, peer, msg).await,
             Ok(None) | Err(_) => return,
         }
     }
@@ -1392,16 +1403,18 @@ fn capabilities_json(pc: &PeerConnection, ids: &HashMap<String, String>) -> Valu
 
 /// Pinned peers (with `connected`, `health`, `last_error`, `held`, their groups and, while
 /// connected, `capabilities` and `connection`), peers mDNS currently sees (never this device;
-/// `addrs` best first; `trusted` only when pinned here, never a trust decision by itself) and the
-/// revocations this store holds. `health` is `Node::health` (F-02-05): `connected`, `unhealthy`,
+/// `addrs` best first; `trusted` only when pinned here, never a trust decision by itself), those it
+/// sees at no address this device can dial (`unreachable`: `id`, `reason` `link_local_only` or
+/// `other_family`, `trusted`, `seen_utc`; never dialled from discovery) and the revocations this
+/// store holds. `health` is `Node::health` (F-02-05): `connected`, `unhealthy`,
 /// `reconnecting` or `disconnected`; `disconnected` too while networking is off or before the first
 /// connection to that device. `last_error` is `Node::dial_failure`: the latest failed dial to it
 /// (address, code, message, hint, time) since its last connection, `null` when there is none or
 /// networking is off. `held`: disconnected here by the user (E5) until Connect or a restart.
 pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<axum::Json<Value>, ApiError> {
-    let (node, discovered) = {
+    let (node, discovered, unreachable) = {
         let net = st.net.lock().await;
-        (net.node.clone(), net.discovered())
+        (net.node.clone(), net.discovered(), net.unreachable())
     };
     // Per peer, the connection to use comes first in `connections()`.
     let mut conns: HashMap<PeerId, Arc<PeerConnection>> = HashMap::new();
@@ -1454,6 +1467,7 @@ pub async fn peers_get(State(st): State<Arc<AppState>>) -> std::result::Result<a
     Ok(axum::Json(json!({
         "peers": peers,
         "discovered": discovered,
+        "unreachable": unreachable,
         "revocations": st.peers.revocations_since(0)?,
     })))
 }
@@ -1595,11 +1609,7 @@ pub async fn pair_start(
             status: StatusCode::CONFLICT,
         });
     }
-    let bind: IpAddr = node
-        .config
-        .bind_addr
-        .parse()
-        .map_err(|e| CommonError::invalid(format!("network bind address: {e}")))?;
+    let bind: IpAddr = node.config.bind_ip()?.into();
     let (session, handle) = pairing::start(node, &name).await?;
     let bound = SocketAddr::new(bind, session.port);
     let pair_addr = routable(bound);
@@ -2041,17 +2051,17 @@ mod tests {
                 signature: hex::encode([7u8; 64]),
                 ..signed(&c, seq)
             };
-            control_received(&st, &node, c.id, revocation_msg(&forged)).await;
-            control_received(&st, &node, c.id, revocation_msg(&signed(&stranger, seq))).await;
+            control_received(&st, c.id, revocation_msg(&forged)).await;
+            control_received(&st, c.id, revocation_msg(&signed(&stranger, seq))).await;
         }
         assert_eq!(lock(&st.fanout).0.len(), 0, "nothing rejected is kept");
         assert!(st.peers.is_pinned(&b.id) && node.is_held(&b.id));
 
         let r = signed(&c, 1);
-        control_received(&st, &node, c.id, revocation_msg(&r)).await;
+        control_received(&st, c.id, revocation_msg(&r)).await;
         assert!(st.peers.is_revoked(&b.id));
         assert!(!node.is_held(&b.id), "the revocation ended the hold");
-        control_received(&st, &node, b.id, revocation_msg(&r)).await;
+        control_received(&st, b.id, revocation_msg(&r)).await;
         assert_eq!(lock(&st.fanout).0.len(), 1);
         assert!(!lock(&st.fanout).due(&r, &c.id, || true), "c sent it here");
         st.stop_network().await;
@@ -2088,10 +2098,61 @@ mod tests {
             signature: hex::encode(c.sign(&common_identity::revocation_message(1, &b.id, &at_utc))),
             at_utc,
         };
-        control_received(&st, &old, c.id, revocation_msg(&r)).await;
+        control_received(&st, c.id, revocation_msg(&r)).await;
         assert!(st.peers.is_revoked(&b.id));
         assert!(!running.is_held(&b.id), "the running Node no longer holds it");
         st.stop_network().await;
+    }
+
+    /// Round-5 residual: a peer's revocation that arrives on a Node a restart (Sharing change)
+    /// already replaced closes the revoked device's connection on the running Node (under the
+    /// `net` lock), not only on the Node it arrived on. SINGLE-HOST (loopback, no mDNS).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_revocation_on_a_replaced_node_closes_the_connection_on_the_running_one_single_host() {
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, b) = (networked_state(da.path()).await, networked_state(db.path()).await);
+        let c = DeviceIdentity::generate().unwrap();
+        let bid = b.identity.id;
+        for id in [bid, c.id] {
+            pin_id(&a, id);
+        }
+        pin_id(&b, a.identity.id);
+        a.peers
+            .upsert_group(Group {
+                name: "home".into(),
+                members: vec![bid, c.id],
+                policy: Default::default(),
+            })
+            .unwrap();
+        let old = a.node().await.unwrap();
+        a.apply_network().await.unwrap();
+        let running = a.node().await.unwrap();
+        assert!(!Arc::ptr_eq(&old, &running));
+        let b_node = b.node().await.unwrap();
+        b.peer_connection_via(&b_node, a.identity.id, Some(running.local_addr().unwrap()))
+            .await
+            .unwrap();
+        let t0 = Instant::now();
+        while !running.connections().iter().any(|x| x.peer_id == bid) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "B's connection registered on A");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let at_utc = utc_now();
+        let r = Revocation {
+            seq: 1,
+            peer_id: bid,
+            revoked_by: c.id,
+            signature: hex::encode(c.sign(&common_identity::revocation_message(1, &bid, &at_utc))),
+            at_utc,
+        };
+        control_received(&a, c.id, revocation_msg(&r)).await;
+        assert!(a.peers.is_revoked(&bid));
+        assert!(
+            running.connections().iter().all(|x| x.peer_id != bid),
+            "the running Node closed the revoked device's connection"
+        );
+        a.stop_network().await;
+        b.stop_network().await;
     }
 
     /// E5: `POST /api/peers/{id}/disconnect` checks the pairing and holds under one lock: a device

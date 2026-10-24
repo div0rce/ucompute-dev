@@ -124,6 +124,19 @@ pub(crate) fn system32(name: &str) -> std::path::PathBuf {
     std::path::Path::new(&root).join("System32").join(name)
 }
 
+/// `ullAvailPhys` from `GlobalMemoryStatusEx`: free plus standby pages, which Windows hands out
+/// without paging. `FreePhysicalMemory` (the CIM figure) leaves the standby list out.
+#[cfg(target_os = "windows")]
+pub(crate) fn available_memory() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: a zeroed POD struct with dwLength set, as the API requires.
+    unsafe {
+        let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        (GlobalMemoryStatusEx(&mut m) != 0).then_some(m.ullAvailPhys)
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
     use crate::{cmd, HardwareReport};
@@ -143,7 +156,11 @@ pub(crate) fn probe() -> common_core::Result<crate::HardwareReport> {
             ..Default::default()
         },
         cpu: p.cpu,
-        memory: p.memory,
+        // The load-time figure, so what the app shows and what a load is judged against agree.
+        memory: MemoryInfo {
+            available_bytes: available_memory().unwrap_or(p.memory.available_bytes),
+            ..p.memory
+        },
         gpus: p.gpus,
         ..Default::default()
     })

@@ -44,7 +44,7 @@ pub struct RunArgs {
     /// Context length (capped to the model's trained context with a reason)
     #[arg(long)]
     pub ctx: Option<u32>,
-    /// Engine threads (default: the backend's choice; the manifest records what ran)
+    /// Engine threads (default: the performance core count on Apple Silicon, else the physical core count, at most 16; the manifest records what ran)
     #[arg(long)]
     pub threads: Option<u32>,
     #[arg(long, default_value_t = 0.7)]

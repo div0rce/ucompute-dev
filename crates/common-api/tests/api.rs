@@ -8,7 +8,7 @@ use common::*;
 use common_api::{bind_addr, serve, serve_on, ApiConfig, ROUTES, SHUTDOWN_GRACE};
 use common_core::ErrorCode;
 use common_hardware::HardwareReport;
-use common_runtime::manager::LoadOptions;
+use common_runtime::manager::{LoadOptions, ModelManager};
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -434,6 +434,110 @@ async fn client_disconnect_cancels_generation_with_fake_model() {
         "permit not released after disconnect"
     );
     eprintln!("fake disconnect: cancelled after {:?}", t.elapsed());
+    srv.stop().await;
+}
+
+/// Documented property names of `schema` (an inline object or a `#/components/schemas/` ref).
+fn documented(doc: &Value, schema: &Value) -> BTreeSet<String> {
+    let schema = match schema["$ref"].as_str() {
+        Some(r) => &doc["components"]["schemas"][r.trim_start_matches("#/components/schemas/")],
+        None => schema,
+    };
+    schema["properties"].as_object().unwrap().keys().cloned().collect()
+}
+
+fn keys(v: &Value) -> BTreeSet<String> {
+    v.as_object().unwrap().keys().cloned().collect()
+}
+
+/// `/api/models` judges fit against a fresh memory sample (F-01-03), not the probe from daemon
+/// start; `/api/status` names the last engine that exited on its own (`engine.last_exit`, F-08-04),
+/// and its keys, like those of `/api/peers`, are the ones openapi.json documents. FAKE engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_memory_last_exit_and_documented_keys_fake() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = common_core::Paths::at(dir.path());
+    paths.ensure_dirs().unwrap();
+    let backend = common_runtime::backend_by_name("llama.cpp", engine_dir(&paths), paths.clone()).unwrap();
+    // The startup probe (HardwareReport::default) saw no free memory; a fresh sample sees 1 PiB.
+    let store = common_artifacts::Store::new(paths.clone());
+    let mut manager = ModelManager::new(paths.clone(), store, backend, HardwareReport::default());
+    manager.available_memory = || Some(1 << 50);
+    let srv = Server::start(app_with(cfg(), paths, std::sync::Arc::new(manager))).await;
+    let c = client();
+    let get = |path: &str| {
+        let r = c.get(srv.url(path)).send();
+        async move { r.await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let models = get("/api/models").await;
+    for m in models["models"].as_array().unwrap() {
+        assert_eq!(m["fit"]["verdict"], "fits", "{m}");
+    }
+
+    let doc: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let schema =
+        |path: &str| doc["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"].clone();
+    let peers = get("/api/peers").await;
+    assert_eq!(keys(&peers), documented(&doc, &schema("/api/peers")));
+    let status_schema = schema("/api/status");
+    let v = get("/api/status").await;
+    assert_eq!(keys(&v), documented(&doc, &status_schema));
+    assert_eq!(
+        keys(&v["engine"]),
+        documented(&doc, &status_schema["properties"]["engine"])
+    );
+    assert!(v["engine"]["last_exit"].is_null(), "no engine has exited");
+
+    let model = FakeModel::new(1, Duration::ZERO);
+    seed_slot(&srv.state, MODEL_ID, model.clone()).await;
+    model.exit("signal: 9 (SIGKILL)");
+    let v = get("/api/status").await;
+    assert_eq!(v["engine"]["state"], "idle", "{v}");
+    assert!(v["loaded"].is_null(), "the slot was freed");
+    let exit = &v["engine"]["last_exit"];
+    assert_eq!(
+        (exit["model_id"].as_str(), exit["reason"].as_str()),
+        (Some(MODEL_ID), Some("signal: 9 (SIGKILL)"))
+    );
+    assert_eq!(
+        keys(exit),
+        documented(&doc, &doc["components"]["schemas"]["EngineExit"])
+    );
+    srv.stop().await;
+}
+
+/// The fit `/api/models` shows counts the loaded engine's memory as free: any load replaces that
+/// engine and is planned on memory sampled after it stopped. FAKE engine whose "process" is this
+/// test binary, so its resident size is real.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn model_fit_counts_the_engine_a_load_would_replace_as_free_fake() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = common_core::Paths::at(dir.path());
+    paths.ensure_dirs().unwrap();
+    let backend = common_runtime::backend_by_name("llama.cpp", engine_dir(&paths), paths.clone()).unwrap();
+    let store = common_artifacts::Store::new(paths.clone());
+    let mut manager = ModelManager::new(paths.clone(), store, backend, HardwareReport::default());
+    manager.available_memory = || Some(0); // nothing free beside the engine
+    let srv = Server::start(app_with(cfg(), paths, std::sync::Arc::new(manager))).await;
+    let available = || {
+        let r = client().get(srv.url("/api/models")).send();
+        async move {
+            let v: Value = r.await.unwrap().json().await.unwrap();
+            let judged = |m: &Value| match m["fit"]["available_bytes"].as_u64() {
+                Some(a) => a,
+                None => m["fit"]["headroom_bytes"].as_u64().unwrap() + m["estimate"]["total_bytes"].as_u64().unwrap(),
+            };
+            v["models"].as_array().unwrap().iter().map(judged).min().unwrap()
+        }
+    };
+    assert_eq!(available().await, 0, "no engine loaded: only the sample");
+    seed_slot(&srv.state, MODEL_ID, FakeModel::with_pid(std::process::id())).await;
+    let freed = available().await;
+    assert!(
+        freed > 1 << 20,
+        "the loaded engine's resident size counts as free: {freed}"
+    );
     srv.stop().await;
 }
 
@@ -964,7 +1068,7 @@ async fn status_and_model_lists_answer_while_the_slot_is_held_fake() {
     let v = get("/api/status").await;
     assert_eq!(
         v["engine"],
-        json!({"state": "idle", "loading_model_id": null, "loading_for_ms": null})
+        json!({"state": "idle", "loading_model_id": null, "loading_for_ms": null, "last_exit": null})
     );
     assert!(v["loaded"].is_null(), "{v}");
 

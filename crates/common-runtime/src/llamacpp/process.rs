@@ -212,6 +212,10 @@ fn end_with_this_process(child: &Child) {
     }
 }
 
+/// In the error of an engine that exited during its load; the manager counts these toward its
+/// restart bound.
+pub const EXITED_BEFORE_READY: &str = "before becoming ready";
+
 /// Poll `/health` every 100 ms until `{"status":"ok"}`. Exit before readiness → BackendFailed or
 /// ModelFileInvalid carrying the scrubbed log tail; `deadline` passed → Timeout. The caller stops
 /// the child on Err.
@@ -229,7 +233,7 @@ pub async fn wait_ready(
             let tail = logparse::scrub(&logparse::tail(&read_log(log_path), 40), api_key);
             return Err(CommonError::new(
                 logparse::exit_error_code(&tail),
-                format!("llama-server exited with {status} before becoming ready:\n{tail}"),
+                format!("llama-server exited with {status} {EXITED_BEFORE_READY}:\n{tail}"),
             ));
         }
         if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(1)).send().await {
