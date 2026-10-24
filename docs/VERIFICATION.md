@@ -574,7 +574,7 @@ Host: this Mac (M2, 8 GB, macOS 26.2) unless stated; env `COMMON_MDNS=0 COMMON_H
 - **Security (Gate A, first cargo-deny run, at 45af6ee):** six RustSec advisories in the TLS stack (rustls 0.23.45: RUSTSEC-2026-0346/0347/0348/0349; rustls-webpki 0.103.15: 0382; webpki-roots 1.0.9: 0381), fixed by semver-compatible updates in b555109; four unmaintained notices in Linux-desktop-only crates recorded in `deny.toml` with reasons. gitleaks over the history: four synthetic test fixtures, recorded in `.gitleaksignore` (21d3dd4); clean.
 - **Verifiers:** no unresolved Linux item except the determined floods; C2 blocking items fixed before commit (MoE/FFN flags reserved; the log assertion moved after generation); open: configuration C (CPU-only head) not built; `LoadedModelInfo.split` echoes the plan (equal whenever the load succeeds); H does not prove TCP at `-lv 4` (relies on `GGML_RPC_NO_RDMA=1`); reaper residuals (a non-common parent that moves the engine to a new process group; the snapshot-to-kill window).
 
-## WP-08 promotion record: UCompute 0.1.0 private-alpha candidate 1, macOS on Apple Silicon (2026-10-24) — AWAITING OWNER APPROVAL
+## WP-08 promotion record: UCompute 0.1.0 private-alpha candidate 1, macOS on Apple Silicon (2026-10-24) — ARTIFACT APPROVED (D-025), COHORT NOT NAMED
 
 Spec section 29.5 row "Downloads and releases" and section 31: a private-alpha development build may go to testers only after this record exists **and the owner approves it** (`docs/DECISIONS.md`). Neither the approval nor the cohort exists yet; nothing has been distributed.
 
