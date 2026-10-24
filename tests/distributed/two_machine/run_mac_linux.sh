@@ -5,9 +5,8 @@
 #   LINUX_HOST=<ip> LINUX_USER=<user> OUT=<evidence dir> [NO_MDNS=1] [STEPS=...] [MESH=0] [HOLD=0] \
 #     [CROSS_HOLD=1 [BIN=<common binary>]] tests/distributed/two_machine/run_mac_linux.sh
 #
-# Roles are swapped against run_mac_windows.sh on purpose: the engine catalog pins llama.cpp for macOS and Windows
-# only (Linux is PLANNED, B-004), so the Linux daemon serves no model. With the Mac as B, every A -> B request runs
-# on the Mac; the mesh driver's B -> A direction cannot run and FAILs with the daemon's own error (expected).
+# Roles are swapped against run_mac_windows.sh: the Linux daemon is A, the Mac's app B. Since ce54da1 the catalog pins
+# the llama.cpp CPU build for Linux (D-024), so both directions run (B -> A on the Linux CPU engine).
 # A's API (127.0.0.1:8192 on the Linux host) is reached through an SSH tunnel on 18304, closed when the run ends.
 # A's daemon runs as target/release/common in ~/src/common (matched by that start of its command line, never by
 # the ssh shell whose command text contains it) with COMMON_HOME=~/.common-acceptance (its own identity),
@@ -21,6 +20,7 @@ mkdir -p "$OUT"
 export MAC_HOST="$LINUX_HOST" MAC_USER="$LINUX_USER" MAC_KEY="$KEY"
 H=scripts/mac-host.sh  # also drives a Linux host (ssh, a login shell's PATH plus ~/.cargo/bin)
 A=http://127.0.0.1:18304 B=http://127.0.0.1:8192
+# shellcheck disable=SC2016  # expanded on the Linux host
 A_START='cd ~/src/common && test -x target/release/common && { pgrep -f "^target/release/common serve" >/dev/null ||
   { COMMON_HOME=$HOME/.common-acceptance nohup target/release/common serve --network --serve-peers -v \
     >>$HOME/.common-acceptance.log 2>&1 </dev/null & sleep 1; }; } && pgrep -f "^target/release/common serve"'
@@ -44,6 +44,7 @@ PROCS="pgrep -f 'MacOS/common serve --host 127.0.0.1 --port 8192|Application Sup
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
+# shellcheck disable=SC2329  # run by the EXIT trap
 cleanup() {
   rc=$?
   set +e
