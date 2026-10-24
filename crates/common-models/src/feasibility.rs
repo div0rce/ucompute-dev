@@ -23,15 +23,22 @@ pub mod calibration {
     /// Tokenizer tables per vocabulary entry: BPE models (`gpt2`-style: qwen2, smollm2) keep token
     /// and merge maps, ~1.1 KiB each; SentencePiece (`llama`) ~320 B. Qwen2.5's 151,936 tokens
     /// are 160 MiB, more than its KV cache at 4096.
-    pub const TOKENIZER_BYTES_PER_TOKEN_BPE: u64 = 1100;
+    ///
+    /// Linux CPU measures far less against VmHWM (llama.cpp b11609 Ubuntu CPU build on sentinel,
+    /// 2026-10-24): the whole overhead was 28 MiB for stories15M and 72–76 MiB for every qwen2.5 row,
+    /// so the BPE rate there is 390 B (with the 20 MiB baseline below, all six measured rows land
+    /// 1–3% above the peak). ponytail: Windows is unmeasured and keeps the macOS figures (larger, so
+    /// safe); measure it on the laptop and add its own row.
+    pub const TOKENIZER_BYTES_PER_TOKEN_BPE: u64 = if cfg!(target_os = "linux") { 390 } else { 1100 };
     pub const TOKENIZER_BYTES_PER_TOKEN_SPM: u64 = 320;
     /// Fixed process baseline without a vocabulary (dylibs, Metal device, server): 45–48 MiB
     /// measured with stories260K (512 tokens) on both devices.
     pub const OVERHEAD_GPU_BYTES: u64 = 46 * 1024 * 1024;
-    /// Same baseline on CPU. ponytail: on Apple Silicon the CPU path also repacks Q4_0/Q8_0/Q4_K
-    /// matmul weights while loading (+44 MiB footprint on qwen2.5-0.5b, more with mmap); upgrade
-    /// by summing repackable 2-D tensors from `meta.tensors` when a CPU-only plan is made.
-    pub const OVERHEAD_CPU_BYTES: u64 = 46 * 1024 * 1024;
+    /// Same baseline on CPU (20 MiB on Linux, from the rows above). ponytail: on Apple Silicon the CPU
+    /// path also repacks Q4_0/Q8_0/Q4_K matmul weights while loading (+44 MiB footprint on
+    /// qwen2.5-0.5b, more with mmap); upgrade by summing repackable 2-D tensors from `meta.tensors`
+    /// when a CPU-only plan is made.
+    pub const OVERHEAD_CPU_BYTES: u64 = if cfg!(target_os = "linux") { 20 } else { 46 } * 1024 * 1024;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -184,17 +191,23 @@ mod tests {
         // ubatch is capped at the requested 128 tokens: 128 x (18 x 768 ff + 4 x 256 cells)
         assert_eq!(e.compute_buffer_bytes, 128 * (18 * 768 + 4 * 256));
         // baseline plus 300 SentencePiece tokens; an unknown or BPE tokenizer costs the BPE rate
-        assert_eq!(e.overhead_bytes, (46 << 20) + 300 * 320);
+        // (Linux CPU is calibrated on its own measurements: 20 MiB and 390 B per BPE token)
+        let (base, bpe_rate) = if cfg!(target_os = "linux") {
+            (20 << 20, 390)
+        } else {
+            (46 << 20, 1100)
+        };
+        assert_eq!(e.overhead_bytes, base + 300 * 320);
         let mut bpe = m.clone();
         bpe.tokenizer_model = Some("gpt2".into());
         assert_eq!(
             estimate(&bpe, file_size, 128, KvType::F16).overhead_bytes,
-            (46 << 20) + 300 * 1100
+            base + 300 * bpe_rate
         );
         bpe.tokenizer_model = None;
         assert_eq!(
             estimate(&bpe, file_size, 128, KvType::F16).overhead_bytes,
-            (46 << 20) + 300 * 1100
+            base + 300 * bpe_rate
         );
         assert_eq!(
             e.total_bytes,
