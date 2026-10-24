@@ -409,9 +409,8 @@ fn sigint_with_a_stuck_engine_kills_it_after_the_grace_and_exits_130() {
     signal_mid_generation("-INT", true);
 }
 
-/// `common serve` on a free port with {MODEL} loaded, and its engine's pid; `None` after a skip.
-#[cfg(unix)]
 /// A 200 from this port's `/health` (a raw HTTP/1.1 request; any other listener fails it).
+#[cfg(unix)]
 fn health_ok(port: u16) -> bool {
     use std::io::Write;
     let Ok(mut c) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
@@ -430,6 +429,8 @@ fn health_ok(port: u16) -> bool {
     c.read_to_string(&mut resp).is_ok() && resp.starts_with("HTTP/1.1 200") && resp.contains("\"status\":\"ok\"")
 }
 
+/// `common serve` on a free port with {MODEL} loaded, and its engine's pid; `None` after a skip.
+#[cfg(unix)]
 fn serve_with_engine() -> Option<(Reaped, u32)> {
     use std::io::Write;
     use std::net::TcpStream;
