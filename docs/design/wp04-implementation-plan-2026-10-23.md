@@ -539,6 +539,7 @@ Pass for each case:
 - `state.py` restore passes on both hosts, and the installed app is restarted.
 
 ### Evidence layout
+- **Pre-registered predictions (lab ae88d0b, `p1-predictions/PREDICTIONS.md`, committed before any P1 run):** config P, 64 greedy tokens: R1a (qwen 0.5B q8, k=12) TPOT ≈ 37 ms with the measured Metal ramp-down (planner 27.6 ms at 100 Mbit/s; local 8.8 ms), R1b (qwen 1.5B q4_k_m, k=14) ≈ 55 ms (planner 40.2 ms; local 15.2 ms); tunnel payload per decode token R1a 14,150 B up / 3,592 B down, R1b 21,830 B / 6,152 B, exactly one synchronous turn per token. Scoring: bytes ±10%, turns 1.00 ± 0.05, TPOT within [0.75 × planner, 1.25 × ramp], TTFT ±25% once P1's prompt token counts are fixed (send them to the lab first). P1's evidence must therefore export per-token tunnel byte counters, synchronous turns, TPOT and TTFT. The planner rejects both splits as slower than local: the run demonstrates genuine split execution, not a speedup, and claims none.
 ```
 docs/evidence/pool-single-host-<date>.md            # S1-M and S1-L, labelled SINGLE-HOST
 docs/evidence/pool-two-machine-<date>.md             # P1 narrative: hosts table, commit, commands, step results, limits, claim boundary
