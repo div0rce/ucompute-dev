@@ -52,8 +52,8 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 - Every split and RPC flag is reserved, so `extra_args` cannot set any of them.
 - Configuration **P**: `--device RPC0,MTL0 --tensor-split <exact midpoints> --split-mode layer -ngl 999 --fit off`. R holds blocks [0,k); H holds [k,n) plus the output layer, so no logits row crosses the link.
 - Configuration **C** (same backend, ggml-cpu on both stages): `--device RPC0 -ngl (n+1−k)`. R holds [k,n) plus output, and one logits row crosses per token.
-- `GGML_RPC_NO_RDMA=1` is set, and for a split load H's llama-server also gets `GGML_RPC_DEBUG=1` and `-lv 5` (the engine environment scrub sets them explicitly): the layer assignment and the handshake transport lines exist only at that level (R0).
-- The load fails unless the log shows `transport: TCP` and a layer-to-device assignment equal to the plan.
+- `GGML_RPC_NO_RDMA=1` is set on both engines (the environment scrub sets it explicitly), so RPC uses TCP. The engines stay at Common's `-lv 4`: at `-lv 5` llama-server's `launch_slot_` debug line logs each request's prompt and the log carries reply text (lab rpc-dataflow, b11609, 2026-10-24; 0 hits at `-lv 4`), so the debug-level proof is never used in production. *(Amended 2026-10-24: the first text set `GGML_RPC_DEBUG=1` and `-lv 5` on H for the layer and transport lines of R0.)*
+- The load fails unless the info-level log proves the plan: `llamacpp::split::check_buffers` (1fb589e, from the lab's d4f9516) requires the devices of the `using device` lines in `--device` order equal to the plan, and each device's KV share equal to its planned block count (RPC buffers attributed by endpoint, because b11609 labels every RPC buffer `RPC0[…]`); the output layer follows the last stage by llama.cpp's rule, shown by the mapping's 20,000-partition test. `check_proof` (the `-lv 5` + `GGML_RPC_DEBUG=1` per-layer and transport proof) is kept for SINGLE-HOST diagnosis only.
 - A split never falls back to CPU or to local. The response reports the placement as parsed from the log.
 
 ### D3 Stage host (R)
