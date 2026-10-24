@@ -1,0 +1,90 @@
+{
+ "label": "SINGLE-HOST",
+ "tarball": "common-0.1.0-linux-x86_64.tar.gz",
+ "os": "Ubuntu 26.04 LTS",
+ "kernel": "Linux 7.0.0-38-generic x86_64",
+ "result": "ALL PASS",
+ "checks": [
+  {
+   "check": "SHA256SUMS verifies",
+   "result": "PASS",
+   "output": "common: OK\nLICENSE: OK\nTHIRD_PARTY_NOTICES.txt: OK\ncommon.service: OK\nREADME.md: OK"
+  },
+  {
+   "check": "systemd-analyze verify finds nothing wrong in the shipped unit",
+   "result": "PASS",
+   "output": []
+  },
+  {
+   "check": "the shipped unit has the documented ExecStart",
+   "result": "PASS"
+  },
+  {
+   "check": "unit starts",
+   "result": "PASS",
+   "output": ""
+  },
+  {
+   "check": "healthy within 10 s of start",
+   "result": "PASS"
+  },
+  {
+   "check": "common setup provisions the pinned engine",
+   "result": "PASS",
+   "output": "engine   llama.cpp b11609 verified at /tmp/common-verify-uht6hot8/data/backends/llama.cpp/b11609"
+  },
+  {
+   "check": "ldd resolves the engine",
+   "result": "PASS",
+   "missing": []
+  },
+  {
+   "check": "fixture pulled",
+   "result": "PASS",
+   "status": 200
+  },
+  {
+   "check": "fixture loads on the CPU",
+   "result": "PASS",
+   "status": 200,
+   "body": "{\"model_id\":\"stories15M-q4_0\",\"model_sha256\":\"66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739\",\"backend_name\":\"llama.cpp\",\"backend_version\":\"0.6.0-dev (build 11609, commit fcac19079)\",\"device_requested\":\"cpu\",\"device_actual\":\"cpu\",\"offloaded_layers\":0,\"total_layers\":6,\"n_ctx\":128,\"t"
+  },
+  {
+   "check": "golden CPU completion",
+   "result": "PASS"
+  },
+  {
+   "check": "SIGKILL: systemd restarts the daemon and it is healthy within 10 s",
+   "result": "PASS",
+   "old_pid": 386032,
+   "new_pid": 386130,
+   "seconds": 2.67
+  },
+  {
+   "check": "SIGKILL: the killed daemon's engine is gone",
+   "result": "PASS",
+   "old_engines": [
+    386086
+   ],
+   "left": []
+  },
+  {
+   "check": "golden again after the restart",
+   "result": "PASS"
+  },
+  {
+   "check": "stop frees the port",
+   "result": "PASS",
+   "output": ""
+  },
+  {
+   "check": "stop leaves no engine",
+   "result": "PASS",
+   "left": []
+  },
+  {
+   "check": "removing the unit and binary keeps the data folder",
+   "result": "PASS"
+  }
+ ]
+}
