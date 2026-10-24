@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Builds the Common daemon from THIS checkout, stages it as the Tauri sidecar, and checks that it accepts
-// the exact arguments the app starts it with (src-tauri/daemon-args.txt).
+// Writes THIRD_PARTY_NOTICES for what the bundle ships (src-tauri/gen/THIRD_PARTY_NOTICES.txt, bundled through
+// tauri.conf.json bundle.resources), then builds the Common daemon from THIS checkout, stages it as the Tauri
+// sidecar, and checks that it accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt).
 //
 // `pnpm tauri build` runs this first (tauri.conf.json > build.beforeBuildCommand), so a bundle can never
 // ship a daemon left over from an earlier commit. That happened once: an app built after
@@ -24,6 +25,32 @@ const host = execFileSync("rustc", ["-vV"], { encoding: "utf8" }).match(/^host: 
 if (!host) fail("cannot read the host triple from `rustc -vV`");
 const triple = process.env.TAURI_ENV_TARGET_TRIPLE || host;
 const exe = triple.includes("windows") ? ".exe" : "";
+
+// The notices list every Rust crate the daemon and the app link for this target and the app's npm packages.
+// scripts/gen_notices.py exits 1 on a licence deny.toml does not allow: no bundle is built then, and none without
+// notices. Python: `python3`, else `python` or `py -3` (Windows). PYTHONUTF8: the licence texts are UTF-8 on every
+// locale.
+const notices = join(desktop, "src-tauri", "gen", "THIRD_PARTY_NOTICES.txt");
+const python = [["python3"], ["python"], ["py", "-3"]].find(([cmd, ...pre]) => {
+  try {
+    execFileSync(cmd, [...pre, "--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+});
+if (!python) fail("THIRD_PARTY_NOTICES needs Python 3 (scripts/gen_notices.py); none of python3, python, py -3 runs");
+mkdirSync(dirname(notices), { recursive: true });
+try {
+  const gen = ["scripts/gen_notices.py", "--out", notices, "--crate", "common-cli", "--crate", "common-desktop", "--js"];
+  execFileSync(python[0], [...python.slice(1), ...gen, "--target", triple], {
+    cwd: root,
+    stdio: "inherit",
+    env: { ...process.env, PYTHONUTF8: "1" },
+  });
+} catch {
+  fail("scripts/gen_notices.py failed (see above: a licence deny.toml does not allow, or it could not run)");
+}
 
 const cargo = ["build", "--release", "--locked", "-p", "common-cli", "--manifest-path", join(root, "Cargo.toml")];
 if (triple !== host) cargo.push("--target", triple);

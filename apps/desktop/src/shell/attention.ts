@@ -52,6 +52,8 @@ export function useAttention(): AttentionItem[] {
   const retry = { label: "Retry now", run: () => void refreshStatus() };
   if (d.reachable === false && d.gaveUp)
     items.push({ id: "service-down", tone: "danger", text: "Service stopped repeatedly and was not restarted. Quit and reopen the app.", action: SHOW_LOG, dismissable: false });
+  else if (d.reachable === false && d.startFailed)
+    items.push({ id: "service-down", tone: "danger", text: "Service could not be started. Quit and reopen the app.", action: SHOW_LOG, dismissable: false });
   else if (d.reachable === false && d.restarting)
     items.push({ id: "service-down", tone: "danger", text: "Service stopped unexpectedly. Restarting it.", action: retry, dismissable: false });
   else if (d.reachable === false)

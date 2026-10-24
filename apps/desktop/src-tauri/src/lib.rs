@@ -120,6 +120,8 @@ struct Supervised {
     restarting: bool,
     /// It exited unexpectedly once more after [`RESTART_MAX`] restarts within [`RESTART_WINDOW`]: not restarted.
     gave_up: bool,
+    /// The app could not start it at launch (sidecar missing, fork failing) and does not try again.
+    start_failed: bool,
 }
 
 /// When the app restarted its daemon, within the last [`RESTART_WINDOW`].
@@ -243,21 +245,61 @@ impl Daemon {
     /// restarted: the app is quitting, the daemon stopped on request (0: SIGTERM, `/api/shutdown`) or rejected
     /// its command line (2: a restart cannot help), or it was restarted too often ([`Restarts::next`]).
     fn after_exit(&self, code: Option<i32>, now: Instant) -> Option<Duration> {
+        if matches!(code, Some(0 | 2)) {
+            return None;
+        }
+        self.start_again(now, false)
+    }
+
+    /// One more start of the daemon after it exited, or after a restart could not start it (`spawn_failed`): the
+    /// wait before it, or `None` while quitting or once the restarts are used up ([`Restarts::next`]).
+    fn start_again(&self, now: Instant, spawn_failed: bool) -> Option<Duration> {
         let mut s = self.lock();
-        if s.quitting || matches!(code, Some(0 | 2)) {
+        if s.quitting {
             return None;
         }
         let wait = s.restarts.next(now);
         s.restarting = wait.is_some();
         s.gave_up = wait.is_none();
         drop(s);
+        let tries = format!("{RESTART_MAX} restart attempts within {RESTART_WINDOW:?}");
         match wait {
             Some(w) => self.note(&format!("restarting the daemon in {w:?}")),
-            None => self.note(&format!(
-                "the daemon exited again after {RESTART_MAX} restarts within {RESTART_WINDOW:?}; not restarting it"
-            )),
+            None if spawn_failed => self.note(&format!("could not start the daemon in {tries}; not trying again")),
+            None => self.note(&format!("the daemon exited again after {tries}; not restarting it")),
         }
         wait
+    }
+
+    /// At launch: a daemon already serving `addr` is used (and never restarted by this app); otherwise `spawn`
+    /// starts ours into the state. When it cannot, nothing tries again (a missing sidecar is a packaging defect),
+    /// and `start_failed` tells the UI so instead of letting it promise a retry.
+    fn launch(&self, addr: SocketAddr, spawn: impl FnOnce(&mut Supervised) -> bool) {
+        if health_ok(addr) {
+            self.note(&format!("daemon already serving on {addr}; not spawning the sidecar"));
+            return;
+        }
+        let mut s = self.lock();
+        let started = spawn(&mut s);
+        s.start_failed = !started;
+    }
+
+    fn info(&self) -> DaemonInfo {
+        let log_open = self.log.lock().map(|l| l.is_some()).unwrap_or(false);
+        let s = self.lock();
+        DaemonInfo {
+            base_url: format!("http://{}", daemon_addr()),
+            spawned: s.run.spawned,
+            restarts: s.restarted,
+            restarting: s.restarting,
+            gave_up: s.gave_up,
+            start_failed: s.start_failed,
+            log_path: self
+                .log_path
+                .as_ref()
+                .filter(|_| log_open)
+                .map(|p| p.display().to_string()),
+        }
     }
 
     /// The restart [`Daemon::after_exit`] waited for. Never while quitting, and never while a daemon serves `addr`:
@@ -289,7 +331,7 @@ impl Daemon {
             return None;
         }
         drop(s);
-        self.after_exit(None, Instant::now())
+        self.start_again(Instant::now(), true)
     }
 }
 
@@ -381,6 +423,8 @@ struct DaemonInfo {
     restarts: u32,
     restarting: bool,
     gave_up: bool,
+    /// It could not be started at launch and is not tried again.
+    start_failed: bool,
     /// Where this app writes the daemon's output; `None` when it could not.
     log_path: Option<String>,
 }
@@ -459,20 +503,7 @@ fn quit_on_signals(handle: tauri::AppHandle) {
 
 #[tauri::command]
 fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
-    let log_open = state.log.lock().map(|l| l.is_some()).unwrap_or(false);
-    let s = state.lock();
-    DaemonInfo {
-        base_url: format!("http://{}", daemon_addr()),
-        spawned: s.run.spawned,
-        restarts: s.restarted,
-        restarting: s.restarting,
-        gave_up: s.gave_up,
-        log_path: state
-            .log_path
-            .as_ref()
-            .filter(|_| log_open)
-            .map(|p| p.display().to_string()),
-    }
+    state.info()
 }
 
 /// Windows Firewall state for the bundled daemon; `supported: false` elsewhere, `adopted` when the
@@ -601,12 +632,7 @@ pub fn run() {
             // macOS: ~/Library/Logs/<identifier>; Windows and Linux: <local data>/<identifier>/logs.
             let log_path = app.path().app_log_dir().ok().map(|d| d.join("daemon.log"));
             app.manage(Daemon::new(log_path));
-            let daemon = app.state::<Daemon>();
-            if health_ok(addr) {
-                daemon.note(&format!("daemon already serving on {addr}; not spawning the sidecar"));
-            } else {
-                spawn_daemon(app.handle(), &mut daemon.lock());
-            }
+            app.state::<Daemon>().launch(addr, |s| spawn_daemon(app.handle(), s));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -820,7 +846,8 @@ mod tests {
     fn a_restart_that_cannot_start_the_sidecar_retries_then_gives_up() {
         let s = Duration::from_secs;
         let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let d = Daemon::new(None);
+        let (dir, log) = temp_log("spawn-failed");
+        let d = Daemon::new(Some(log.clone()));
         assert_eq!(d.after_exit(None, Instant::now()), Some(s(1)), "killed");
         assert_eq!(d.restart(free, |_| false), Some(s(2)), "could not start: tried again");
         let st = d.lock();
@@ -830,6 +857,74 @@ mod tests {
         assert_eq!(d.restart(free, |_| false), None, "three tries within the minute");
         let st = d.lock();
         assert!(st.gave_up && !st.restarting && st.restarted == 0);
+        drop(st);
+        // Round 6b: the give-up line said "exited again after 3 restarts" although no restart had started a daemon.
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(
+            text.ends_with(
+                "common-desktop: could not start the daemon in 3 restart attempts within 60s; not trying again\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("exited again"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The give-up line after real exits says the daemon exited again.
+    #[test]
+    fn the_give_up_line_after_exits_says_it_exited_again() {
+        let t = Instant::now();
+        let (dir, log) = temp_log("exited-again");
+        let d = Daemon::new(Some(log.clone()));
+        for _ in 0..RESTART_MAX {
+            assert!(d.after_exit(None, t).is_some());
+        }
+        assert_eq!(d.after_exit(None, t), None);
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(
+            text.ends_with(
+                "common-desktop: the daemon exited again after 3 restart attempts within 60s; not restarting it\n"
+            ),
+            "{text}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Round 6b: a sidecar that could not be started at launch left the UI saying "Retrying automatically", but
+    /// nothing retried. The shell now reports `start_failed` (and retries nothing); a launch that starts the daemon,
+    /// or finds one serving, does not.
+    #[test]
+    fn a_launch_that_cannot_start_the_sidecar_reports_start_failed() {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let d = Daemon::new(None);
+        d.launch(free, |_| false);
+        let st = d.lock();
+        assert!(st.start_failed && !st.restarting && !st.gave_up);
+        drop(st);
+        let info = serde_json::to_value(d.info()).unwrap();
+        assert_eq!(info["start_failed"], true, "{info}");
+        assert_eq!(info["spawned"], false, "{info}");
+
+        let d = Daemon::new(None);
+        d.launch(free, |s| {
+            s.run = run(true);
+            true
+        });
+        assert_eq!(serde_json::to_value(d.info()).unwrap()["start_failed"], false);
+
+        let (other, req) = answer("200 OK");
+        let d = Daemon::new(None);
+        d.launch(other, |_| panic!("a daemon already serves the port"));
+        assert!(req.join().unwrap().starts_with("GET /health "));
+        assert!(!d.lock().start_failed);
+    }
+
+    /// A fresh `<temp>/common-desktop-<name>-<pid>/daemon.log` path; returns the folder and the path.
+    fn temp_log(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("common-desktop-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let log = dir.join("daemon.log");
+        (dir, log)
     }
 
     /// F-10-06: the daemon's output is kept, capped: past the cap `daemon.log` becomes `daemon.log.1` (replacing

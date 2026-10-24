@@ -95,6 +95,18 @@ describe("the app restarts its service", () => {
     act(() => item.click());
     expect(window.location.hash).toBe("#/settings/general");
   });
+
+  // Round 6b: the shell could not start its service at launch and retries nothing, yet the UI said "Retrying automatically".
+  it("when the shell could not start the service at launch, says so instead of promising a retry", async () => {
+    shell = { ...shell, spawned: false, start_failed: true };
+    serviceDown();
+    await refreshStatus();
+    render(<StatusBar />);
+    const item = within(bar()).getByRole("button", { name: "Service could not be started. Quit and reopen the app." });
+    expect(within(bar()).queryByText(/Retrying automatically/)).toBeNull();
+    act(() => item.click());
+    expect(window.location.hash).toBe("#/settings/general");
+  });
 });
 
 describe("the service log", () => {

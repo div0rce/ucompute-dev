@@ -6,7 +6,8 @@
 
 What it checks (stdlib only, no repo build artefacts are used at run time):
  1. Binaries: the .app inside the .dmg is arm64, ad-hoc signed and valid, links only system libraries, and its
-    bundled `common` accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt).
+    bundled `common` accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt). The app ships
+    Contents/Resources/THIRD_PARTY_NOTICES.txt (scripts/gen_notices.py at build time) naming rustls and react.
  2. Fresh install: the app is copied out of the mounted .dmg into <work>/Applications and started with an empty
     HOME, a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no COMMON_HOME, so nothing from the development
     environment is visible. Its daemon must become healthy on 127.0.0.1:8192, be the bundled binary with the
@@ -25,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -187,6 +189,18 @@ def log_holds_both_runs(text, killed, restarted):
     return a >= 0 and listen in text[a:b] and c > b and listen in text[c:]
 
 
+def daemon_restarted(parent, app_pid, restarted_after_s, text, killed, restarted):
+    """Stage 6: the restarted daemon's parent is the app, /health answered within 10 s of the kill (the wait can
+    return later than that when its last check passes slowly) and the log holds both runs."""
+    return parent == app_pid and restarted_after_s <= 10 and log_holds_both_runs(text, killed, restarted)
+
+
+def names_packages(notices, *names):
+    """Each of `names` has its own entry in THIRD_PARTY_NOTICES: a line `<name> <version> — <licence>…`
+    (scripts/gen_notices.py), so `rustls-pki-types` or a licence text that mentions the name does not count."""
+    return all(re.search(rf"^{re.escape(n)} \d\S* — ", notices, re.M) for n in names)
+
+
 def infer(tag):
     t0 = time.monotonic()
     status, body = http("POST", f"/api/models/{MODEL}/load", {"device": "auto"})
@@ -247,6 +261,11 @@ def main():
             step("packaged binaries are the build (identical once signatures and __LINKEDIT vmsize are set aside)",
                  all(same.values()),
                  built=str(a.built), identical=same)
+        notices = app_src / "Contents/Resources/THIRD_PARTY_NOTICES.txt"
+        text = notices.read_text(encoding="utf-8", errors="replace") if notices.is_file() else ""
+        step("the app ships THIRD_PARTY_NOTICES naming the Rust crate rustls and the JS package react",
+             names_packages(text, "rustls", "react"), path=str(notices), bytes=len(text),
+             sha256=sha256(notices) if text else None)
         v = sh("codesign", "--verify", "--deep", "--strict", str(app_src), check=False)
         step("app signature verifies (ad-hoc; no Developer ID, B-008)", v.returncode == 0, stderr=v.stderr.strip())
         r = sh(str(macos / "common"), *DAEMON_ARGS, "--help", check=False)
@@ -318,8 +337,9 @@ def main():
         wait(lambda: not any(alive(e) for e in engines2), 10, "daemon killed: its engine is stopped")
         log = inst.home / "Library/Logs/org.commoncompute.desktop/daemon.log"
         text = log.read_text(errors="replace") if log.is_file() else ""
-        step("daemon killed (SIGKILL daemon only): the app restarts one daemon and its log holds both runs",
-             sc[0][1] == app_pid and log_holds_both_runs(text, daemon2, sc[0][0]), restarted_after_s=t, sidecar=sc, log=str(log), log_bytes=len(text))
+        step("daemon killed (SIGKILL daemon only): the app restarts one daemon, /health within 10 s, its log holds both runs",
+             daemon_restarted(sc[0][1], app_pid, t, text, daemon2, sc[0][0]), restarted_after_s=t, sidecar=sc,
+             log=str(log), log_bytes=len(text))
         infer("daemon restarted")
         step("daemon restarted: one engine", len(inst.engines()) == 1, engines=inst.engines())
         daemon2, engines2 = sc[0][0], inst.engines()

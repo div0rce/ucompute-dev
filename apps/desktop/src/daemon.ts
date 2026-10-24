@@ -12,11 +12,13 @@ export interface DaemonInfo {
   restarting?: boolean;
   /** It stopped again after three restarts within a minute; the app no longer restarts it. */
   gave_up?: boolean;
+  /** The app could not start its service at launch and does not try again. Absent from an older app shell. */
+  start_failed?: boolean;
   /** Where the app writes the service's output; null when it could not. */
   log_path?: string | null;
 }
 
-const fromShell = (i: DaemonInfo) => ({ spawned: i.spawned, restarts: i.restarts ?? 0, restarting: !!i.restarting, gaveUp: !!i.gave_up, logPath: i.log_path ?? null });
+const fromShell = (i: DaemonInfo) => ({ spawned: i.spawned, restarts: i.restarts ?? 0, restarting: !!i.restarting, gaveUp: !!i.gave_up, startFailed: !!i.start_failed, logPath: i.log_path ?? null });
 /** Inside the app and not a `?daemon=` tab: the shell's own service is the one shown, so its restarts are too. */
 let shellOwnsService = false;
 

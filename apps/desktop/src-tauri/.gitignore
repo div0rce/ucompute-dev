@@ -8,3 +8,6 @@
 
 # Sidecar binaries are built and copied in by scripts/build-sidecar.mjs
 /binaries/
+
+# Written for each build's target by scripts/build-sidecar.mjs (scripts/gen_notices.py)
+/gen/THIRD_PARTY_NOTICES.txt

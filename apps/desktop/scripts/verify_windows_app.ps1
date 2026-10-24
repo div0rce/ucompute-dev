@@ -3,7 +3,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\verify_windows_app.ps1 `
 #       -Installer <...\nsis\Common_0.1.0_x64-setup.exe> -Work <empty folder>
 #
-# 1. Silent per-user install into <Work>\app (NSIS /S /D=...), never over an existing install.
+# 1. Silent per-user install into <Work>\app (NSIS /S /D=...), never over an existing install; THIRD_PARTY_NOTICES.txt
+#    next to the exe names rustls and react.
 # 2. First launch with a fresh data folder (LOCALAPPDATA=<Work>\localappdata): the app's daemon becomes healthy on
 #    127.0.0.1:8192, is the bundled common.exe started by the app with src-tauri\daemon-args.txt, and downloads
 #    the pinned engine into the fresh folder.
@@ -53,6 +54,10 @@ $p = Start-Process -FilePath $Installer -ArgumentList "/S", "/D=$appDir" -PassTh
 $exe = Get-Item (Join-Path $appDir "common-desktop.exe") -ErrorAction SilentlyContinue  # the cargo binary name, as on macOS
 $daemonExe = Join-Path $appDir "common.exe"
 Step "silent install" ($p.ExitCode -eq 0 -and $exe -and (Test-Path $daemonExe)) @{ installer_sha256 = $hash; app = "$($exe.Name)"; files = @(Get-ChildItem $appDir -Name) }
+# Written at build time by scripts/gen_notices.py (build-sidecar.mjs): one entry line per package, `<name> <version> ...`.
+$notices = Join-Path $appDir "THIRD_PARTY_NOTICES.txt"
+$nt = if (Test-Path $notices) { Get-Content $notices -Raw -Encoding UTF8 } else { "" }
+Step "the install ships THIRD_PARTY_NOTICES next to the exe, naming rustls and react" (($nt -match '(?m)^rustls \d') -and ($nt -match '(?m)^react \d')) @{ path = $notices; chars = $nt.Length }
 $help = Start-Process -FilePath $daemonExe -ArgumentList ($DaemonArgs + "--help") -NoNewWindow -PassThru -Wait -RedirectStandardOutput (Join-Path $Work "help.txt")
 Step "bundled daemon accepts the app's exact arguments" ($help.ExitCode -eq 0) @{ args = $DaemonArgs; exit = $help.ExitCode }
 
