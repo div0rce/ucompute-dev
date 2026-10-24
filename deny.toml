@@ -5,7 +5,14 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Unmaintained notices, no vulnerability, in crates that only a Linux desktop build compiles (there is no Linux
+# desktop app; neither the macOS DMG nor the Linux daemon tarball contains them). Re-check when one is built.
+ignore = [
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time macro of gtk-rs glib-macros (Tauri on Linux)" },
+  { id = "RUSTSEC-2026-0370", reason = "zvariant: D-Bus, via zbus <- tauri-plugin-opener on Linux" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names: D-Bus, via zbus <- tauri-plugin-opener on Linux" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: D-Bus, via zbus <- tauri-plugin-opener on Linux" },
+]
 
 [licenses]
 version = 2
