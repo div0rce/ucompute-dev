@@ -12,7 +12,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 |---|---|---|---|
 | Where the bridge lives | `crates/common-network/src/rpc.rs`, admitted through `tests/invariants.rs` `ALLOWED_MODULES` (empty today). The ledger names `crates/common-distributed`; ADR-0005 records the deviation. | D2 | `common-network` already depends on `common-runtime` (`ModelManager`) and `common-policy` (see `serve_peer_with`, `remote.rs:687`). No new crate and no injection hook are needed. |
 | Split engine | A typed `LoadRequest.split` inside the existing `ModelManager` slot. There is no parallel `PoolSession`. | D2 | I-05 still holds: a `local` or `local_only` request has different load options, so the manager reloads locally and the split session closes. A test pins this. |
-| Flag hole | Add `--rpc`, `--device/-dev`, `--tensor-split/-ts`, `--split-mode/-sm`, `-mg/--main-gpu`, `-ngl/--n-gpu-layers`, `--fit`, `--list-devices` and `--no-mmap` to `RESERVED_FLAGS` (`process.rs:22`, 7 entries today). Rewrite the test at `process.rs:433`, which relies on `--rpc` passing through `extra_args`. | D1 + D2 | `validate_extra_args` accepts the two tokens `"--rpc" "1.2.3.4:1"`. In-tree code never reaches it, but it is a latent route to raw RPC on a LAN address. |
+| Flag hole | Add `--rpc`, `--device/-dev`, `--tensor-split/-ts`, `--split-mode/-sm`, `-mg/--main-gpu`, `-ngl/--n-gpu-layers`, `--fit`, `--list-devices` and `-lm/--load-mode` (b11609's mmap switch) to `RESERVED_FLAGS` (`process.rs:22`, 7 entries today). Rewrite the test at `process.rs:433`, which relies on `--rpc` passing through `extra_args`. | D1 + D2 | `validate_extra_args` accepts the two tokens `"--rpc" "1.2.3.4:1"`. In-tree code never reaches it, but it is a latent route to raw RPC on a LAN address. |
 | RDMA | Set `GGML_RPC_NO_RDMA=1` on both engines. Fail the load unless the log says `transport: TCP`. | D2 (strings confirmed by both judges) | `clean_environment` removes `GGML_*` but sets nothing, and libggml-rpc says "RDMA auto-negotiate enabled". |
 | Weights on disk on R | No `-c`, and `LLAMA_CACHE` is removed from the environment. | D2 | X-08: a cached copy would be a redistribution event. |
 | H-side owner check | Required. The bridge gives a QUIC stream only to TCP connections owned by the supervised `llama-server` pid. | D1 | Without it, any local user on H reaches R's unauthenticated rpc-server through Common. |
@@ -25,7 +25,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 | Licence | Cross-device split loads need the catalog licence in {Apache-2.0, MIT}. Unknown-licence fixtures (stories15M, stories260K; B-011) are refused. | D1 | RPC uploads R's layer weights (X-08). |
 | Test escape hatch | One flag, `COMMON_TEST_SINGLE_HOST_POOL=1`. It lifts the licence gate and the Linux-only R rule **only when the peer's remote address is loopback**. | new | SINGLE-HOST tests can use stories15M and a Mac R, and the flag cannot weaken a real two-machine run. |
 | Consent | The split request must carry `"acknowledged": true` against the disclosure text, as `privacy_put` does. Without it: 403 plus the text. Consent on `groups_put` loosening is deferred to Gate E (OD-9). | D1, trimmed | WP-04 needs an explicit disclosure. The group-loosening prompt is a desktop and Gate E concern. |
-| Memory evidence | In split mode, drop `--no-kv-offload --no-op-offload` (CPU branch, `process.rs:98`). Run the split head and its local reference both with `--no-mmap`. Measure the Mac with `footprint`. | D3 | F-03-02 needs memory figures that compare like with like. |
+| Memory evidence | In split mode, drop `--no-kv-offload --no-op-offload` (CPU branch, `process.rs:98`). Run the split head and its local reference both with `-lm none`. Measure the Mac with `footprint`. | D3 | F-03-02 needs memory figures that compare like with like. |
 | Correctness configurations | **P** (performance and memory): `--device RPC0,MTL0`; R holds blocks [0,k), the head holds [k,n) plus output. **C** (same backend): ggml-cpu on both stages, `--device RPC0 -ngl (n+1-k)`. R then holds [k,n) plus output, so a logits row crosses per token. | D2 + D3 | The F-03-04 wording requires the same backend. Arm64 against x86 CPU kernels is reported as measured and never relabelled (OD-3). |
 | Ledger ceilings | F-03-03 stays open (B-016; the ratio is reported). F-03-10 is capped at `IMPLEMENTED_UNVERIFIED` while F-08-04 is `NOT_STARTED`. F-03-01's dependencies F-02-03 and F-01-02 are VERIFIED, so it can reach VERIFIED. | D3 + ledger | It stops anyone mass-marking rows. |
 
@@ -52,7 +52,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 - **Estimate:** 1–2 h.
 - **Does not claim:** anything two-machine, or the QUIC bridge's overhead.
 
-### C1. `runtime: reserve the split flags` (security fix, lands alone)
+### C1. `runtime: reserve the split flags` (security fix, lands alone) — done in 5ef22fd (every b11609 spelling of the split, RPC, placement, model-source and verbosity flags)
 - **Files:** `crates/common-runtime/src/llamacpp/process.rs` (`RESERVED_FLAGS` grows to 18 entries; the test at :433 is rewritten to use a harmless flag).
 - **Tests:**
   - `extra_args_cannot_set_split_flags`: both the two-token and the `--flag=value` forms of every flag above are refused with `invalid_request`.
@@ -70,7 +70,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
   - new `crates/common-runtime/src/llamacpp/split.rs`: port `llama_assign`, `tensor_split`, `tensor_split_arg` and `rpc_split_args` with their 4 tests from `ucompute-core-lab/src/llamacpp.rs` (lab-owned Apache-2.0 code from the same project);
   - `process.rs` `build_args`, split branch:
     - `--rpc` rendered only as `127.0.0.1:<port>`;
-    - `--device … --tensor-split … --split-mode layer -ngl <n> --fit off [--no-mmap]`;
+    - `--device … --tensor-split … --split-mode layer -ngl <n> --fit off [-lm none]` (b11609 has no `--no-mmap`: it answers "error: invalid argument: --no-mmap"; `-lm/--load-mode none` disables mmap; checked 2026-10-24 with the pinned binary);
     - the GPU/CPU branch, `--device none`, `--no-kv-offload`/`--no-op-offload` and force-gpu-fail are skipped;
     - the environment adds `GGML_RPC_NO_RDMA=1`;
   - `logparse.rs`: the per-layer device lines and `transport: TCP`;
@@ -485,14 +485,14 @@ After each case, on sentinel: `pgrep -a ggml-rpc-server` is empty, and `ss -ltnu
 - Record load 1 and load 2 times and upload bytes. Both loads upload, because there is no cache, so they are not called cold and warm.
 
 **P1.4 R1b acceptance**
-- Configuration P: 3 × 64 greedy tokens, against local Mac Metal (`--no-mmap`) and, under OD-4, local sentinel CPU.
+- Configuration P: 3 × 64 greedy tokens, against local Mac Metal (`-lm none`) and, under OD-4, local sentinel CPU.
 - Configuration C: 3 × 64, against local Mac CPU and sentinel CPU.
 - Log-probabilities per position if C7 has landed, labelled as a proxy.
 - Pass rule for F-03-04: identical greedy tokens for 64 positions and max-abs ≤ 1e-3 (quantized). Cross-ISA results are reported as measured (OD-3).
 
 **P1.5 Memory (F-03-02)**
 - Mac: `footprint -p <llama-server pid>` peak, split against local full model with identical flags.
-- sentinel: `VmHWM` from `/proc/<rpc-server pid>/status`, against the `VmHWM` of a full-model local `llama-server --no-mmap` on sentinel.
+- sentinel: `VmHWM` from `/proc/<rpc-server pid>/status`, against the `VmHWM` of a full-model local `llama-server -lm none` on sentinel.
 - Criterion: each host's peak is below the full-model peak by at least the bytes of the layers it does not host (from `gguf::layer_bytes`), ±15%.
 
 **P1.6 Bytes per token and timing**
