@@ -35,7 +35,7 @@ WP-04 asks for static physical pooling: one model's transformer blocks split bet
 | `groups_put` writes `group_updated` and closes no connection | ✅ (`mesh.rs:1733`) |
 | `free_port` binds and drops `127.0.0.1:0` | ✅ (`process.rs:134`) |
 | `PR_SET_PDEATHSIG` fires when the parent *thread* exits | ✅ (prctl(2)) |
-| rpc-server keeps buffers per client connection, so one client cannot address another's buffers | `unverified`; read b11609 `ggml-rpc.cpp` before C5 |
+| rpc-server keeps buffers per client connection, so one client cannot address another's buffers | ✅ from b11609 source (lab INTEGRATION.md §9): `rpc_serve_client` builds a fresh `rpc_server` per connection (`ggml-rpc.cpp:2399-2401`), `deserialize_tensor` nulls any buffer that is not that connection's (`:1641`), the destructor frees all of a connection's buffers (`:2393-2397`), one client at a time (`:2782-2790`) |
 | Metal arm64 head against x86 CPU rpc-server interoperates | `unverified`; P1 step 2 |
 | llama.cpp aborts on RPC errors | ⚠️; not relied on (D7) |
 

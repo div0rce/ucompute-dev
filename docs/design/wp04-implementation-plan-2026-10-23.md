@@ -594,7 +594,7 @@ Gate D is not declared. Updates also go to ADR-0005 §8 and §9, ADR-0003 §9.7,
 None of these blocks implementation. OD-10 is a preflight check. OD-3 and OD-4 limit only which rows can be promoted.
 
 ## 5. Open items to settle before P1
-- ⚠️ Per-client buffer isolation in rpc-server: read the b11609 `ggml-rpc.cpp` (MIT) before C5. If it does not hold, foreign-client teardown becomes the only control, and R11 gets worse.
+- ✅ Per-client buffer isolation in rpc-server: verified from the b11609 `ggml-rpc.cpp` source by the lab (INTEGRATION.md §9; ADR-0005 §2).
 - ⚠️ b11609 interoperation between macOS arm64 and Ubuntu x64 over RPC. It is settled only at P1.2. If it fails, the next step is OD-3's Mac-to-Mac route.
 - ⚠️ Exact `-lv 4` placement text, connection count and lifetime, the probability field name, and `T_rpc`: all come from R0.
 - The `RLIMIT_AS` baseline with glibc on sentinel comes from S1-L. Too tight a limit refuses legitimate sessions.
