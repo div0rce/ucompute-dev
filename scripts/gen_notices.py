@@ -20,7 +20,8 @@ FILES = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|COPYRIGHT|UNLICENSE)([-._].*)?$
 
 
 def allowed():
-    text = open(os.path.join(ROOT, "deny.toml")).read()
+    with open(os.path.join(ROOT, "deny.toml")) as f:
+        text = f.read()
     return set(re.findall(r'"([^"]+)"', re.search(r"^allow\s*=\s*\[(.*?)\]", text, re.S | re.M).group(1)))
 
 
@@ -123,7 +124,8 @@ def main():
     for n, v, lic, url, files in entries:
         refs = []
         for f in files:
-            t = open(f, errors="replace").read().strip()
+            with open(f, errors="replace") as fh:
+                t = fh.read().strip()
             refs.append(texts.setdefault(t, f"T{len(texts) + 1}"))
         lines.append(f"{n} {v} — {lic}" + (f" — {url}" if url else "")
                      + (f" — licence text {', '.join(refs)}" if refs else " — no licence file in the package"))

@@ -1,19 +1,50 @@
 #!/usr/bin/env bash
-# Fetch and verify the pinned llama.cpp b11609 (macos-arm64) archive and the two TinyStories test
-# fixtures into the COMMON_HOME layout that crates/common-artifacts expects:
-#   backends/llama.cpp/<archive>, backends/llama.cpp/b11609/, models/blobs/sha256-<hex>, models/manifests/<id>.json
+# Fetch and verify this platform's pinned llama.cpp archive (read from catalog/backends.json: macos-arm64,
+# linux-x64) and the test models (catalog/models.json tags "fixture", plus "test-suite" under COMMON_REQUIRE_FIXTURES=1)
+# into the COMMON_HOME layout that crates/common-artifacts expects:
+#   backends/llama.cpp/<archive>, backends/llama.cpp/<release>/, models/blobs/sha256-<hex>, models/manifests/<id>.json
 # Idempotent: existing files are re-hashed and kept; a hash mismatch deletes the file and exits 1.
-# Pins below must match catalog/backends.json and catalog/models.json.
+# Windows pins are .zip releases this script does not extract: there, run `common setup --fixtures`.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 COMMON_HOME="${COMMON_HOME:-$REPO/.common}"
 
-ARCHIVE_NAME="llama-b11609-bin-macos-arm64.tar.gz"
-ARCHIVE_URL="https://github.com/ggml-org/llama.cpp/releases/download/b11609/$ARCHIVE_NAME"
-ARCHIVE_SHA="d03f28b5a5baa9cdfbb01db5ed22c695126c11c193326f14cdc51d001be10f4e"
-ARCHIVE_DIR="llama-b11609"
-RELEASE="b11609"
+# This platform as crates/common-artifacts' current_platform() names it.
+case "$(uname -s)" in
+  Darwin) os=macos ;;
+  Linux) os=linux ;;
+  MINGW* | MSYS* | CYGWIN*) os=win ;;
+  *) os="$(uname -s)" ;;
+esac
+case "$(uname -m)" in
+  arm64 | aarch64) arch=arm64 ;;
+  x86_64 | amd64) arch=x64 ;;
+  *) arch="$(uname -m)" ;;
+esac
+PLATFORM="$os-$arch"
+
+# Its llama.cpp pin, one field per line (directory may be empty).
+pin="$(python3 -I -c '
+import json, sys
+pins = [b for b in json.load(open(sys.argv[1]))["backends"] if b["name"] == "llama.cpp" and b["platform"] == sys.argv[2]]
+if pins:
+    print("\n".join(pins[0][k] for k in ("archive", "url", "sha256", "directory", "release")))
+' "$REPO/catalog/backends.json" "$PLATFORM")"
+if [ -z "$pin" ]; then
+  echo "catalog/backends.json pins no llama.cpp build for $PLATFORM" >&2
+  exit 1
+fi
+{ read -r ARCHIVE_NAME; read -r ARCHIVE_URL; read -r ARCHIVE_SHA; read -r ARCHIVE_DIR; read -r RELEASE; } <<EOF
+$pin
+EOF
+case "$ARCHIVE_NAME" in
+  *.tar.gz) ;;
+  *)
+    echo "$PLATFORM pins $ARCHIVE_NAME, which this script does not extract: run \`common setup --fixtures\` instead" >&2
+    exit 1
+    ;;
+esac
 
 sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
@@ -37,30 +68,22 @@ fetch() {
   echo "verified $(basename "$dest")"
 }
 
-# manifest ID NAME FILE SHA BYTES URL LICENSE_URL SOURCE — write models/manifests/<id>.json if missing.
+# manifest ID — write models/manifests/<id>.json from its catalog entry if missing, as `common models pull` does.
 manifest() {
-  local id="$1" name="$2" file="$3" sha="$4" bytes="$5" url="$6" license_url="$7"
-  local out="$COMMON_HOME/models/manifests/$id.json"
+  local out="$COMMON_HOME/models/manifests/$1.json"
   [ -f "$out" ] && return 0
   mkdir -p "$(dirname "$out")"
-  cat > "$out" <<EOF
-{
-  "schema_version": 1,
-  "id": "$id",
-  "name": "$name",
-  "file_name": "$file",
-  "sha256": "$sha",
-  "bytes": $bytes,
-  "license": "unknown",
-  "license_url": "$license_url",
-  "source_url": "$url",
-  "redistribution": "unknown",
-  "imported_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "chat": false,
-  "tags": ["fixture"]
-}
-EOF
-  echo "wrote manifest $id"
+  python3 -I -c '
+import json, sys
+m = next(m for m in json.load(open(sys.argv[1]))["models"] if m["id"] == sys.argv[2])
+print(json.dumps({"schema_version": 1, "id": m["id"], "name": m["name"], "file_name": m["file_name"],
+                  "sha256": m["sha256"], "bytes": m["bytes"], "license": m["license"],
+                  "license_url": m.get("license_url"), "source_url": m["url"],
+                  "redistribution": m.get("redistribution", "unknown"), "imported_at_utc": sys.argv[3],
+                  "chat": m.get("chat", False), "tags": m.get("tags", [])}, indent=2, ensure_ascii=False))
+' "$REPO/catalog/models.json" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$out.tmp"
+  mv "$out.tmp" "$out"
+  echo "wrote manifest $1"
 }
 
 # --- backend archive + extraction ---
@@ -73,15 +96,26 @@ if [ ! -d "$COMMON_HOME/backends/llama.cpp/$RELEASE" ]; then
   echo "extracted backends/llama.cpp/$RELEASE"
 fi
 
-# --- model fixtures ---
-S15_SHA="66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739"
-S15_URL="https://huggingface.co/ggml-org/models-moved/resolve/499bc8821c6b12b4e53c5bffcb21ec206f212d81/tinyllamas/stories15M-q4_0.gguf"
-fetch "$S15_URL" "$S15_SHA" "$COMMON_HOME/models/blobs/sha256-$S15_SHA"
-manifest stories15M-q4_0 "TinyStories 15M (Q4_0) — test fixture" stories15M-q4_0.gguf "$S15_SHA" 19077344 "$S15_URL" "https://huggingface.co/ggml-org/models-moved"
-
-S260_SHA="270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d"
-S260_URL="https://huggingface.co/ggml-org/models/resolve/499bc8821c6b12b4e53c5bffcb21ec206f212d81/tinyllamas/stories260K.gguf"
-fetch "$S260_URL" "$S260_SHA" "$COMMON_HOME/models/blobs/sha256-$S260_SHA"
-manifest stories260K "TinyStories 260K (F32) — split-test fixture" stories260K.gguf "$S260_SHA" 1185376 "$S260_URL" "https://huggingface.co/ggml-org/models"
+# --- model fixtures: catalog/models.json entries tagged "fixture" (the two TinyStories models) and, under
+# COMMON_REQUIRE_FIXTURES=1, also those tagged "test-suite" (about 3 GB), which the strict test suite loads ---
+tags=fixture
+if [ "${COMMON_REQUIRE_FIXTURES:-}" = 1 ]; then tags="fixture test-suite"; fi
+models="$(python3 -I -c '
+import json, sys
+want = set(sys.argv[2].split())
+for m in json.load(open(sys.argv[1]))["models"]:
+    if want & set(m.get("tags", [])):
+        print(m["id"], m["sha256"], m["url"])
+' "$REPO/catalog/models.json" "$tags")"
+if [ -z "$models" ]; then
+  echo "catalog/models.json tags no model with: $tags" >&2
+  exit 1
+fi
+while read -r id sha url; do
+  fetch "$url" "$sha" "$COMMON_HOME/models/blobs/sha256-$sha"
+  manifest "$id"
+done <<EOF
+$models
+EOF
 
 echo "fixtures ready in $COMMON_HOME"
