@@ -2,6 +2,27 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-23/24 — Claude Code — Linux host onboarded; fixed builds on two machines; WP-04 designed; fix round 6; Linux install path (TWO-MACHINE daemon API, SINGLE-HOST, unit)
+
+**Implemented / verified:**
+- Sentinel (Ubuntu 26.04 x86_64, i9-9900K) is the fourth machine with evidence: llama.cpp b11609 Ubuntu CPU build pinned for linux-x64 (D-024, ce54da1); golden local inference; the Mac–Linux runner (6de3487) and the first fixed-build two-machine run (177f7ed: discovery and hold ALL PASS, mesh all PASS but one nearby-list miss; B → A ran on the Linux CPU); the first Linux test run (e3c2ece: 446 passed, 5 failed).
+- Core Lab calibration executed on the Mac + sentinel and handed to the lab (8f34f1b; 24 of 26 points valid; analysis is the lab's).
+- WP-04 split inference: ADR-0005 Proposed (6df25ee, with lab facts in c2cd6dc, ce86fbc, 3eea3f7), platform readiness plan M1–M10 and WP-04 implementation plan C0–C8 (c811a90, with lab notes fa19afc..457ad98).
+- Capability snapshot draft 3 (f052074) with the record fixes the fact-checkers found (run-1845 figures, missing VERIFICATION entries, B-004).
+- M5/M6: `tests/soak/local_soak.py` (13355e6; its smoke run on the pre-round-6 build found that an engine SIGKILL was fatal until the daemon restarted); the Linux user-level tarball, systemd user unit and `verify_linux_install.py`, ALL PASS 16 checks on sentinel (13355e6, 9d1ffd3, 1e9ae23); `scripts/gen_notices.py` writes THIRD_PARTY_NOTICES and refuses a licence outside `deny.toml` (9d1ffd3; it found webpki-roots' CDLA-Permissive-2.0, now allowed).
+- Fix round 6 + 6b (abe19c1, 77fa300, 418f5de, fac5556; unit, FAKE, SINGLE-HOST): engine crash recovery with a restart bound and `last_exit`; thread default from performance cores (the round-6 regression made parallel engines 9× slower); swaps planned on a fresh memory sample; disk preflight; the two Mac–Linux discovery findings (per-family mDNS copies; re-query on a missed announcement), IPv4-only binds, `unreachable` peers; the reaper matches engine paths with spaces (it never worked for the packaged macOS app); desktop daemon restart; fixtures provisioned by catalog tag. Final check 480 passed, 1 load-sensitive flood failure that passed alone; four verifiers, no unresolved item; open items carried to round 7 (`docs/VERIFICATION.md`).
+
+**Blocked / open:** the Windows laptop and Kyle's Mac are offline; the reaper misses orphans under a subreaper (Linux) and three failed GPU starts block CPU loads for 60 s — round 7; packaged-app stage 6 not re-run since the space-in-path fix; the status-during-load and CPU flood-fairness determinations; WP-04 C1–C8 not started in code.
+
+**Ledger:** NOT_STARTED 103 · IN_PROGRESS 6 (F-08-04, F-06-09, F-09-10 moved from NOT_STARTED) · BLOCKED 0 · IMPLEMENTED_UNVERIFIED 8 · VERIFIED 36 · INFEASIBLE 0.
+
+**Next commands:**
+```sh
+# round 7 (reaper, Linux pins, help text, desktop notices, Linux suite run, packaged re-check)
+# WP-04 C1: reserve the split flags (crates/common-runtime/src/llamacpp/process.rs)
+scripts/mac-host.sh sync   # with MAC_HOST=192.168.1.167 MAC_USER=div0rce MAC_KEY=~/.ssh/id_ed25519, then the 24 h soak
+```
+
 ## 2026-10-23 — Claude Code — fix round 5: the LOW items left by rounds 2 and 3; flood tests determined; macOS app from ffe1a47 (unit, synthetic, SINGLE-HOST)
 
 - Mesh (780c2b9; verifier 10/10 resolved): a peer-sourced revocation releases the hold on the running Node under the `net` lock; Disconnect checks and holds atomically; a dial cancelled mid held exchange closes its connection at once; the held exchange asks the store once more at its end and at its 10 s bound; the held minor-0 redial is audited once; the transport close codes (0, RE, UA, PV, FT, HD) pinned on the wire (the pairing codes PF and PL are not); the `control.proto` minor-0 comment corrected. Behaviour: a protocol mismatch claimed before the device proves its key reads `peer_unauthorized` with an update hint (426 is now always proven), and so does a frame-size close (`FT`) without the hint; `health::supervise` retries unproven refusals with backoff up to 30 s (only tests call it; the daemon's sync loop keeps its own backoff up to 300 s). 11 mutants killed.
