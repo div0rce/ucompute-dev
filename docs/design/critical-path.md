@@ -35,8 +35,8 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 
 1. A written go-ahead to publish milestone A to named testers (after A passes).
 2. An Ethernet cable for sentinel before P1 (its Wi-Fi link has dropped twice in six hours).
+3. When convenient: the laptop and Kyle's Mac awake and on the network (milestones D and E).
 4. Mode B on CPU-only devices: a peer generation slows local tokens by 35–50% on a CPU engine (sentinel,
    determined in round 7). Keeping local priority needs preempting peer generations, which breaks
    "admitted requests complete" (F-08-08) for peers. Choose: preempt, refuse new peer work near local
    work (partial), or keep the behaviour and document the limit (default: keep and document).
-3. When convenient: the laptop and Kyle's Mac awake and on the network (milestones D and E).
