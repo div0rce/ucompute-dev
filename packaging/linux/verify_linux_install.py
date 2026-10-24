@@ -6,7 +6,7 @@
 Unpacks the tarball into a scratch folder, installs its binary there and its systemd user unit under a throwaway
 name, with only ExecStart's path and port changed and COMMON_HOME set to a fresh data folder (the shipped unit's
 Restart and default KillMode are what is tested). Never touches ~/.local/bin, the real unit name or port 8192.
-Checks: SHA256SUMS; healthy within 10 s of start; `common setup` provisions the pinned engine and ldd resolves it;
+Checks: SHA256SUMS; `systemd-analyze verify` of the shipped unit; healthy within 10 s of start; `common setup` provisions the pinned engine and ldd resolves it;
 golden CPU completion; a SIGKILL of the daemon restarts it within 10 s with the old engine gone, golden again;
 `systemctl --user stop` frees the port with no engine left; removing the unit and binary keeps the data folder.
 Exit 0 ALL PASS, 3 any FAIL. SINGLE-HOST.
@@ -94,6 +94,11 @@ def run(a, scratch, unit, unit_path):
     bindir, data = os.path.join(scratch, "bin"), os.path.join(scratch, "data")
     os.makedirs(bindir)
     binary = shutil.copy2(os.path.join(pkg, "common"), bindir)
+    rc, out = sh("systemd-analyze", "--user", "verify", os.path.join(pkg, "common.service"))
+    # Only lines about this unit (it also warns about unrelated installed units); %h/.local/bin/common does not
+    # exist here, which is expected.
+    lint = [l for l in out.splitlines() if "common.service" in l and ".local/bin/common" not in l]
+    check("systemd-analyze verify finds nothing wrong in the shipped unit", not lint, output=lint)
     text = open(os.path.join(pkg, "common.service")).read()
     shipped = "ExecStart=%h/.local/bin/common serve --host 127.0.0.1 --port 8192"
     if not check("the shipped unit has the documented ExecStart", shipped in text):

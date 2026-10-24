@@ -24,6 +24,9 @@ signature and no owner approval of the format (spec section 4, M9).
   `scripts/gen_notices.py` (191 Rust packages for x86_64-unknown-linux-gnu, every licence allowed by `deny.toml`;
   sha256 of the tarball `19b8ee61eef994886648589d778308a100227b6b002aeb80a39f0b65f493dd68`): ALL PASS again, 15
   checks (`linux-install-2026-10-24/verify-linux-install-notices.json`).
+- With a lint step (01:10 UTC): `systemd-analyze --user verify` of the shipped unit reports nothing about it (a
+  misspelt key in a copy was reported, so the check can fail); ALL PASS, 16 checks
+  (`linux-install-2026-10-24/verify-linux-install-lint.json`), same tarball.
 - Not covered: the documented install paths themselves (`~/.local/bin`, port 8192, the real unit name: the owner's
   runners use port 8192 on sentinel), lingering and boot start, other distributions, an older glibc, GPU engines,
   networking (Mesh) under the unit, and a daemon built from HEAD with round 6.
