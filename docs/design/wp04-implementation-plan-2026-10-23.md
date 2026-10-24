@@ -446,6 +446,7 @@ R needs no model copy for the split. The local CPU references on sentinel need O
 4. **P1 (physical), as below.**
 
 ### P1 procedure
+- **Split point and expectations (lab, SINGLE-HOST loopback, 2026-10-23):** the lab planner's own split point beat hand-picked splits on every emulated link; with R holding block 0 plus 20 blocks and H the output layer it ran 47% faster than a 16/16 split with the output on R at 40 ms / 20 Mbit/s, with identical tokens: prefer more blocks on R and the output on H (config P). Same-backend split timing was predictable within ±25% on a quiet machine (TTFT 92%, TPOT 88%). Expect per-token time above (local stage times + RTT): an idling Metal stage ran about 2.5x slower per step (3.0 to about 8.0 ms from 4 ms RTT up), a device power-state effect, not the carriage's (lab split-exec Amendments 1 and 6).
 Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/pool-two-machine-<date>/run-<HHMM> tests/distributed/two_machine/run_mac_linux.sh`
 
 **P1.0 Preflight**
