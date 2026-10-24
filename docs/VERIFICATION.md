@@ -593,4 +593,4 @@ Spec section 29.5 row "Downloads and releases" and section 31: a private-alpha d
 | Gates D, E, F, G | Not claimed: no pooling is reachable (WP-04 code exists but no request path uses it); no fresh-account UI-only journey, uninstall/retention or VoiceOver evidence for the new UI texts (WP-01); no Developer ID signing, notarization, reproducible-build check or update path (B-008, Gate G) |
 | Cohort | **Not named.** Needs the owner (spec section 31) |
 | Where it is | This Mac: `~/UCompute-release-candidates/0.1.0-3379fe9/` (the DMG and `SHA256SUMS`). Not uploaded anywhere |
-| Approval | **Pending.** The owner's written approval of this exact artifact (SHA-256 above) and of the cohort, in `docs/DECISIONS.md` |
+| Approval | **Artifact approved (D-025, 2026-10-24); cohort not named**, so nothing may be distributed yet. The owner's tester names and the preview site's Access policy come next |
