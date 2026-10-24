@@ -27,7 +27,7 @@ signature and no owner approval of the format (spec section 4, M9).
 - With a lint step (01:10 UTC): `systemd-analyze --user verify` of the shipped unit reports nothing about it (a
   misspelt key in a copy was reported, so the check can fail); ALL PASS, 16 checks
   (`linux-install-2026-10-24/verify-linux-install-lint.json`), same tarball.
-- **At 0b0c1a4 (06:41 local), with the round 6 and 7 runtime:** `mac-host.sh sync` of HEAD into sentinel's
+- **At 0b0c1a4 (about 04:40 local, 2026-10-24), with the round 6 and 7 runtime:** `mac-host.sh sync` of HEAD into sentinel's
   `~/src/common`, `make-tarball.sh` (191 packages in the notices), tarball sha256
   `a99a77f2bf2bda228acb2cf328e1d18f1b3c132c8119b9dad10654f1152b7d5d`: ALL PASS, 16 checks, the SIGKILL recovery
   in 2.67 s with the killed daemon's engine gone (`linux-install-2026-10-24/verify-linux-install-0b0c1a4.json`).
