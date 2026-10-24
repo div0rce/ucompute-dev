@@ -42,8 +42,8 @@ loaded on `cpu` (6 of 6 layers on CPU, n_ctx 128) and completed with the golden 
   two, A listed B but B's (the Mac's) nearby list stayed empty for the 15 s allowed (finding 2). The rest passed:
   pairing with a wrong code first; groups and privacy; fixture pulled and loaded on both; golden remote execution
   A → B and **B → A (the Linux CPU serving the Mac)**, JSON and streaming; `local_only` refused on the sender; no prompt
-  text in either audit log; revocation, B refused, pairing again; B killed, A notices in 0.49 s, reconnect 3.7 s after
-  restart, golden again.
+  text in either audit log; revocation, B refused, pairing again; B killed, A notices in 0.52 s, reconnect 3.8 s after
+  restart, golden again (`run-1845/mesh/results.json`, steps 15-16; run-1838 gave 0.49 s and 3.7 s).
 
 ## Earlier runs the same afternoon (runner defects, fixed in 6de3487)
 

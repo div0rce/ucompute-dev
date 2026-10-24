@@ -501,6 +501,20 @@ AB_EXIT=0
 - Not covered: the startup race with another daemon on port 8192 (the packaged-app race check of fix round 5 stays deferred), Windows, and every two-machine step.
 - Artifacts: `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json` (the verifier's output; its paths name a scratch work directory that was not kept).
 
+## 2026-10-23 — Mac and Linux, fixed builds on two machines (TWO-MACHINE, daemon API run, evidence 177f7ed)
+
+- Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce OUT=<dir> CROSS_HOLD=1 tests/distributed/two_machine/run_mac_linux.sh` (runner 6de3487).
+- Hosts: A = sentinel (Ubuntu 26.04 x86_64, i9-9900K) running `common serve` built there from ce54da1 (mesh code identical to ffe1a47), CPU engine (D-024); B = this Mac's installed app from ffe1a47 (Metal). Home Wi-Fi with mDNS.
+- Result (final run, run-1845): discovery ALL PASS (2 N/A), hold ALL PASS (1 N/A), mesh all PASS but one: the Mac's nearby list lacked the Linux peer for the 15 s allowed after the unpair (finding 2). Golden remote execution both ways, JSON and streaming (B → A: the Linux CPU serving the Mac); revocation 0.002 s; B killed, A notices in 0.52 s, reconnect 3.8 s after restart. Both sides saved and restored every run (`state.py`, PASS).
+- Earlier runs run-1831 and run-1838 failed on runner defects only (fixed in 6de3487); none is a product result.
+- Not covered: Windows, Mac-to-Mac, the apps' windows. Details: `docs/evidence/mesh-physical-2026-10-23-linux.md`.
+
+## 2026-10-23 — Daemon crates' tests on Linux (SINGLE-HOST, sentinel, evidence e3c2ece)
+
+- Command: `COMMON_HOME=$HOME/.common-acceptance COMMON_MDNS=0 cargo test --no-fail-fast` (default members, not `--workspace`: the desktop crate needs GTK) at c811a90 (code equal to ce54da1).
+- Result: 446 passed, 5 failed, 2 ignored. Failures: the orphan reaper under a subreaper (product defect), `/api/status` during a load in the test (not reproduced with the release daemon: 120 polls during a 14.4 s load, max 0.36 ms), a macOS-only test pin (test defect), the two peer-flood tests on the CPU engine (to be determined). `COMMON_REQUIRE_FIXTURES` was not set.
+- Details and log: `docs/evidence/linux-tests-2026-10-23.md`.
+
 ## 2026-10-23 — Core Lab local-versus-remote calibration executed (TWO-MACHINE: this Mac + sentinel, home Wi-Fi)
 
 Engineering executed the Core Lab's pre-registered calibration (ucompute-core-lab `calibration/RUNBOOK.md`,
