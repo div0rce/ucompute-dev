@@ -39,6 +39,9 @@ const mmss = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
 
+/** Settings › General shows where the app writes the service's log. */
+const SHOW_LOG = { label: "Show service log", run: () => go("settings", "general") };
+
 /** Everything that needs attention now, most severe first. */
 export function useAttention(): AttentionItem[] {
   const d = daemon.use();
@@ -46,8 +49,13 @@ export function useAttention(): AttentionItem[] {
   const entries = attention.use();
   const now = useNow(1000, !!p);
   const items: AttentionItem[] = [];
-  if (d.reachable === false)
-    items.push({ id: "service-down", tone: "danger", text: "Service not running. Retrying automatically.", action: { label: "Retry now", run: () => void refreshStatus() }, dismissable: false });
+  const retry = { label: "Retry now", run: () => void refreshStatus() };
+  if (d.reachable === false && d.gaveUp)
+    items.push({ id: "service-down", tone: "danger", text: "Service stopped repeatedly and was not restarted. Quit and reopen the app.", action: SHOW_LOG, dismissable: false });
+  else if (d.reachable === false && d.restarting)
+    items.push({ id: "service-down", tone: "danger", text: "Service stopped unexpectedly. Restarting it.", action: retry, dismissable: false });
+  else if (d.reachable === false)
+    items.push({ id: "service-down", tone: "danger", text: "Service not running. Retrying automatically.", action: retry, dismissable: false });
   else if (d.reachable && d.responding === false)
     items.push({ id: "service-busy", tone: "warn", text: "Service busy (not answering)", action: { label: "Open Jobs", run: () => go("jobs") }, dismissable: false });
   const fallback = d.reachable ? d.status?.loaded?.fallback_reason : null;
@@ -62,10 +70,20 @@ const modelName = (id: string) => models.get().data?.find((m) => m.id === id)?.n
 /** Watches the stores for transitions; returns the stop function. */
 export function startWatchers(): () => void {
   let reachable = daemon.get().reachable;
+  // The app's restarts of its service already seen; undefined until the shell was read (no announcement for the count
+  // a reloaded window starts with).
+  let restarts = daemon.get().restarts;
   const offDaemon = daemon.subscribe(() => {
-    const now = daemon.get().reachable;
+    const d = daemon.get();
+    const now = d.reachable;
+    // Said once it answers again, also when no poll saw it down.
+    const restarted = restarts !== undefined && now === true && (d.restarts ?? 0) > restarts;
+    if (restarts === undefined || restarted) restarts = d.restarts;
     if (reachable === true && now === false) announce("Service stopped");
-    if (reachable === false && now === true) announce("Service started");
+    if (restarted) {
+      announce("Service restarted");
+      pushAttention({ id: "service-restarted", tone: "warn", text: "Service stopped unexpectedly and was restarted", action: SHOW_LOG });
+    } else if (reachable === false && now === true) announce("Service started");
     reachable = now;
   });
 

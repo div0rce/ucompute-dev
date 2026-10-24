@@ -28,6 +28,11 @@ export interface DaemonState {
   at?: number | null;
   /** The last `/api/status` answered with an HTTP error: the service runs, but `status` is the last good one, not live. */
   statusError?: MappedError | null;
+  /** From the app shell: automatic restarts of its own service (absent until read), one waiting, given up, its log file. */
+  restarts?: number;
+  restarting?: boolean;
+  gaveUp?: boolean;
+  logPath?: string | null;
 }
 export const daemon = createStore<DaemonState>({ reachable: null, version: null, status: null, spawned: false, responding: true, at: null });
 /** The kept `status` is the last good one, not live: a status poll timed out (busy) or answered with an HTTP error. */

@@ -14,8 +14,11 @@ What it checks (stdlib only, no repo build artefacts are used at run time):
  3. Real inference through the app's daemon: pull the stories15M fixture, load it, check the golden completion.
  4. Quit (SIGTERM to the app, the same RunEvent::Exit path as Cmd+Q): daemon and engine stop, port 8192 is free.
  5. Restart: healthy again, one daemon, one engine, inference again.
- 6. Crash (SIGKILL to the app): the daemon notices via --exit-with-parent and stops itself and its engine.
- 7. Restart after the crash, quit, and nothing from the install is left running.
+ 6. Daemon killed (SIGKILL to the daemon only, the app stays): the app restarts one daemon, /health answers within
+    10 s of the kill (plan M4 step 4.1), the restarted daemon stops the killed one's engine, inference works again
+    with one engine, and the app's daemon.log holds both runs (each one's start note and listening line).
+ 7. Crash (SIGKILL to the app): the daemon notices via --exit-with-parent and stops itself and its engine.
+ 8. Restart after the crash, quit, and nothing from the install is left running.
 Needs network access (engine archive from GitHub, fixture from Hugging Face) and a free port 8192.
 """
 import argparse
@@ -173,6 +176,17 @@ class Install:
         return (self.work / f"app-run{self.runs}.log").read_text(errors="replace")
 
 
+def log_holds_both_runs(text, killed, restarted):
+    """The app's daemon.log has the killed daemon's start note and listening line, then the restart note, then the
+    restarted daemon's start note and listening line. The log persists across launches (earlier stages wrote to it
+    too), so a plain count of listening lines would pass without the restarted daemon's output."""
+    listen = f"listening on http://127.0.0.1:{PORT}"
+    a = text.find(f"common-desktop: started the daemon, pid {killed}\n")
+    b = text.find("common-desktop: restarting the daemon in", a) if a >= 0 else -1
+    c = text.find(f"common-desktop: started the daemon, pid {restarted}\n", b) if b >= 0 else -1
+    return a >= 0 and listen in text[a:b] and c > b and listen in text[c:]
+
+
 def infer(tag):
     t0 = time.monotonic()
     status, body = http("POST", f"/api/models/{MODEL}/load", {"device": "auto"})
@@ -290,7 +304,27 @@ def main():
         step("restart: one engine", len(inst.engines()) == 1, engines=inst.engines())
         daemon2, engines2 = sc[0][0], inst.engines()
 
-        # 6. crash
+        # 6. the daemon dies, the app stays: it restarts one daemon and kept the output of both
+        os.kill(daemon2, signal.SIGKILL)
+        killed = time.monotonic()
+        wait(lambda: not alive(daemon2), 10, "daemon killed: it exits")
+
+        def restarted():
+            sc = inst.sidecars()
+            return len(sc) == 1 and sc[0][0] != daemon2 and healthy()
+        wait(restarted, 10 - (time.monotonic() - killed), "daemon killed: /health within 10 s of the kill")
+        t = round(time.monotonic() - killed, 3)
+        sc = inst.sidecars()
+        wait(lambda: not any(alive(e) for e in engines2), 10, "daemon killed: its engine is stopped")
+        log = inst.home / "Library/Logs/org.commoncompute.desktop/daemon.log"
+        text = log.read_text(errors="replace") if log.is_file() else ""
+        step("daemon killed (SIGKILL daemon only): the app restarts one daemon and its log holds both runs",
+             sc[0][1] == app_pid and log_holds_both_runs(text, daemon2, sc[0][0]), restarted_after_s=t, sidecar=sc, log=str(log), log_bytes=len(text))
+        infer("daemon restarted")
+        step("daemon restarted: one engine", len(inst.engines()) == 1, engines=inst.engines())
+        daemon2, engines2 = sc[0][0], inst.engines()
+
+        # 7. crash
         os.kill(app_pid, signal.SIGKILL)
         inst.proc.wait()
         t_d = wait(lambda: not alive(daemon2), 10, "crash: daemon exits after the app was killed")
@@ -298,7 +332,7 @@ def main():
         wait(lambda: not port_open(), 10, "crash: port 8192 released")
         step("crash (SIGKILL app): --exit-with-parent stops daemon and engine", True, daemon_gone_s=t_d)
 
-        # 7. restart after crash, quit, nothing left
+        # 8. restart after crash, quit, nothing left
         app_pid = inst.launch()
         t = wait(healthy, 60, "restart after crash: daemon healthy")
         sc = inst.sidecars()

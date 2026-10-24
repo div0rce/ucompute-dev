@@ -116,7 +116,9 @@ function General() {
           },
           { k: "Service version", v: d.status?.version ?? d.version ?? <Unavailable reason="not reported yet" /> },
           { k: "Service address", v: <code>{getBaseUrl()}</code>, note: dev ? "(chosen with ?daemon=, development only)" : "Only listens on this computer." },
-          { k: "Started by", v: d.spawned ? "This app" : "Something else (already running when the app opened)" },
+          { k: "Started by", v: d.spawned ? "This app" : "Something else (already running when this app went to start its own)" },
+          ...(d.restarts ? [{ k: "Restarted by this app", v: `${plural(d.restarts, "time")} after it stopped unexpectedly` }] : []),
+          ...(d.logPath ? [{ k: "Service log", v: <code>{d.logPath}</code>, note: "The service's output, kept by this app: two files of about 5 MB each." }] : []),
         ]}
       />
     </>

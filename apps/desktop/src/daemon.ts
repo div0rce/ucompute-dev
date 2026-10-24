@@ -6,7 +6,19 @@ import { daemon } from "./state/stores";
 export interface DaemonInfo {
   base_url: string;
   spawned: boolean;
+  /** Times the app restarted its own service after it stopped unexpectedly. Absent from an older app shell. */
+  restarts?: number;
+  /** It stopped unexpectedly and the app restarts it after a short wait. */
+  restarting?: boolean;
+  /** It stopped again after three restarts within a minute; the app no longer restarts it. */
+  gave_up?: boolean;
+  /** Where the app writes the service's output; null when it could not. */
+  log_path?: string | null;
 }
+
+const fromShell = (i: DaemonInfo) => ({ spawned: i.spawned, restarts: i.restarts ?? 0, restarting: !!i.restarting, gaveUp: !!i.gave_up, logPath: i.log_path ?? null });
+/** Inside the app and not a `?daemon=` tab: the shell's own service is the one shown, so its restarts are too. */
+let shellOwnsService = false;
 
 const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -65,9 +77,17 @@ export async function allowThroughFirewall(): Promise<void> {
  * One poll of `/api/status`. A timeout or a network failure asks `GET /health` (1 s): if it answers, the service is
  * running but busy (`responding: false`, last status kept); only when it does not is the service down
  * (`reachable: false`, status cleared). An HTTP error means the service answered, but the kept status is not live:
- * `statusError` marks it (the status bar says "not updated").
+ * `statusError` marks it (the status bar says "not updated"). Inside the app it first reads the shell's restarts of
+ * its own service (`daemon_info`), so a service seen running again is already known as restarted.
  */
 export async function refreshStatus(timeoutMs = 5000): Promise<void> {
+  if (shellOwnsService && inTauri()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke<DaemonInfo>("daemon_info").then(
+      (i) => daemon.set((d) => ({ ...d, ...fromShell(i) })),
+      () => undefined,
+    );
+  }
   try {
     const status = await api.status({ timeoutMs });
     daemon.set((d) => ({ ...d, reachable: true, responding: true, version: status.version, status, at: Date.now(), statusError: null }));
@@ -87,8 +107,9 @@ export async function refreshStatus(timeoutMs = 5000): Promise<void> {
 /** Finds the daemon, takes one status reading, then starts the poller (status every 2.5 s plus the live stores). */
 export async function startDaemonPolling(): Promise<() => void> {
   const info = await discoverDaemon();
+  shellOwnsService = inTauri() && !devDaemonUrl(window.location.search);
   configure({ baseUrl: info.base_url });
-  daemon.set((d) => ({ ...d, spawned: info.spawned }));
+  daemon.set((d) => ({ ...d, ...fromShell(info) }));
   await refreshStatus();
   return startPoller();
 }

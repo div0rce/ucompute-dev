@@ -1,10 +1,13 @@
-//! Thin shell: make sure the Common daemon is serving on loopback, tell the UI where it is, and stop the
-//! daemon again on exit if this app started it. Everything else is HTTP from the webview.
+//! Thin shell: make sure the Common daemon is serving on loopback, tell the UI where it is, restart the
+//! daemon this app started when it dies, keep its output in a capped log, and stop it again on exit.
+//! Everything else is HTTP from the webview.
 
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tauri::{Manager, RunEvent};
@@ -23,6 +26,12 @@ const SIDECAR: &str = "common"; // tauri resolves sidecars by basename next to t
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a quitting app waits for the daemon to stop its engine and exit after it was asked to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// The app restarts its own daemon after an unexpected exit at most this many times within any
+/// [`RESTART_WINDOW`], so a daemon that crashes at every start is not restarted for ever.
+const RESTART_MAX: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// Size cap of each daemon log file (see [`LogFile`]): at most two files, about twice this on disk.
+const LOG_CAP: u64 = 5 * 1024 * 1024;
 
 /// Windows has no `--exit-with-parent` (no parent pid to poll) and no SIGTERM: put the daemon in a job
 /// object that ends its processes when its last handle closes. Only this app holds that handle and
@@ -95,9 +104,193 @@ fn daemon_addr() -> SocketAddr {
         .expect("daemon-args.txt --host/--port form a socket address")
 }
 
-struct Daemon {
-    child: Mutex<Option<CommandChild>>,
+/// The daemon this app started, across restarts. One lock over the child, its run and `quitting`, so a restart
+/// and Quit never race: Quit sets `quitting` and takes the child under it, and a restart starts a daemon under it
+/// only while `quitting` is unset.
+#[derive(Default)]
+struct Supervised {
+    child: Option<CommandChild>,
+    /// The current daemon's run; `Run::default()` (not spawned) for a daemon this app did not start.
     run: Arc<Run>,
+    quitting: bool,
+    restarts: Restarts,
+    /// Automatic restarts so far, for the UI.
+    restarted: u32,
+    /// It exited unexpectedly and its restart waits for the backoff.
+    restarting: bool,
+    /// It exited unexpectedly once more after [`RESTART_MAX`] restarts within [`RESTART_WINDOW`]: not restarted.
+    gave_up: bool,
+}
+
+/// When the app restarted its daemon, within the last [`RESTART_WINDOW`].
+#[derive(Default)]
+struct Restarts(Vec<Instant>);
+
+impl Restarts {
+    /// The wait before restarting a daemon that exited at `now` (1, 2, then 4 s), counted as a restart; `None`
+    /// once [`RESTART_MAX`] restarts happened within the [`RESTART_WINDOW`] before `now`.
+    fn next(&mut self, now: Instant) -> Option<Duration> {
+        self.0.retain(|t| now.saturating_duration_since(*t) < RESTART_WINDOW);
+        if self.0.len() >= RESTART_MAX {
+            return None;
+        }
+        let wait = Duration::from_secs(1 << self.0.len());
+        self.0.push(now);
+        Some(wait)
+    }
+}
+
+/// The daemon's output as this app keeps it: appended to `path` until the next line would take it past `cap`
+/// bytes, then `path` becomes `path.1` (replacing the older one) and a new `path` starts.
+struct LogFile {
+    path: PathBuf,
+    file: File,
+    len: u64,
+    cap: u64,
+}
+
+/// Opens `path` for appending; owner-only on unix (it holds device names and addresses).
+fn append_to(path: &Path) -> std::io::Result<File> {
+    let mut o = OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)
+}
+
+impl LogFile {
+    fn open(path: &Path, cap: u64) -> std::io::Result<Self> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let file = append_to(path)?;
+        let len = file.metadata()?.len();
+        Ok(LogFile {
+            path: path.to_path_buf(),
+            file,
+            len,
+            cap,
+        })
+    }
+
+    /// Appends `line`, with a newline when it has none.
+    // ponytail: a line longer than `cap` is kept whole, in a file of its own.
+    fn write_line(&mut self, line: &[u8]) -> std::io::Result<()> {
+        let nl = !line.ends_with(b"\n");
+        let n = line.len() as u64 + u64::from(nl);
+        if self.len > 0 && self.len + n > self.cap {
+            let mut older = self.path.clone().into_os_string();
+            older.push(".1");
+            if fs::rename(&self.path, &older).is_ok() {
+                self.file = append_to(&self.path)?;
+            } else {
+                // Held open elsewhere without delete sharing (a log viewer on Windows): the cap matters more than
+                // the older lines.
+                self.file.set_len(0)?;
+            }
+            self.len = 0;
+        }
+        self.file.write_all(line)?;
+        if nl {
+            self.file.write_all(b"\n")?;
+        }
+        self.len += n;
+        Ok(())
+    }
+}
+
+struct Daemon {
+    sup: Mutex<Supervised>,
+    /// `None` when it could not be opened, or after a write failed.
+    log: Mutex<Option<LogFile>>,
+    log_path: Option<PathBuf>,
+}
+
+impl Daemon {
+    fn new(log_path: Option<PathBuf>) -> Self {
+        let log = log_path.as_deref().and_then(|p| {
+            LogFile::open(p, LOG_CAP)
+                .map_err(|e| eprintln!("common-desktop: cannot open the daemon log {}: {e}", p.display()))
+                .ok()
+        });
+        Daemon {
+            sup: Mutex::default(),
+            log: Mutex::new(log),
+            log_path,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Supervised> {
+        self.sup.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Appends one line of the daemon's output to the log; after a failed write it logs nothing more.
+    fn log(&self, line: &[u8]) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(Err(e)) = log.as_mut().map(|f| f.write_line(line)) {
+            eprintln!("common-desktop: cannot write the daemon log: {e}; not writing it any more");
+            *log = None;
+        }
+    }
+
+    /// This shell's own line about the daemon: on stderr and in the log.
+    fn note(&self, msg: &str) {
+        eprintln!("common-desktop: {msg}");
+        self.log(format!("common-desktop: {msg}").as_bytes());
+    }
+
+    /// The daemon this app started exited with `code`: the wait before restarting it, or `None` when it is not
+    /// restarted: the app is quitting, the daemon stopped on request (0: SIGTERM, `/api/shutdown`) or rejected
+    /// its command line (2: a restart cannot help), or it was restarted too often ([`Restarts::next`]).
+    fn after_exit(&self, code: Option<i32>, now: Instant) -> Option<Duration> {
+        let mut s = self.lock();
+        if s.quitting || matches!(code, Some(0 | 2)) {
+            return None;
+        }
+        let wait = s.restarts.next(now);
+        s.restarting = wait.is_some();
+        s.gave_up = wait.is_none();
+        drop(s);
+        match wait {
+            Some(w) => self.note(&format!("restarting the daemon in {w:?}")),
+            None => self.note(&format!(
+                "the daemon exited again after {RESTART_MAX} restarts within {RESTART_WINDOW:?}; not restarting it"
+            )),
+        }
+        wait
+    }
+
+    /// The restart [`Daemon::after_exit`] waited for. Never while quitting, and never while a daemon serves `addr`:
+    /// that one is used instead, as at launch, so there are never two. `spawn` starts the sidecar into the state.
+    /// When it cannot (the sidecar missing, fork failing), that counts as one more unexpected exit: the wait
+    /// before the next try, or `None` once the restarts are used up ([`Restarts::next`]) and `gave_up` is set.
+    // ponytail: a daemon adopted here is not supervised again, like one adopted at launch; if it stops, the UI
+    // says the service is not running until the app is reopened. Watch its /health if that race matters.
+    fn restart(&self, addr: SocketAddr, spawn: impl FnOnce(&mut Supervised) -> bool) -> Option<Duration> {
+        // Probed outside the lock: `daemon_info` runs on the main thread. A daemon that takes the port after the
+        // probe makes ours fail to bind and exit, which comes back here.
+        let serving = health_ok(addr);
+        let mut s = self.lock();
+        s.restarting = false;
+        if s.quitting {
+            return None;
+        }
+        if serving {
+            s.child = None;
+            s.run = Arc::new(Run::default());
+            drop(s);
+            self.note(&format!(
+                "a daemon is already serving on {addr}; using it instead of restarting ours"
+            ));
+            return None;
+        }
+        if spawn(&mut s) {
+            s.restarted += 1;
+            return None;
+        }
+        drop(s);
+        self.after_exit(None, Instant::now())
+    }
 }
 
 /// The bundled daemon this app started, as its sidecar event loop reports it.
@@ -182,7 +375,14 @@ fn stop_daemon(child: CommandChild, run: &Run) {
 #[derive(serde::Serialize)]
 struct DaemonInfo {
     base_url: String,
+    /// The serving daemon is (or, until it exits, was) the one this app started.
     spawned: bool,
+    /// Times this app restarted its daemon after it exited unexpectedly.
+    restarts: u32,
+    restarting: bool,
+    gave_up: bool,
+    /// Where this app writes the daemon's output; `None` when it could not.
+    log_path: Option<String>,
 }
 
 /// One HTTP/1.1 request over a raw TCP socket; true when the answer has `status`. No HTTP client
@@ -259,18 +459,29 @@ fn quit_on_signals(handle: tauri::AppHandle) {
 
 #[tauri::command]
 fn daemon_info(state: tauri::State<'_, Daemon>) -> DaemonInfo {
+    let log_open = state.log.lock().map(|l| l.is_some()).unwrap_or(false);
+    let s = state.lock();
     DaemonInfo {
         base_url: format!("http://{}", daemon_addr()),
-        spawned: state.run.spawned,
+        spawned: s.run.spawned,
+        restarts: s.restarted,
+        restarting: s.restarting,
+        gave_up: s.gave_up,
+        log_path: state
+            .log_path
+            .as_ref()
+            .filter(|_| log_open)
+            .map(|p| p.display().to_string()),
     }
 }
 
 /// Windows Firewall state for the bundled daemon; `supported: false` elsewhere, `adopted` when the
 /// serving daemon is not the one this app started (or that one exited). Read-only; `Err` when the
 /// rules could not be read. Waits while the app's own daemon is still starting.
+// ponytail: during a restart's backoff the exited run reads "not ours" (adopted) until the UI reads again.
 #[tauri::command]
 async fn firewall_status(state: tauri::State<'_, Daemon>) -> Result<firewall::Status, String> {
-    let run = state.run.clone();
+    let run = state.lock().run.clone();
     tauri::async_runtime::spawn_blocking(move || firewall::status_for(run.ours_once_started(HEALTH_TIMEOUT)))
         .await
         .map_err(|e| e.to_string())?
@@ -281,10 +492,101 @@ async fn firewall_status(state: tauri::State<'_, Daemon>) -> Result<firewall::St
 /// once the one it started exited.
 #[tauri::command]
 async fn allow_through_firewall(state: tauri::State<'_, Daemon>) -> Result<(), String> {
-    let run = state.run.clone();
+    let run = state.lock().run.clone();
     tauri::async_runtime::spawn_blocking(move || firewall::allow_for(run.ours_once_started(HEALTH_TIMEOUT)))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Starts the bundled daemon into `s` (the caller holds the lock) and watches it: its output goes to stderr and
+/// the log, its listening line marks the bind, and its exit goes to [`Daemon::after_exit`] and, when that says
+/// so, a restart through here again. False when it could not be started.
+fn spawn_daemon(app: &tauri::AppHandle, s: &mut Supervised) -> bool {
+    let daemon = app.state::<Daemon>();
+    let addr = daemon_addr();
+    // The sidecar may be absent in `pnpm dev` without a packaged binary; the UI then shows
+    // "service not running" and the developer starts `common serve` by hand.
+    let started = match app.shell().sidecar(SIDECAR) {
+        Ok(cmd) => cmd
+            .args(daemon_args())
+            .spawn()
+            .map_err(|e| format!("could not start the daemon sidecar: {e}")),
+        Err(e) => Err(format!("daemon sidecar not available: {e}")),
+    };
+    let (mut rx, child) = match started {
+        Ok(x) => x,
+        Err(e) => {
+            daemon.note(&e);
+            return false;
+        }
+    };
+    #[cfg(windows)]
+    end_with_this_app(child.pid());
+    daemon.note(&format!("started the daemon, pid {}", child.pid()));
+    let run = Arc::new(Run {
+        spawned: true,
+        ..Run::default()
+    });
+    s.child = Some(child);
+    s.run = run.clone();
+    let code = Arc::new(AtomicI32::new(i32::MIN));
+    let (ev_run, ev_code, ev_app) = (run.clone(), code.clone(), app.clone());
+    tauri::async_runtime::spawn(async move {
+        let daemon = ev_app.state::<Daemon>();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                CommandEvent::Stdout(l) | CommandEvent::Stderr(l) => {
+                    if is_listening_line(&l, addr) {
+                        ev_run.bound.store(true, Ordering::SeqCst);
+                    }
+                    eprint!("common: {}", String::from_utf8_lossy(&l));
+                    daemon.log(&l);
+                }
+                CommandEvent::Terminated(p) => {
+                    daemon.note(&format!("daemon exited with code {:?}, signal {:?}", p.code, p.signal));
+                    ev_code.store(p.code.unwrap_or(-1), Ordering::SeqCst);
+                    ev_run.exited.store(true, Ordering::SeqCst);
+                    let app = ev_app.clone();
+                    std::thread::spawn(move || {
+                        let daemon = app.state::<Daemon>();
+                        let mut next = daemon.after_exit(p.code, Instant::now());
+                        while let Some(wait) = next {
+                            std::thread::sleep(wait);
+                            next = daemon.restart(daemon_addr(), |s| spawn_daemon(&app, s));
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+    let started = app.clone();
+    std::thread::spawn(move || {
+        let daemon = started.state::<Daemon>();
+        let start = Instant::now();
+        while start.elapsed() < HEALTH_TIMEOUT {
+            // A 200 before our daemon bound the port is another daemon's.
+            if run.ours() && health_ok(addr) {
+                daemon.note(&format!("daemon healthy on {addr}"));
+                return;
+            }
+            if run.exited.load(Ordering::SeqCst) {
+                // Exit code 2 is a command-line usage error: the bundled daemon
+                // does not accept the arguments this app passes.
+                let c = code.load(Ordering::SeqCst);
+                let why = if c == 2 {
+                    " (it rejected its command line: the app and its bundled daemon come from different builds)"
+                } else {
+                    ""
+                };
+                daemon.note(&format!("daemon exited with code {c} before becoming healthy{why}"));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        daemon.note(&format!("daemon did not become healthy within {HEALTH_TIMEOUT:?}"));
+    });
+    true
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -296,92 +598,36 @@ pub fn run() {
             #[cfg(unix)]
             quit_on_signals(app.handle().clone());
             let addr = daemon_addr();
-            let mut child = None;
-            let mut run = Arc::new(Run::default());
+            // macOS: ~/Library/Logs/<identifier>; Windows and Linux: <local data>/<identifier>/logs.
+            let log_path = app.path().app_log_dir().ok().map(|d| d.join("daemon.log"));
+            app.manage(Daemon::new(log_path));
+            let daemon = app.state::<Daemon>();
             if health_ok(addr) {
-                eprintln!("common-desktop: daemon already serving on {addr}; not spawning the sidecar");
+                daemon.note(&format!("daemon already serving on {addr}; not spawning the sidecar"));
             } else {
-                // The sidecar may be absent in `pnpm dev` without a packaged binary; the UI then shows
-                // "service not running" and the developer starts `common serve` by hand.
-                match app.shell().sidecar(SIDECAR) {
-                    Ok(cmd) => match cmd
-                        .args(daemon_args())
-                        .spawn()
-                    {
-                        Ok((mut rx, c)) => {
-                            #[cfg(windows)]
-                            end_with_this_app(c.pid());
-                            child = Some(c);
-                            run = Arc::new(Run {
-                                spawned: true,
-                                ..Run::default()
-                            });
-                            let code = Arc::new(AtomicI32::new(i32::MIN));
-                            let (ev_run, ev_code) = (run.clone(), code.clone());
-                            tauri::async_runtime::spawn(async move {
-                                while let Some(ev) = rx.recv().await {
-                                    match ev {
-                                        CommandEvent::Stdout(l) | CommandEvent::Stderr(l) => {
-                                            if is_listening_line(&l, addr) {
-                                                ev_run.bound.store(true, Ordering::SeqCst);
-                                            }
-                                            eprint!("common: {}", String::from_utf8_lossy(&l));
-                                        }
-                                        CommandEvent::Terminated(p) => {
-                                            eprintln!("common-desktop: daemon exited with {:?}", p.code);
-                                            ev_code.store(p.code.unwrap_or(-1), Ordering::SeqCst);
-                                            ev_run.exited.store(true, Ordering::SeqCst);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            });
-                            let started = run.clone();
-                            std::thread::spawn(move || {
-                                let start = Instant::now();
-                                while start.elapsed() < HEALTH_TIMEOUT {
-                                    // A 200 before our daemon bound the port is another daemon's.
-                                    if started.ours() && health_ok(addr) {
-                                        eprintln!("common-desktop: daemon healthy on {addr}");
-                                        return;
-                                    }
-                                    if started.exited.load(Ordering::SeqCst) {
-                                        // Exit code 2 is a command-line usage error: the bundled daemon
-                                        // does not accept the arguments this app passes.
-                                        let c = code.load(Ordering::SeqCst);
-                                        let why = if c == 2 {
-                                            " (it rejected its command line: the app and its bundled daemon come from different builds)"
-                                        } else {
-                                            ""
-                                        };
-                                        eprintln!("common-desktop: daemon exited with code {c} before becoming healthy{why}");
-                                        return;
-                                    }
-                                    std::thread::sleep(Duration::from_millis(200));
-                                }
-                                eprintln!("common-desktop: daemon did not become healthy within {HEALTH_TIMEOUT:?}");
-                            });
-                        }
-                        Err(e) => eprintln!("common-desktop: could not start the daemon sidecar: {e}"),
-                    },
-                    Err(e) => eprintln!("common-desktop: daemon sidecar not available: {e}"),
-                }
+                spawn_daemon(app.handle(), &mut daemon.lock());
             }
-            app.manage(Daemon {
-                child: Mutex::new(child),
-                run,
-            });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![daemon_info, firewall_status, allow_through_firewall])
+        .invoke_handler(tauri::generate_handler![
+            daemon_info,
+            firewall_status,
+            allow_through_firewall
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
             let daemon = app.state::<Daemon>();
-            if let Some(child) = daemon.child.lock().ok().and_then(|mut c| c.take()) {
-                stop_daemon(child, &daemon.run);
+            // Under the lock: a restart still waiting for its backoff then starts nothing.
+            let (child, run) = {
+                let mut s = daemon.lock();
+                s.quitting = true;
+                (s.child.take(), s.run.clone())
+            };
+            if let Some(child) = child {
+                stop_daemon(child, &run);
             }
         }
     });
@@ -499,6 +745,124 @@ mod tests {
         assert!(!ask_to_stop(false, addr), "another daemon's port");
         assert!(ask_to_stop(true, addr), "the one request goes to our own daemon");
         assert!(req.join().unwrap().starts_with("POST /api/shutdown "));
+    }
+
+    /// F-08-04: a daemon that dies is restarted after 1, 2, then 4 s; a fourth exit within a minute of the
+    /// first restart is not restarted (a daemon that crashes at every start); after a quiet minute it is again.
+    #[test]
+    fn restarts_back_off_and_stop_after_three_within_a_minute() {
+        let s = Duration::from_secs;
+        let mut r = Restarts::default();
+        let t = Instant::now();
+        assert_eq!(r.next(t), Some(s(1)));
+        assert_eq!(r.next(t + s(1)), Some(s(2)));
+        assert_eq!(r.next(t + s(3)), Some(s(4)));
+        assert_eq!(r.next(t + s(10)), None);
+        assert_eq!(r.next(t + s(59)), None, "the first restart is still within the minute");
+        assert_eq!(r.next(t + s(63)), Some(s(1)), "all three are older than a minute");
+    }
+
+    /// Only an unexpected exit is restarted: not one the app asked for while quitting, not a daemon stopped on
+    /// request (exit 0) and not one that rejected its command line (exit 2). A signal or an error exit is.
+    #[test]
+    fn only_an_unexpected_exit_is_restarted() {
+        let s = Duration::from_secs;
+        let t = Instant::now();
+        let d = Daemon::new(None);
+        assert_eq!(d.after_exit(Some(0), t), None, "stopped on request");
+        assert_eq!(d.after_exit(Some(2), t), None, "rejected its command line");
+        assert!(!d.lock().restarting);
+        assert_eq!(d.after_exit(None, t), Some(s(1)), "killed by a signal");
+        assert!(d.lock().restarting);
+        assert_eq!(d.after_exit(Some(101), t), Some(s(2)), "panicked");
+        assert_eq!(d.after_exit(Some(1), t), Some(s(4)), "failed");
+        assert_eq!(d.after_exit(Some(1), t), None, "a fourth time within the minute");
+        let st = d.lock();
+        assert!(st.gave_up && !st.restarting);
+        drop(st);
+
+        let q = Daemon::new(None);
+        q.lock().quitting = true;
+        assert_eq!(q.after_exit(None, t), None, "the app is quitting");
+        assert!(!q.lock().restarting);
+    }
+
+    /// Never two daemons: a restart that finds a daemon serving the port uses it (not ours, as at launch) and
+    /// starts none; Quit during the backoff starts none either.
+    #[test]
+    fn a_restart_never_starts_a_second_daemon_nor_one_while_quitting() {
+        let d = Daemon::new(None);
+        d.lock().run = run(true);
+        d.lock().restarting = true;
+        let (other, req) = answer("200 OK");
+        d.restart(other, |_| panic!("a daemon already serves the port"));
+        assert!(req.join().unwrap().starts_with("GET /health "));
+        let st = d.lock();
+        assert!(!st.run.spawned, "the serving daemon is adopted, not ours");
+        assert!(!st.restarting && st.restarted == 0);
+        drop(st);
+
+        let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        d.restart(free, |s| {
+            s.run = run(true);
+            true
+        });
+        assert_eq!(d.lock().restarted, 1);
+
+        d.lock().quitting = true;
+        d.restart(free, |_| panic!("the app is quitting"));
+        assert_eq!(d.lock().restarted, 1);
+    }
+
+    /// Round 6: a sidecar that could not be started during a restart stopped supervision silently (no retry, no
+    /// gave_up) while the UI said "Retrying automatically". It counts as one more exit, within the same bounds.
+    #[test]
+    fn a_restart_that_cannot_start_the_sidecar_retries_then_gives_up() {
+        let s = Duration::from_secs;
+        let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let d = Daemon::new(None);
+        assert_eq!(d.after_exit(None, Instant::now()), Some(s(1)), "killed");
+        assert_eq!(d.restart(free, |_| false), Some(s(2)), "could not start: tried again");
+        let st = d.lock();
+        assert!(st.restarting && !st.gave_up);
+        drop(st);
+        assert_eq!(d.restart(free, |_| false), Some(s(4)));
+        assert_eq!(d.restart(free, |_| false), None, "three tries within the minute");
+        let st = d.lock();
+        assert!(st.gave_up && !st.restarting && st.restarted == 0);
+    }
+
+    /// F-10-06: the daemon's output is kept, capped: past the cap `daemon.log` becomes `daemon.log.1` (replacing
+    /// the older one), so two files at most, the newest lines in `daemon.log`; a restarted app appends.
+    #[test]
+    fn the_daemon_log_rotates_at_its_cap_and_keeps_one_older_file() {
+        let dir = std::env::temp_dir().join(format!("common-desktop-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("logs").join("daemon.log");
+        let older = dir.join("logs").join("daemon.log.1");
+        let read = |p: &Path| fs::read_to_string(p).unwrap();
+        let line = |c: &str| format!("{}\n", c.repeat(59)); // 60 bytes
+
+        let mut log = LogFile::open(&path, 100).unwrap();
+        log.write_line(line("a").as_bytes()).unwrap();
+        log.write_line("b".repeat(59).as_bytes()).unwrap(); // no newline: one is added
+        assert_eq!(read(&path), line("b"));
+        assert_eq!(read(&older), line("a"));
+        drop(log);
+
+        let mut log = LogFile::open(&path, 100).unwrap();
+        log.write_line(line("c").as_bytes()).unwrap();
+        assert_eq!(read(&path), line("c"));
+        assert_eq!(read(&older), line("b"), "the oldest lines are gone");
+        log.write_line(b"d\n").unwrap();
+        assert_eq!(read(&path), line("c") + "d\n", "under the cap: appended");
+        assert_eq!(fs::read_dir(dir.join("logs")).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The Windows quit path: POST /api/shutdown to the loopback daemon; only a 202 counts as

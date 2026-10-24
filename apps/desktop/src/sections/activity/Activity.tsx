@@ -142,7 +142,9 @@ export default function Activity() {
   const columns = activityColumns(names);
 
   async function copyDiagnostics() {
-    const app = { app: "common-desktop 0.1.0", service_url: getBaseUrl(), service_spawned_by_app: d.spawned, reachable: d.reachable, generated_at: new Date().toISOString() };
+    // The log's path holds the account name: it is shown, not copied.
+    const app = { app: "common-desktop 0.1.0", service_url: getBaseUrl(), service_spawned_by_app: d.spawned, service_restarts_by_app: d.restarts ?? 0, service_restarts_given_up: !!d.gaveUp, reachable: d.reachable, generated_at: new Date().toISOString() };
+    const log = d.logPath ? ` The service's own log is in ${d.logPath}.` : "";
     let report: Record<string, unknown>;
     let what: string;
     try {
@@ -151,7 +153,7 @@ export default function Activity() {
       what = "the service's redacted bundle";
     } catch (e) {
       if (e instanceof ApiError && e.code !== "not_implemented" && e.status !== 404) {
-        setCopied(`Could not build the bundle: ${explain(e).title}`);
+        setCopied(`Could not build the bundle: ${explain(e).title}${log}`);
         return;
       }
       // No bundle route (N5): status and hardware only.
@@ -170,7 +172,7 @@ export default function Activity() {
     }
     try {
       await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
-      setCopied(`Diagnostics copied. They contain ${what}, never your messages.`);
+      setCopied(`Diagnostics copied. They contain ${what}, never your messages.${log}`);
     } catch {
       setCopied("Could not access the clipboard.");
     }

@@ -2,9 +2,10 @@
 
 The desktop app is a thin shell around the daemon. A Rust daemon (`common serve`) owns models,
 hardware probing and inference and exposes a local HTTP API on `http://127.0.0.1:8192`. This Tauri 2 +
-React 19 app only renders that API; the Tauri Rust side does three things: it starts the bundled daemon
-when none is running (and stops it on exit), it answers `daemon_info()` with the base URL, and on Windows it
-reads and, with the user's consent, adds the daemon's firewall rule (`firewall_status`, `allow_through_firewall`).
+React 19 app only renders that API; the Tauri Rust side does four things: it starts the bundled daemon
+when none is running (restarts it if it dies, and stops it on exit), it keeps the daemon's output in a capped log
+file, it answers `daemon_info()` with the base URL and the restart state, and on Windows it reads and, with the
+user's consent, adds the daemon's firewall rule (`firewall_status`, `allow_through_firewall`).
 
 All API access lives in `src/api/client.ts`. If the daemon contract changes, that is the one file to edit.
 Plain-language error texts live in `src/api/errors.ts` and are checked against
@@ -248,6 +249,28 @@ Daemon lifecycle:
   on other computers for about two minutes.)
 - If the app dies without running that (force quit, crash), `--exit-with-parent` makes the daemon notice
   within about a second and shut down the same way.
+- If the daemon the app started dies while the app runs (killed, crashed, any exit other than 0, which is a
+  requested stop, or 2, a command line it rejects), the shell restarts it after 1, 2, then 4 s. A fourth exit
+  within a minute of the first restart is not restarted: the UI then says the service stopped repeatedly and
+  asks to quit and reopen the app. A restart never starts a second daemon: if a daemon already answers
+  `/health` on 8192 the shell uses that one instead (not its own, as at launch), and Quit during the wait
+  starts nothing. A daemon the app found already serving at launch is never restarted, and neither is one it
+  found serving when it went to restart its own (it is not the app's; if it stops, the status bar says the
+  service is not running until it answers again or the app is reopened). A restart that cannot start the
+  sidecar (binary missing, fork failing) counts as one more exit: it is tried again within the same bounds,
+  then given up with the same text. While the shell waits
+  the status bar says "Service stopped unexpectedly. Restarting it."; once the service answers again the
+  announcer says "Service restarted" and a dismissable entry stays in the status bar
+  (`daemon_info` reports `restarts`, `restarting`, `gave_up`).
+- The daemon's stdout and stderr, and the shell's own lines about it (started, exited with which code or
+  signal, restarting), go to `daemon.log` in the app's log folder: `~/Library/Logs/org.commoncompute.desktop/`
+  on macOS, `%LOCALAPPDATA%\org.commoncompute.desktop\logs\` on Windows and
+  `~/.local/share/org.commoncompute.desktop/logs/` on Linux (owner-only on macOS and Linux). Once the next line
+  would take it past 5 MiB it becomes `daemon.log.1`, replacing the older one, so the log never takes more than
+  about 10 MiB. Settings › General shows the path; Copy diagnostics names it after copying, but the copied JSON
+  holds only the restart count (the path contains the account name). This file is the app's, separate from
+  `COMMON_HOME/logs/` that the daemon's own diagnostics bundle reads. What uninstall keeps of it is not yet
+  checked (WP-01 retention table).
 
 Verify a build on the exact packaged binaries (needs network and a free port 8192):
 
@@ -257,8 +280,11 @@ python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bund
 ```
 
 It installs the app from the mounted .dmg into an empty HOME with a minimal PATH, then checks the daemon
-arguments, a first launch that downloads the pinned engine, real inference, quit, restart, crash and restart
-again, and that nothing is left running. The webview CSP only allows `connect-src` to `'self'` and
+arguments, a first launch that downloads the pinned engine, real inference, quit, restart, the daemon killed
+(SIGKILL to the daemon only: the app restarts one daemon, `/health` within 10 s of the kill, the killed daemon's
+engine stopped, inference again with one engine, and `daemon.log` holding the killed and the restarted run), a
+crash of the app and restart again, and that nothing is left running. The log parsing has an offline test:
+`python3 -m unittest discover -s apps/desktop/scripts -p 'test_*.py'`. The webview CSP only allows `connect-src` to `'self'` and
 `http://127.0.0.1:8192`.
 
 ## Layout
@@ -273,7 +299,7 @@ src/ui/                design system: tokens, DataTable, Inspector, Dialog, Sect
 src/state/             polled live stores (status, network, peers, jobs, privacy …), settings and chat history (localStorage), device rows
 src/components/        FitBar (memory fit)
 src/test/              fake daemon (fetch mock), contract fixtures, axe scan, keyboard-only flows, pairing and privacy flows
-src-tauri/src/lib.rs   sidecar spawn and graceful stop, health probe, quit on SIGTERM, daemon_info and firewall commands
+src-tauri/src/lib.rs   sidecar spawn, restart policy and graceful stop, daemon log, health probe, quit on SIGTERM, daemon_info and firewall commands
 src-tauri/src/firewall.rs   Windows Firewall status (PowerShell read) and the consent-gated rule
 src-tauri/daemon-args.txt   the daemon's command line (single source of truth)
 scripts/build-sidecar.mjs   build + stage + check the sidecar (run by `tauri build`)
