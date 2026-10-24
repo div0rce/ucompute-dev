@@ -3,7 +3,7 @@
 First check of the Linux install path of platform readiness plan M6: a tarball holding the `common` binary, LICENSE,
 the systemd user unit `packaging/linux/common.service` and its install notes, verified from the tarball by
 `packaging/linux/verify_linux_install.py` on one Linux machine. Not a release and not distributable yet: no
-third-party notices, no signature, no owner approval of the format (spec section 4, M9).
+signature and no owner approval of the format (spec section 4, M9).
 
 - Host: sentinel, Ubuntu 26.04 LTS x86_64, Intel Core i9-9900K, glibc 2.43, systemd user manager of a desktop
   session, lingering off (`docs/environment/linux-test-host.md`).
@@ -20,6 +20,10 @@ third-party notices, no signature, no owner approval of the format (spec section
   after a SIGKILL of the daemon, systemd started a new one, healthy 2.67 s after the kill, and the killed daemon's
   engine was gone (the unit's default `KillMode=control-group`); golden again after the restart; `systemctl --user
   stop` freed the port and left no engine; removing the unit and binary kept the data folder.
+- Rerun with notices (00:52 UTC): the tarball now also holds `THIRD_PARTY_NOTICES.txt` from
+  `scripts/gen_notices.py` (191 Rust packages for x86_64-unknown-linux-gnu, every licence allowed by `deny.toml`;
+  sha256 of the tarball `19b8ee61eef994886648589d778308a100227b6b002aeb80a39f0b65f493dd68`): ALL PASS again, 15
+  checks (`linux-install-2026-10-24/verify-linux-install-notices.json`).
 - Not covered: the documented install paths themselves (`~/.local/bin`, port 8192, the real unit name: the owner's
   runners use port 8192 on sentinel), lingering and boot start, other distributions, an older glibc, GPU engines,
   networking (Mesh) under the unit, and a daemon built from HEAD with round 6.
