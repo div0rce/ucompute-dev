@@ -14,6 +14,7 @@
 
 pub mod logparse;
 pub mod process;
+pub mod split;
 pub mod sse;
 
 use crate::types::*;

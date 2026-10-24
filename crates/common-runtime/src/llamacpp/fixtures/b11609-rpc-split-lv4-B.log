@@ -1,0 +1,11 @@
+0.00.076.644 I llama_prepare_model_devices: using device MTL0 (Apple M2) (unknown id) - 5460 MiB free
+llama_prepare_model_devices: using device RPC0 (127.0.0.1:49204) (unknown id) - 5460 MiB free
+0.00.099.270 I load_tensors: offloading output layer to GPU
+0.00.099.272 I load_tensors: offloading 5 repeating layers to GPU
+0.00.099.272 I load_tensors: offloaded 7/7 layers to GPU
+0.00.099.273 I load_tensors:   CPU_Mapped model buffer size =     4.94 MiB
+0.00.099.274 I load_tensors:  MTL0_Mapped model buffer size =     1.61 MiB
+0.00.099.275 I load_tensors: RPC0[127.0.0.1:49204] model buffer size =    10.95 MiB
+0.00.106.560 I llama_kv_cache:       MTL0 KV buffer size =     0.84 MiB
+0.00.108.991 I llama_kv_cache: RPC0[127.0.0.1:49204] KV buffer size =     0.84 MiB
+0.00.109.012 I llama_kv_cache: size =    1.69 MiB (   256 cells,   6 layers,  1/1 seqs), K (f16):    0.84 MiB, V (f16):    0.84 MiB
