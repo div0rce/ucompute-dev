@@ -18,15 +18,90 @@ pub const FORCE_GPU_FAIL_ENV: &str = "COMMON_TEST_FORCE_GPU_FAIL";
 /// Env prefixes that could redirect the engine's dynamic libraries, devices or arguments.
 const SCRUBBED_ENV_PREFIXES: [&str; 4] = ["LLAMA_ARG_", "GGML_", "DYLD_", "LD_"];
 
-/// Flags Common owns; `extra_args` may not override them (loopback bind, secret, model, log).
-const RESERVED_FLAGS: [&str; 7] = [
+/// Flags Common owns; `extra_args` may not set them. Every spelling b11609's `llama-server --help` lists:
+/// loopback bind, secret, log; the model and every other way to load or download one (integrity); device,
+/// offload, split and RPC placement (WP-04 / ADR-0005 D1: `--rpc` alone would reach a raw rpc-server on a LAN
+/// address, and `-ot` can place tensors on an RPC device); verbosity (the placement and GPU proof lines need
+/// Common's level, and unbounded verbosity may log prompt text).
+const RESERVED_FLAGS: &[&str] = &[
+    // bind, secret, log
     "--host",
     "--port",
     "--api-key",
     "--api-key-file",
     "--log-file",
+    // model sources
     "-m",
     "--model",
+    "-mu",
+    "--model-url",
+    "-hf",
+    "-hfr",
+    "--hf-repo",
+    "-hff",
+    "--hf-file",
+    "-hft",
+    "--hf-token",
+    "-dr",
+    "--docker-repo",
+    "-mm",
+    "--mmproj",
+    "-md",
+    "--model-draft",
+    "--spec-draft-model",
+    "-hfd",
+    "-hfrd",
+    "--hf-repo-draft",
+    "--spec-draft-hf",
+    // placement: devices, offload, split, RPC
+    "--rpc",
+    "-dev",
+    "--device",
+    "--list-devices",
+    "-ts",
+    "--tensor-split",
+    "-sm",
+    "--split-mode",
+    "-mg",
+    "--main-gpu",
+    "-ngl",
+    "--gpu-layers",
+    "--n-gpu-layers",
+    "-ot",
+    "--override-tensor",
+    "-fit",
+    "--fit",
+    "-fitt",
+    "--fit-target",
+    "-fitc",
+    "--fit-ctx",
+    "-lm",
+    "--load-mode",
+    "-kvo",
+    "--kv-offload",
+    "-nkvo",
+    "--no-kv-offload",
+    "--op-offload",
+    "--no-op-offload",
+    "-mmdev",
+    "--mmproj-device",
+    "-devd",
+    "--device-draft",
+    "--spec-draft-device",
+    "-ngld",
+    "--gpu-layers-draft",
+    "--n-gpu-layers-draft",
+    "--spec-draft-ngl",
+    "-otd",
+    "--override-tensor-draft",
+    "--spec-draft-override-tensor",
+    // verbosity
+    "-lv",
+    "--verbosity",
+    "--log-verbosity",
+    "-v",
+    "--verbose",
+    "--log-verbose",
 ];
 
 pub fn force_gpu_fail() -> bool {
@@ -434,14 +509,58 @@ mod tests {
     #[test]
     fn extra_args_are_appended_after_validation() {
         let mut r = req();
-        r.extra_args = vec!["--rpc".into(), "127.0.0.1:50052".into()];
+        r.extra_args = vec!["-ub".into(), "256".into()];
         assert!(validate_extra_args(&r.extra_args).is_ok());
         let a = build_args(&r, 1, Path::new(KEY_FILE), false);
-        assert_eq!(&a[a.len() - 2..], &["--rpc", "127.0.0.1:50052"]);
+        assert_eq!(&a[a.len() - 2..], &["-ub", "256"]);
         for bad in ["--rpc 1.2.3.4:1", "a\nb", "", "--host", "--api-key=x", "--port"] {
             let e = validate_extra_args(&[bad.to_string()]).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidRequest, "{bad:?}");
         }
+    }
+
+    /// WP-04 C1 (ADR-0005 D1): no split, RPC, placement, model-source or verbosity flag reaches the engine
+    /// through `extra_args`, in the two-token or the `--flag=value` form.
+    #[test]
+    fn extra_args_cannot_set_split_flags() {
+        let split = [
+            "--rpc",
+            "-dev",
+            "--device",
+            "-ts",
+            "--tensor-split",
+            "-sm",
+            "--split-mode",
+            "-mg",
+            "--main-gpu",
+            "-ngl",
+            "--gpu-layers",
+            "--n-gpu-layers",
+            "-ot",
+            "--override-tensor",
+            "-fit",
+            "--fit",
+            "--list-devices",
+            "-lm",
+            "--load-mode",
+            "-lv",
+            "--verbosity",
+            "-v",
+            "-md",
+            "--model-draft",
+            "-hf",
+            "--model-url",
+            "-devd",
+            "-ngld",
+            "-otd",
+        ];
+        for flag in split {
+            for args in [vec![flag.to_string(), "x".to_string()], vec![format!("{flag}=x")]] {
+                let e = validate_extra_args(&args).unwrap_err();
+                assert_eq!(e.code, ErrorCode::InvalidRequest, "{args:?}");
+            }
+        }
+        assert!(RESERVED_FLAGS.iter().all(|f| f.starts_with('-') && !f.contains('=')));
     }
 
     #[test]
