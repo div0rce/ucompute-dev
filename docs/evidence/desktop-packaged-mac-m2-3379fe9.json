@@ -1,0 +1,199 @@
+{
+  "label": "SINGLE-HOST (one Mac); packaged binaries",
+  "steps": [
+    {
+      "step": "binaries are arm64 and link only system libraries",
+      "ok": true,
+      "archs": {
+        "common": "arm64",
+        "common-desktop": "arm64"
+      }
+    },
+    {
+      "step": "packaged binaries are the build (identical once signatures and __LINKEDIT vmsize are set aside)",
+      "ok": true,
+      "built": "target/release",
+      "identical": {
+        "common": true,
+        "common-desktop": true
+      }
+    },
+    {
+      "step": "the app ships THIRD_PARTY_NOTICES naming the Rust crate rustls and the JS package react",
+      "ok": true,
+      "path": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/mnt/Common.app/Contents/Resources/THIRD_PARTY_NOTICES.txt",
+      "bytes": 708160,
+      "sha256": "f0adf5dfec735ab116b290f22202bddd4193aae0fcde5dd7ee97e565239a5a6a"
+    },
+    {
+      "step": "app signature verifies (ad-hoc; no Developer ID, B-008)",
+      "ok": true,
+      "stderr": ""
+    },
+    {
+      "step": "bundled daemon accepts the app's exact arguments",
+      "ok": true,
+      "args": [
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8192",
+        "--exit-with-parent"
+      ],
+      "exit": 0,
+      "stderr": ""
+    },
+    {
+      "step": "first launch: daemon healthy, started by the app with its exact arguments",
+      "ok": true,
+      "healthy_after_s": 2.461,
+      "sidecar": [
+        [
+          78840,
+          78831,
+          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ]
+    },
+    {
+      "step": "fresh install provisioned the pinned engine inside the new HOME",
+      "ok": true,
+      "data_dir": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/home/Library/Application Support/Common",
+      "engine": [
+        "b11609",
+        "llama-b11609-bin-macos-arm64.tar.gz"
+      ]
+    },
+    {
+      "step": "model pulled and hash-verified by the app's daemon",
+      "ok": true,
+      "bytes": 19077344,
+      "seconds": 0.9
+    },
+    {
+      "step": "first launch: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 489.0,
+      "total_s": 14.02
+    },
+    {
+      "step": "quit stops daemon and engine and frees the port",
+      "ok": true,
+      "app_exit_s": 0.22,
+      "daemon_gone_s": 0.0,
+      "engines": [
+        78889
+      ]
+    },
+    {
+      "step": "restart: one daemon, started by the new app process, no port conflict",
+      "ok": true,
+      "healthy_after_s": 0.76,
+      "sidecar": [
+        [
+          78901,
+          78897,
+          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ]
+    },
+    {
+      "step": "restart: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 510.6,
+      "total_s": 0.24
+    },
+    {
+      "step": "restart: one engine",
+      "ok": true,
+      "engines": [
+        78918
+      ]
+    },
+    {
+      "step": "daemon killed (SIGKILL daemon only): the app restarts one daemon, /health within 10 s, its log holds both runs",
+      "ok": true,
+      "restarted_after_s": 1.433,
+      "sidecar": [
+        [
+          78929,
+          78897,
+          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ],
+      "log": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/work/home/Library/Logs/org.commoncompute.desktop/daemon.log",
+      "log_bytes": 881
+    },
+    {
+      "step": "daemon restarted: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 445.1,
+      "total_s": 0.24
+    },
+    {
+      "step": "daemon restarted: one engine",
+      "ok": true,
+      "engines": [
+        78948
+      ]
+    },
+    {
+      "step": "crash (SIGKILL app): --exit-with-parent stops daemon and engine",
+      "ok": true,
+      "daemon_gone_s": 0.63
+    },
+    {
+      "step": "restart after crash: one daemon",
+      "ok": true,
+      "healthy_after_s": 0.645
+    },
+    {
+      "step": "final: no process from the install is running and port 8192 is free",
+      "ok": true,
+      "leftovers": []
+    }
+  ],
+  "dmg": {
+    "path": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/rc-3379fe9/Common_0.1.0_aarch64.dmg",
+    "sha256": "a3239588cfd925d51aeb4bb39a592a49433d9bce7cd9421abe9d7f38fce5dd6d",
+    "bytes": 6306797
+  },
+  "binaries_in_dmg": {
+    "common": {
+      "sha256": "4e1b3d7b6ea3c961f363158a48ff104dfdf2afa8010301f2ffe742d91c11f685",
+      "archs": "arm64",
+      "libs": [
+        "/usr/lib/libiconv.2.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ]
+    },
+    "common-desktop": {
+      "sha256": "2395b5e600aa5ad63fbcefb3b47019df0c3608dfbf77b02d6c747e0098260099",
+      "archs": "arm64",
+      "libs": [
+        "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
+        "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
+        "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+        "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libiconv.2.dylib",
+        "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+        "/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+        "/usr/lib/libobjc.A.dylib",
+        "/System/Library/Frameworks/ColorSync.framework/Versions/A/ColorSync",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices"
+      ]
+    }
+  },
+  "daemon_version": "common 0.1.0"
+}
