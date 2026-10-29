@@ -102,36 +102,6 @@ fn hardware_json_matches_sysctl() {
     }
 }
 
-/// D-028: the former `COMMON_HOME` is not read: with only it set, the fixture store it names is not
-/// the one listed (the default folder under an empty HOME is).
-#[test]
-fn former_common_home_is_not_read() {
-    if !assets_present() {
-        return;
-    }
-    let empty = std::env::temp_dir().join(format!("ucompute-cli-oldhome-{}", std::process::id()));
-    std::fs::create_dir_all(&empty).unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_ucompute"))
-        .args(["models", "list", "--json"])
-        .env_remove("UCOMPUTE_HOME")
-        .env("COMMON_HOME", home())
-        .env("HOME", &empty)
-        .env("XDG_DATA_HOME", empty.join("xdg"))
-        .env("LOCALAPPDATA", empty.join("local"))
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("spawn ucompute");
-    let err = text(&o.stderr);
-    assert!(o.status.success(), "{err}");
-    assert!(!json(&o)
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["id"] == MODEL && r["downloaded"] == true));
-    assert!(!err.contains("COMMON_HOME"), "{err}");
-    let _ = std::fs::remove_dir_all(&empty);
-}
-
 #[test]
 fn models_list_json_has_fixture_with_unknown_license() {
     if !assets_present() {

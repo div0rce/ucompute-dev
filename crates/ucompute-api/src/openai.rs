@@ -253,12 +253,14 @@ impl Target {
 /// Body field first, then the `X-UCompute-Target` header; absent means local. A peer must be named
 /// by its 64-hex id or the short label of a pinned peer (`PeerUnauthorized` for an unknown label).
 fn parse_target(st: &AppState, body: Option<&str>, headers: &HeaderMap) -> Result<Target> {
-    // D-028 dropped the former header without a fallback; D-029 requires an outdated client to fail cleanly, so a
-    // request that names its target the old way is refused instead of quietly running here.
-    if headers.contains_key("x-common-target") {
-        return Err(UComputeError::invalid(
-            "X-Common-Target is no longer read; this client predates the rename to UCompute: send X-UCompute-Target",
-        ));
+    // D-029/D-030: a client naming its target in any other `X-*-Target` header (an outdated or foreign one) is
+    // refused cleanly instead of having its request quietly run here.
+    if let Some(h) = headers.keys().map(|k| k.as_str()).find(|k| {
+        *k != "x-ucompute-target" && k.starts_with("x-") && k.ends_with("-target") && k.len() > "x--target".len()
+    }) {
+        return Err(UComputeError::invalid(format!(
+            "header {h} is not read; UCompute reads X-UCompute-Target"
+        )));
     }
     let s = body.or_else(|| headers.get("x-ucompute-target").and_then(|v| v.to_str().ok()));
     match s.map(str::trim) {

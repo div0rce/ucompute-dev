@@ -57,7 +57,7 @@ class Stage6(unittest.TestCase):
 
 class Notices(unittest.TestCase):
     # The format scripts/gen_notices.py writes.
-    HEAD = "Third-party software in this build of UCompute (formerly Common).\n\n"
+    HEAD = "Third-party software in this build of UCompute.\n\n"
     RUSTLS = "rustls 0.23.45 — Apache-2.0 OR ISC OR MIT — https://github.com/rustls/rustls — licence text T11\n"
     REACT = "react 19.3.0 — MIT — https://react.dev/ — licence text T223\n"
 

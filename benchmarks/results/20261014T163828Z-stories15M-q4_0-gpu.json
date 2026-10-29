@@ -1,6 +1,6 @@
 {
   "command": [
-    "./target/debug/common",
+    "./target/debug/ucompute",
     "bench",
     "stories15M-q4_0",
     "--device",
@@ -10,7 +10,7 @@
     "-n",
     "64"
   ],
-  "common_version": "0.1.0",
+  "ucompute_version": "0.1.0",
   "hardware": {
     "backends": [
       {

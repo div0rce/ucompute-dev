@@ -383,7 +383,7 @@ fn tls_error(code: TransportErrorCode, side: &str) -> UComputeError {
     ]) {
         (
             ErrorCode::ProtocolIncompatible,
-            "no protocol in common (ALPN or TLS version); update UCompute on both devices",
+            "no shared protocol (ALPN or TLS version); update UCompute on both devices",
         )
     } else {
         (ErrorCode::PeerLost, "transport error")

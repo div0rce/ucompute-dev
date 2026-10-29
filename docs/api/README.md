@@ -91,7 +91,7 @@ Every address is only a hint. Whatever answers must present the key pinned at pa
 - `"peer:<64-hex id or short label>"`: run the whole request on that paired device (Mode B). It is not split across devices.
 - `"split:<64-hex id or short label>"`: split the model's blocks between this device and that paired device (WP-04 pooled inference, ADR-0005 Proposed; see [Pooled inference](#pooled-inference-the-split-target)).
 
-The same value may come in the `X-UCompute-Target` header. The body field wins when both are present. A request carrying the former `X-Common-Target` header (a client from before the rename) is refused with `invalid_request` naming the new header, never run locally. `POST /v1/embeddings` runs locally only; a peer target there is `invalid_request`. Every response, and every streamed chunk, carries `"target"` (`"local"`, `"peer:<64 hex>"` or `"split:<64 hex>"`), so nothing runs elsewhere silently.
+The same value may come in the `X-UCompute-Target` header. The body field wins when both are present. A request carrying any other `X-*-Target` header (for example from a client built before the rename) is refused with `invalid_request` naming the header it sent and `X-UCompute-Target`, never run locally. `POST /v1/embeddings` runs locally only; a peer target there is `invalid_request`. Every response, and every streamed chunk, carries `"target"` (`"local"`, `"peer:<64 hex>"` or `"split:<64 hex>"`), so nothing runs elsewhere silently.
 
 ```sh
 curl -s http://127.0.0.1:8192/v1/completions -H 'Content-Type: application/json' \

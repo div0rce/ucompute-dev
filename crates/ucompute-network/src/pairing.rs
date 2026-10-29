@@ -537,8 +537,8 @@ fn first_routable(ips: &[IpAddr], v4: bool) -> Option<IpAddr> {
 }
 
 /// Whether `s` is meant as a QR payload (`<name>-pair:...`) rather than a code or `ip:port`. Only a
-/// `ucompute-pair:v1:` payload parses (D-028): [`expected_peer_from_qr`] then refuses a former
-/// `common-pair:` one as such instead of it being read as a malformed code or address.
+/// `ucompute-pair:v1:` payload parses: [`expected_peer_from_qr`] then refuses any other `<name>-pair:`
+/// one as such instead of it being read as a malformed code or address.
 pub fn is_qr_payload(s: &str) -> bool {
     s.contains("-pair:")
 }
@@ -592,7 +592,7 @@ mod tests {
             assert!(is_qr_payload(&payload));
         }
         assert!(!is_qr_payload("123456") && !is_qr_payload("192.168.1.20:41234"));
-        assert!(is_qr_payload("common-pair:v1:x"), "refused by name, not read as a code");
+        assert!(is_qr_payload("other-pair:v1:x"), "refused by name, not read as a code");
         for bad in [
             "",
             "ucompute-pair:v2:x",
@@ -600,8 +600,8 @@ mod tests {
             &format!("ucompute-pair:v1:{}:127.0.0.1:1:123456", id.to_hex()),
             &format!("ucompute-pair:v1:{}:nope:{secret}", id.to_hex()),
             &format!("ucompute-pair:v1:abcd:127.0.0.1:1:{secret}"),
-            // D-028: the former prefix is not accepted, even around a valid id, address and secret.
-            &format!("common-pair:v1:{}:127.0.0.1:1:{secret}", id.to_hex()),
+            // Any other prefix is not accepted, even around a valid id, address and secret.
+            &format!("other-pair:v1:{}:127.0.0.1:1:{secret}", id.to_hex()),
         ] {
             let e = expected_peer_from_qr(bad).unwrap_err();
             assert_eq!(e.code, ErrorCode::InvalidRequest, "{bad}");

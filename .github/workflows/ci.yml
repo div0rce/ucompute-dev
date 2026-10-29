@@ -81,5 +81,6 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@v2
-        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        # .gitleaks.toml uses global [[allowlists]] (gitleaks 8.25 or later): pin the version the scans were proven with.
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}", GITLEAKS_VERSION: "8.30.1" }
 

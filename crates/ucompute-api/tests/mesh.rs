@@ -301,11 +301,11 @@ async fn defaults_are_local_only_and_a_peer_target_is_refused_without_any_networ
         .unwrap();
     assert_eq!(r.status(), 403);
     assert_eq!(r.json::<Value>().await.unwrap()["error"]["code"], "policy_denied");
-    // D-028 and D-029: the former header is not read, and a client still sending it is refused with a readable
+    // D-029/D-030: any other `X-*-Target` header is not read, and a client sending one is refused with a readable
     // error rather than having its request run locally.
     let r = client()
         .post(srv.url("/v1/completions"))
-        .header("x-common-target", format!("peer:{}", stranger.to_hex()))
+        .header("x-other-target", format!("peer:{}", stranger.to_hex()))
         .json(&json!({ "model": MODEL_ID, "prompt": "x", "max_tokens": 1 }))
         .send()
         .await
@@ -313,8 +313,9 @@ async fn defaults_are_local_only_and_a_peer_target_is_refused_without_any_networ
     assert_eq!(r.status(), 400);
     let v = r.json::<Value>().await.unwrap();
     assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+    let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        v["error"]["message"].as_str().unwrap().contains("X-UCompute-Target"),
+        msg.contains("x-other-target") && msg.contains("X-UCompute-Target"),
         "{v}"
     );
     let (status, v) = post(
@@ -2829,7 +2830,21 @@ async fn peer_details_engine_origin_and_jobs_on_both_devices_single_host() {
     );
     assert!(!caps["engines"].as_array().unwrap().is_empty(), "{caps}");
     assert_eq!(caps["ucompute_version"], ucompute_core::VERSION);
-    assert!(caps.get("common_version").is_none(), "D-028: no former key");
+    let mut keys: Vec<&str> = caps.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "engines",
+            "free_memory_bytes",
+            "hardware",
+            "issued_at_utc",
+            "models",
+            "protocol_minor",
+            "ucompute_version"
+        ],
+        "exactly the documented keys"
+    );
     assert!(
         caps["issued_at_utc"].is_string() && caps["protocol_minor"].is_u64() && caps["free_memory_bytes"].is_u64(),
         "{caps}"

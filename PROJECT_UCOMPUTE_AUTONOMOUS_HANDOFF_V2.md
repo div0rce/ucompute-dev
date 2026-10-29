@@ -1,12 +1,14 @@
-# PROJECT COMMON — AUTONOMOUS ENGINEERING HANDOFF v2.0
+# PROJECT UCOMPUTE — AUTONOMOUS ENGINEERING HANDOFF v2.0
+
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
 
 ## ROLE AND MANDATE
-You are the autonomous founding engineering organization responsible for designing, implementing, testing, securing, benchmarking, documenting and preparing Common, a free/open-source universal AI inference platform. Act as principal distributed systems architect, inference/runtime engineer, Rust engineer, C/C++ performance engineer, GPU engineer, networking/protocol engineer, security engineer, desktop engineer, developer-experience engineer, SRE/release engineer, technical product manager, adversarial reviewer, licensing/compliance analyst and QA lead.
+You are the autonomous founding engineering organization responsible for designing, implementing, testing, securing, benchmarking, documenting and preparing UCompute, a free/open-source universal AI inference platform. Act as principal distributed systems architect, inference/runtime engineer, Rust engineer, C/C++ performance engineer, GPU engineer, networking/protocol engineer, security engineer, desktop engineer, developer-experience engineer, SRE/release engineer, technical product manager, adversarial reviewer, licensing/compliance analyst and QA lead.
 
 **Build actual working software, not a proposal or a demo.** Never call mocked, simulated, partially implemented or untested functionality production-ready. Use subagents for independent work when available, but preserve a single authoritative requirements registry and avoid conflicting edits.
 
 ## 1. PRODUCT VISION AND ANALOGIES
-Common is to AI compute what VLC is to media playback: install, select a model, press Run. Abstract model formats, inference runtimes, hardware and distributed execution. Support local-only, trusted remote, trusted pooled, public opt-in and managed enterprise execution where safe and technically feasible. Never claim arbitrary models can run on arbitrary devices.
+UCompute is to AI compute what VLC is to media playback: install, select a model, press Run. Abstract model formats, inference runtimes, hardware and distributed execution. Support local-only, trusted remote, trusted pooled, public opt-in and managed enterprise execution where safe and technically feasible. Never claim arbitrary models can run on arbitrary devices.
 
 Borrow design principles, not necessarily protocols, from:
 - **VLC/FFmpeg:** universal compatibility and automatic backend selection.
@@ -36,7 +38,7 @@ Inspect actual code, docs, licenses, issues and benchmarks (as available) for Pe
 ## 6. STACK AND ARCHITECTURE
 Prefer Rust stable/Tokio/Serde, Tonic+Protobuf where warranted, Axum, rustls, QUIC, mDNS, SQLite, tracing/OpenTelemetry, llama.cpp/GGML as first inference adapter, Tauri+React+TypeScript+pnpm, cargo test/nextest, Criterion and GitHub Actions. Validate licenses and version compatibility before pinning. Architecture: **control plane** (policy, scheduling, identity, orchestration), **data plane** (model execution, activations, KV cache, transport), **artifact plane** (manifests/chunks/cache), **trust plane** (identity/privacy/security), **economic plane** (metering/fairness/settlement behind gates). Do not make central service mandatory for local or trusted LAN mode.
 
-Rust workspace crates: `common-core`, `common-hardware`, `common-models`, `common-runtime`, `common-network`, `common-scheduler`, `common-distributed`, `common-api`, `common-cli`, `common-artifacts`, `common-identity`, `common-policy`, `common-metering`, `common-orchestrator`, `common-observability`, `common-bench`. Apps: `apps/desktop`, `apps/mobile-companion` (where viable), optional `apps/web`. Keep transport and inference backend adapters replaceable. Version protocol schemas and provide compatibility negotiation.
+Rust workspace crates: `ucompute-core`, `ucompute-hardware`, `ucompute-models`, `ucompute-runtime`, `ucompute-network`, `ucompute-scheduler`, `ucompute-distributed`, `ucompute-api`, `ucompute-cli`, `ucompute-artifacts`, `ucompute-identity`, `ucompute-policy`, `ucompute-metering`, `ucompute-orchestrator`, `ucompute-observability`, `ucompute-bench`. Apps: `apps/desktop`, `apps/mobile-companion` (where viable), optional `apps/web`. Keep transport and inference backend adapters replaceable. Version protocol schemas and provide compatibility negotiation.
 
 ## 7. EXECUTION MODES
 A: Local inference, no network. B: Trusted remote execution on one device. C: Genuine trusted pooled model inference across two or more devices with partitioned layers/tensors, intermediate activation transfer and verifiable memory placement. D: Independent batch/request distribution to multiple workers (mining-pool analogy). E: Hybrid placement combining clustered large-model inference and independent work units. F: Public opt-in swarm only after threat-model, abuse, privacy, verification and operational gates. G: Enterprise federation and managed cloud bursting only with explicit policy and cost consent. Document and test each separately. Forwarding a whole prompt to one peer is **not** pooled inference.
@@ -57,7 +59,7 @@ Gate A build: clean builds, lint, formatting, dependency/license scans, secrets 
 Primary: Install → Select Model → Run. Secondary: Add Device → Authorize → Pool → Run Larger Model. Third: Opt in to contributing resources → Set battery/power/time/privacy limits → View usage receipts. Expose speed/cost/privacy/energy policies, not obscure scheduler knobs by default. Desktop views: Home, Models, Chat, Hardware, Peers, Cluster, Jobs, Contributions, Performance, Privacy, Settings, Diagnostics. Provide understandable errors for unsupported model, unavailable GPU, inadequate memory, poor network, disconnection, license restrictions and privacy conflicts. Explicit consent before public compute or paid resources.
 
 ## 13. REPOSITORY LAYOUT
-`common/` root with `AGENTS.md`, `README.md`, `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `Cargo.toml`, `Cargo.lock`, `package.json`, `pnpm-workspace.yaml`, `rust-toolchain.toml`, `.github/workflows`, `crates/` modules above, `apps/`, `proto/`, `examples/`, `tests/{integration,distributed,security,fixtures}`, `benchmarks/{harness,scenarios,results}`, `scripts/`, `packaging/`, `docs/{architecture,research,security,protocols,benchmarks,decisions}`, `docs/REQUIREMENTS.csv`, `docs/PROGRESS.md`, `docs/DECISIONS.md`, `docs/BLOCKERS.md`, `docs/VERIFICATION.md`. Adapt only with ADR.
+`ucompute/` root with `AGENTS.md`, `README.md`, `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `Cargo.toml`, `Cargo.lock`, `package.json`, `pnpm-workspace.yaml`, `rust-toolchain.toml`, `.github/workflows`, `crates/` modules above, `apps/`, `proto/`, `examples/`, `tests/{integration,distributed,security,fixtures}`, `benchmarks/{harness,scenarios,results}`, `scripts/`, `packaging/`, `docs/{architecture,research,security,protocols,benchmarks,decisions}`, `docs/REQUIREMENTS.csv`, `docs/PROGRESS.md`, `docs/DECISIONS.md`, `docs/BLOCKERS.md`, `docs/VERIFICATION.md`. Adapt only with ADR.
 
 ## 14. MILESTONES (ALL P0; ORDER IS DEPENDENCY, NOT PRIORITY)
 M0 Research, scaffold, licenses, threat model, benchmark harness and requirement IDs.
@@ -90,7 +92,7 @@ Provide quickstart, installation, hardware/model compatibility matrix, CLI/API/S
 8. On session end report implemented/verified/blocked/infeasible counts, test evidence, benchmark evidence, limitations, artifacts and exact next commands. Never mark unverified work done.
 
 ## 17. FINAL MANDATE
-Build Common as maintainable real software. Do not stop at architecture, scaffolding or UI. Do not confuse remote execution with pooled inference. All capabilities below are P0 product scope, but implementation is dependency-ordered and security-gated. Continue autonomously as far as environment and permissions allow. **The ambition is universal AI execution; the obligation is demonstrable correctness.**
+Build UCompute as maintainable real software. Do not stop at architecture, scaffolding or UI. Do not confuse remote execution with pooled inference. All capabilities below are P0 product scope, but implementation is dependency-ordered and security-gated. Continue autonomously as far as environment and permissions allow. **The ambition is universal AI execution; the obligation is demonstrable correctness.**
 
 ## 18. COMPLETE P0 FEATURE REGISTER (120 CAPABILITIES)
 Every item below is mandatory P0 scope and requires an individual acceptance test and evidence link.

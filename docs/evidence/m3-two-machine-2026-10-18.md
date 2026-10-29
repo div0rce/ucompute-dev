@@ -1,21 +1,23 @@
 # M3 on two physical machines: Mac + Windows laptop (2026-10-18)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Two-machine evidence.** Two different physical computers on the same campus Wi-Fi (eduroam), not one host:
 
 | | A | B |
 |---|---|---|
 | Machine | MacBook Air, Apple M2, 8 GB, macOS 26.2 | HP laptop, Intel Core Ultra 7 258V, 32 GB, Intel Arc 140V, Windows 11 Home 26200 |
-| Build | `common` debug build from this checkout | `common.exe` cross-built on the Mac (`x86_64-pc-windows-gnu`), release |
-| Engine | llama.cpp b11609 macos-arm64 (Metal) | llama.cpp b11609 win-vulkan-x64 (Vulkan), downloaded and verified by `common setup` on the laptop |
+| Build | `ucompute` debug build from this checkout | `ucompute.exe` cross-built on the Mac (`x86_64-pc-windows-gnu`), release |
+| Engine | llama.cpp b11609 macos-arm64 (Metal) | llama.cpp b11609 win-vulkan-x64 (Vulkan), downloaded and verified by `ucompute setup` on the laptop |
 | Peer endpoint | UDP 18401 | UDP 8193 (Windows firewall: allowed on Private networks only) |
 
-Both daemons ran `serve --network --serve-peers`. The laptop was driven from the Mac over SSH (key-only, set up by the owner: `docs/environment/windows-test-host.md`); its loopback API reached the Mac through an SSH tunnel. **All peer traffic between the machines was Common's own QUIC + TLS 1.3 transport over the Wi-Fi.** Driver: `tests/distributed/two_machine/mesh_two_machine.py`. Run 1 used commit 4d91cf0; run 2 used the job-object fix (see below) on both sides.
+Both daemons ran `serve --network --serve-peers`. The laptop was driven from the Mac over SSH (key-only, set up by the owner: `docs/environment/windows-test-host.md`); its loopback API reached the Mac through an SSH tunnel. **All peer traffic between the machines was UCompute's own QUIC + TLS 1.3 transport over the Wi-Fi.** Driver: `tests/distributed/two_machine/mesh_two_machine.py`. Run 1 used commit 4d91cf0; run 2 used the job-object fix (see below) on both sides.
 
 ## Results (run 1 / run 2)
 
 | Step | Result | Numbers |
 |---|---|---|
-| Discovery (mDNS) | **FAIL (network)** | Neither daemon listed the other. Not a Common defect: on this network neither machine can resolve the other's own `.local` name with the OS's mDNS stack either (Mac `dns-sd` sees only its own advert; Windows `Resolve-DnsName mous-2.local` → "does not exist"). eduroam does not pass multicast between clients. Needs a network that does (home Wi-Fi, a phone hotspot). |
+| Discovery (mDNS) | **FAIL (network)** | Neither daemon listed the other. Not a UCompute defect: on this network neither machine can resolve the other's own `.local` name with the OS's mDNS stack either (Mac `dns-sd` sees only its own advert; Windows `Resolve-DnsName mous-2.local` → "does not exist"). eduroam does not pass multicast between clients. Needs a network that does (home Wi-Fi, a phone hotspot). |
 | Pairing, wrong code | PASS | 401 `pairing_failed` (113 / 68 ms) |
 | Pairing, right code | PASS | Laptop joined the Mac's window at the Mac's LAN address; both pinned; join 69 / 79 ms; connected 0.41 / 0.01 s later |
 | Remote execution Mac → laptop (laptop serves on Vulkan0, Intel Arc 140V) | PASS | Golden text JSON and SSE (33 chunks), `target` echoed. Warm request total 64 / 46 ms; engine TTFT 14 / 12 ms; decode 714 / 980 tok/s; first streamed text at the Mac after 14 / 11 ms |
@@ -41,7 +43,7 @@ Both daemons ran `serve --network --serve-peers`. The laptop was driven from the
 
 ## Run 3: phone hotspot (discovery), 2026-10-19 02:38 UTC
 
-Same two machines, both joined to an iPhone personal hotspot (one subnet that carries mDNS; the laptop's profile set to Private by the owner). Fresh Mac data folder (new identity), so the two started unpaired. Binaries built from bf40e20: the Mac debug build and the laptop's `common.exe` with the job-object fix.
+Same two machines, both joined to an iPhone personal hotspot (one subnet that carries mDNS; the laptop's profile set to Private by the owner). Fresh Mac data folder (new identity), so the two started unpaired. Binaries built from bf40e20: the Mac debug build and the laptop's `ucompute.exe` with the job-object fix.
 
 | Step | Result | Numbers |
 |---|---|---|
@@ -55,4 +57,4 @@ Same two machines, both joined to an iPhone personal hotspot (one subnet that ca
 
 No `llama-server.exe` was left on the laptop after its daemon was killed at the end.
 
-"mDNS can be disabled by config" (the third F-02-01 criterion) is covered by `disabled_config_is_inert` (crate test) and by the CLI's `--no-mdns` / `COMMON_MDNS=0`, which the CLI mesh test uses.
+"mDNS can be disabled by config" (the third F-02-01 criterion) is covered by `disabled_config_is_inert` (crate test) and by the CLI's `--no-mdns` / `UCOMPUTE_MDNS=0`, which the CLI mesh test uses.

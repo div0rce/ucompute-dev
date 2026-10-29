@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(p.model_blobs(), PathBuf::from("/tmp/x/models/blobs"));
     }
 
-    /// D-028: the default folder is named UCompute, never the former Common one.
+    /// The default folder is named UCompute (D-028).
     #[test]
     fn default_folder_is_named_ucompute() {
         let name = default_root()

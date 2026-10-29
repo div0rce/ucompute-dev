@@ -496,8 +496,8 @@ fn two_installs_pair_run_remote_and_revoke_single_host() {
         "pairing_failed",
     );
     assert!(err.contains("not the one in the QR code"), "{err}");
-    // D-028: A's own payload under the former `common-pair:v1:` prefix is refused before any dial.
-    let old_qr = format!("common-pair:v1:{id_a}:{pair_addr}:{secret}");
+    // A's own payload under any other prefix is refused before any dial.
+    let old_qr = format!("other-pair:v1:{id_a}:{pair_addr}:{secret}");
     let err = b.fails_with(
         &[&["peers", "join", &old_qr, "--name", "beta"][..], &net_b].concat(),
         "invalid_request",

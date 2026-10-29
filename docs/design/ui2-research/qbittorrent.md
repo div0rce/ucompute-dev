@@ -1,5 +1,7 @@
 # qBittorrent desktop UX study and how it maps to UCompute Desktop UI 2.0
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 Researched 2026-10-19. The latest release named on qbittorrent.org is v5.2.4 (news page date: 2026-09-28). [S1][S3]
 
 **Method and licence boundary.** I used the official site, the wiki (FAQ, Options, WebUI API), the release news and the GUI source tree at `master` on GitHub. I read the source only to describe behaviour. This document reproduces no code, layouts, icons or assets. The source code is GPLv2+. The binary distribution is GPLv3+ because it bundles GPLv3+ assets such as images (COPYING [S7]). That is a second reason, beyond branding, never to reuse its icons. UI labels below are given as plain names. Tooltips are paraphrased.
@@ -209,7 +211,7 @@ Two takeaways:
 ## 5. Transfer limits [S10][S20][S21][S5]
 
 - **Global limits:** upload and download, KiB/s (∞ = none).
-- **Alternative global limits:** a second set. The UI calls this "slow mode"; it is commonly known as the turtle. Defaults are 10 KiB/s each.
+- **Alternative global limits:** a second set. The UI calls this "slow mode"; it is widely known as the turtle. Defaults are 10 KiB/s each.
   - It toggles from the status bar button, the tray menu and the WebUI API.
   - An optional scheduler runs it from a start time to an end time, every day, weekdays or weekends (default 08:00–20:00, off).
   - Separate checkboxes decide whether limits apply to µTP, transport overhead and LAN peers.
@@ -286,7 +288,7 @@ The Execution log [S22][S8] has a General tab with severity filters (Normal, Inf
 
 ## 10. Translation to UCompute (devices ~ peers, jobs ~ transfers, models ~ content)
 
-The "backed by" column cites real API surfaces as of HEAD e76e7fc plus the working tree. I read `crates/common-api/src/lib.rs` ROUTES, `apps/desktop/src/api/client.ts` types, `crates/common-network/src/health.rs`, `proto/common/v1/control.proto`, and `crates/common-api/src/mesh.rs` network_status. A gap means the UI must show the item as unavailable, or a small, justified backend addition is needed (§11).
+The "backed by" column cites real API surfaces as of HEAD e76e7fc plus the working tree. I read `crates/ucompute-api/src/lib.rs` ROUTES, `apps/desktop/src/api/client.ts` types, `crates/ucompute-network/src/health.rs`, `proto/ucompute/v1/control.proto`, and `crates/ucompute-api/src/mesh.rs` network_status. A gap means the UI must show the item as unavailable, or a small, justified backend addition is needed (§11).
 
 ### 10.1 Information architecture
 
@@ -301,7 +303,7 @@ The "backed by" column cites real API surfaces as of HEAD e76e7fc plus the worki
 | Properties panel tabs; click the active tab to collapse; the panel clears on no selection | **Device inspector** tabs: Overview, Hardware, Models, Connection, Permissions, Activity. **Model inspector** tabs: Overview (size, quant, licence, fit estimate), Locations (which devices hold it), Load. **Job inspector** tabs: Timing, Tokens, Route, Error. The inspector collapses, persists its tab and size, and shows "No selection" rather than stale data. | Mixed, see 10.3 |
 | Status bar (free space, external IP, DHT nodes, connection icon, limits toggle, speeds [limit] (session)) | **Status bar**, left to right: a restart/daemon warning if any; Disk free; device name + dial address; mDNS on/off; mesh connection indicator (§10.5); Serving peers on/off toggle (the turtle analogue, §10.6); loaded model + device actual (GPU/CPU); queue `inflight/max_concurrent · queued/max_queue`; decode tok/s (last) | `/api/hardware.disk_free_bytes`, `/api/network.{device_name,dial_addr,mdns,connections,serve_peers}`, `/api/status.{loaded,queue}`, `/metrics` |
 | Execution log tab with severity filters | **Activity**: `/api/audit` events with filters for kind, device and time, plus text search. Severity derives from kind, for example `pairing_failed`, `peer_rejected` and `peer_lost` count as warnings. Copy row. No prompt or completion content (privacy). | `/api/audit` |
-| Statistics dialog | Dashboard "since start" figures: uptime, `common_requests_total`, `common_tokens_generated_total`, `common_remote_requests_total`, `common_requests_rejected_total`, TTFT histogram. Each figure is labelled with its scope (daemon session), never presented as all-time. | `/metrics`, `/api/status.uptime_seconds` |
+| Statistics dialog | Dashboard "since start" figures: uptime, `ucompute_requests_total`, `ucompute_tokens_generated_total`, `ucompute_remote_requests_total`, `ucompute_requests_rejected_total`, TTFT histogram. Each figure is labelled with its scope (daemon session), never presented as all-time. | `/metrics`, `/api/status.uptime_seconds` |
 | Window title / tray / Dock speed | Optional later (YAGNI). If added, show "n devices · tok/s" only from live data. | n/a |
 
 ### 10.2 Tables: Devices, Models, Jobs
@@ -347,9 +349,9 @@ These rules apply to all three tables:
 
 ### 10.4 Jobs ~ transfers (the hardest mapping; do not invent)
 - **What exists:**
-  - A real admission queue with aggregate counts: `/api/status.queue = {inflight, queued, max_concurrent, max_queue}`, `common_inflight` and `common_queue_depth` metrics, and `common_requests_rejected_total`.
+  - A real admission queue with aggregate counts: `/api/status.queue = {inflight, queued, max_concurrent, max_queue}`, `ucompute_inflight` and `ucompute_queue_depth` metrics, and `ucompute_requests_rejected_total`.
   - Remote requests appear as `remote_request` audit events.
-  - Streaming generations are cancelled server-side when the client disconnects (`openai.rs` CancellationToken on drop). For remote targets, a `Cancel{request_id}` is sent to the peer (`common-network/src/remote.rs`).
+  - Streaming generations are cancelled server-side when the client disconnects (`openai.rs` CancellationToken on drop). For remote targets, a `Cancel{request_id}` is sent to the peer (`ucompute-network/src/remote.rs`).
 - **What does not exist:**
   - A per-job registry or list endpoint, job IDs visible to the UI, or a cancel endpoint for jobs started by other clients.
   - Any reorder or priority control.
@@ -373,7 +375,7 @@ Use the same pessimistic default: never green without evidence.
 | Listening, no devices connected | enabled, `connections == 0`. On Windows, add the firewall status from the in-flight Tauri command (blocked → explicit "Windows Firewall is blocking inbound pairing" with an Allow action). |
 | Connected (n) | `connections > 0`, with the per-device health in the tooltip |
 
-A **discovered mDNS record must never raise the state**. Discovered entries feed the "Discovered (not paired)" filter only, with `seen_utc` age. A trusted device counts as connected only when `health == connected`. Unhealthy and reconnecting peers get their own colours, because they follow the real keep-alive state machine (1 s keep-alive, 4 s idle, backoff 1–30 s; `common-network/src/health.rs`).
+A **discovered mDNS record must never raise the state**. Discovered entries feed the "Discovered (not paired)" filter only, with `seen_utc` age. A trusted device counts as connected only when `health == connected`. Unhealthy and reconnecting peers get their own colours, because they follow the real keep-alive state machine (1 s keep-alive, 4 s idle, backoff 1–30 s; `ucompute-network/src/health.rs`).
 
 ### 10.6 Limits and the "alternative speed" toggle
 - **Turtle → Serving peers toggle.** One click switches `serve_peers` (`PUT /api/network`). It is a pressed/unpressed button whose tooltip says what a click will do. The change goes to Activity. This is a permission change, so it must be keyboard-reachable and must never be scheduled automatically. Skip the qBittorrent-style scheduler (YAGNI; no backend).
@@ -385,7 +387,7 @@ A **discovered mDNS record must never raise the state**. Discovered entries feed
   - General/Behavior: confirmations, table options, start minimised, notifications.
   - Network: enable mesh, mDNS, listen/dial address, Windows firewall status/allow.
   - Execution: device auto/cpu/gpu, context, concurrency as read-only where config-only.
-  - Storage: `COMMON_HOME`, disk free, model store.
+  - Storage: `UCOMPUTE_HOME`, disk free, model store.
   - Privacy & permissions: privacy mode, groups and policies, serve peers, quotas read-only.
   - Security: this device's key fingerprint, revoked devices, pairing.
   - Advanced: raw config view, read-only.

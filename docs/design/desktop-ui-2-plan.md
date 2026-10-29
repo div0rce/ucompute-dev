@@ -1,5 +1,7 @@
 # UCompute Desktop UI 2.0: design and build plan
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 Lead product design and frontend architecture. Written 2026-10-19 and read-only: nothing in the repo was edited, built or run.
 
 **Revision 2 (same day).** Revised after three critiques (UX, feasibility, honesty). Every changed rule was re-checked read-only against HEAD and the working tree. §8 says which critique points were rejected or merged and why.
@@ -9,7 +11,7 @@ Inputs: `qbittorrent.md` (behaviour study), `api-inventory.md` (data sources and
 - the `client.ts` types, `send()` (every fetch failure except `AbortError` becomes `unreachable`) and the `chat()` stream loop
 - `daemon.ts::refreshStatus` (any error sets `reachable:false`)
 - `mesh.rs::peers_get`, `peer_revoke` (revoke unpins: a revoked device leaves `peers[]` and appears only in `revocations[]`), `network.connections = node.connections().len()` (can hold two live connections for one peer), `pair_start` (409 `overloaded` while a window is open; no cancel route), `generate_remote_audited` (client `remote_request` `finished` carries `outcome` = `done`, an error code, `incomplete` or `cancelled`)
-- `openai.rs::run` (admit → `ensure_loaded` → `generate` all happen before the SSE response; `common_tokens_generated_total` rises only at `Done` and only for local runs)
+- `openai.rs::run` (admit → `ensure_loaded` → `generate` all happen before the SSE response; `ucompute_tokens_generated_total` rises only at `Done` and only for local runs)
 - `transport.rs`: hardware and free memory are probed once at `Node` start; `issued_at` is stamped at each handshake; `close_code()` maps every refusal other than revoked/unauthorized to `CLOSE_PROTOCOL`; `allowed()` is checked at outbound (≈714) and inbound (≈790)
 - `discovery.rs::peers` (`trusted` = pinned here, so a revoked id that still announces looks untrusted)
 - the `health.rs` state machine (keep-alive 1 s, idle 4 s)
@@ -106,7 +108,7 @@ Licence boundary: qBittorrent is GPL. This plan borrows only behaviour, meaning 
 - **Inspector**: docked at the bottom for the Devices, Models, Jobs and Activity tables. Rules:
   - Tabs follow the APG pattern. Clicking the active tab does nothing (no hidden collapse). The collapse button and Mod+I toggle it.
   - Default height: Devices sizes the table to its content plus one row, capped at 50% of the main area, and gives the inspector the rest (minimum 140 px). Models, Jobs and Activity default to 38%. Once the user drags the splitter, their height wins.
-  - Height, collapsed state and the last tab persist per section in localStorage (`common.ui`), read and written inside try/catch.
+  - Height, collapsed state and the last tab persist per section in localStorage (`ucompute.ui`), read and written inside try/catch.
   - Devices preselects the self row when the URL has no id, so its inspector is never empty on the first visit.
   - With no selection (other sections) it shows "Select a <thing> to see its details" and stops refreshing tab-specific data.
   - Chat uses a right-docked "Run" panel instead (§2.5). Dashboard and Settings have no inspector.
@@ -325,7 +327,7 @@ In every case focus stays on the same row key across updates. If that row is gon
 | Paired | `p.paired_at_utc` | timestamp | hidden |
 | Device ID | full 64 hex, monospace | id | hidden |
 | Short label | `short_label` | string | hidden |
-| Version | `capabilities.common_version` (E1) | string | hidden |
+| Version | `capabilities.ucompute_version` (E1) | string | hidden |
 
 The column chooser sits in the header context menu. The last visible column cannot be hidden. Layout persists per table.
 
@@ -348,7 +350,7 @@ The column chooser sits in the header context menu. The last visible column cann
 
 **Pair dialog** (`<dialog>`, two APG tabs) reuses the existing flows and test names unchanged:
 - **Show a code**: `pairStart`, the six-digit code in group "Pairing code", the countdown, `pair_addr`, the QR payload in `<details>`, and `pairStatus` polled every 1 s.
-- **Enter a code**: address plus code, or a pasted `common-pair:v1:` payload; button "Join".
+- **Enter a code**: address plus code, or a pasted `ucompute-pair:v1:` payload; button "Join".
 - **Session survives the dialog.** `pair/start` returns 409 while a window is open, `pair/status` does not return the code, and there is no cancel route. So the session (code, address, payload, `expires_at`) lives in the app-level `pairing` store (§5.3), not in dialog state. Esc or Close hides the dialog; reopening it resumes the same code and countdown with no second `pair/start`. The store clears at `expires_at` or when `pairStatus` reports a final state.
 - Pairing a device that is in `revocations[]` shows the Revoke-aware confirmation first ("You revoked this device on <date>; pairing again trusts it again").
 - Windows only: the Firewall notice (below) sits inside the dialog.
@@ -359,8 +361,8 @@ The column chooser sits in the header context menu. The last visible column cann
 
 | Tab | Self | Paired peer | Nearby / Revoked |
 |---|---|---|---|
-| Overview | Name (edit lives in Settings › Network), id (8×8 grouped, copy), short label, service version, uptime, "started by this app" (`spawned`), State / Can run there with detail | Name, Trust, State plus `last_error` (message, hint, addr, time), Can run there plus the `promptReadiness` text and last request outcome, Can use this computer with its reason, id (8×8, copy), short label, paired at, last seen, groups, software (E1: `common_version`, `engines[]`, `protocol_minor`). A separated **Danger** group: Revoke. | Nearby: id, short label, `addrs[]`, "announced a pairing window <age> ago" (`pairing`; the cached record can outlive the window), `proto`, seen. Revoked: `peer_id`, `at_utc`, `revoked_by` (resolved name or short label), `seq`, and "announced nearby <age> ago" when announcing. |
-| Hardware | `/api/hardware` in full: chip, OS, CPU (cores/threads, features), memory (total, available, unified), GPUs table (name, vendor, backend, cores, memory; `—` where optional fields are absent), backends table (available plus reason), disk free, probe time, a "Re-probe" button, and the raw JSON `<details>` (keeps F-10-04 parity with `common hardware --json`) | `capabilities.hardware` with its own layout. Header: "Hardware and free memory measured when <name>'s networking started (time not reported). Sent and signed at <issued_at_utc> when this connection opened. Not independently verified." "Available memory", "free memory" and "disk free" each carry the visible tag "at its network start". If `caps === null`: "Not reported while not connected." If connected but `caps.hardware === null`: "Sent in a format this version cannot read." If E1 is missing: "Not reported by this service version." | — |
+| Overview | Name (edit lives in Settings › Network), id (8×8 grouped, copy), short label, service version, uptime, "started by this app" (`spawned`), State / Can run there with detail | Name, Trust, State plus `last_error` (message, hint, addr, time), Can run there plus the `promptReadiness` text and last request outcome, Can use this computer with its reason, id (8×8, copy), short label, paired at, last seen, groups, software (E1: `ucompute_version`, `engines[]`, `protocol_minor`). A separated **Danger** group: Revoke. | Nearby: id, short label, `addrs[]`, "announced a pairing window <age> ago" (`pairing`; the cached record can outlive the window), `proto`, seen. Revoked: `peer_id`, `at_utc`, `revoked_by` (resolved name or short label), `seq`, and "announced nearby <age> ago" when announcing. |
+| Hardware | `/api/hardware` in full: chip, OS, CPU (cores/threads, features), memory (total, available, unified), GPUs table (name, vendor, backend, cores, memory; `—` where optional fields are absent), backends table (available plus reason), disk free, probe time, a "Re-probe" button, and the raw JSON `<details>` (keeps F-10-04 parity with `ucompute hardware --json`) | `capabilities.hardware` with its own layout. Header: "Hardware and free memory measured when <name>'s networking started (time not reported). Sent and signed at <issued_at_utc> when this connection opened. Not independently verified." "Available memory", "free memory" and "disk free" each carry the visible tag "at its network start". If `caps === null`: "Not reported while not connected." If connected but `caps.hardware === null`: "Sent in a format this version cannot read." If E1 is missing: "Not reported by this service version." | — |
 | Models | Downloaded models: id, size, loaded state | `capabilities.models[]`: id, or "Unknown model `<sha256[:12]>…` (not in this computer's catalog; cannot be run from here)". Caption: "Reported when this connection opened; models pulled or removed there since then are not shown." | — |
 | Performance | Measured here: `loaded.device_actual`, offload layers, `n_ctx`, threads, `parallel_slots`, `load_ms`, `context_note`, `loaded_for` (E2). From E3 recent jobs on this computer, grouped by (model, `device_actual`): runs, median TTFT, median decode tok/s, captioned "last N finished runs since the service started". Without E3: "Not reported by this service version". | Table 1, from E3 recent jobs with this target, grouped by model: runs and median decode tok/s, captioned "measured by <name>'s engine; GPU/CPU not reported". No median TTFT in this table (as built, 2026-10-22): a job's TTFT is timed on this computer from arrival, so for another device it would mix the network and that device's queue and load into an "engine" figure; the screen says so. Table 2, separate and below it, from audit `remote_request` finished events for this peer, grouped by model: count, outcomes, tokens/s = `completion_tokens / duration_ms`, captioned "end to end from this computer, including queue, load, prompt and network". The two figures never share a table. No benchmark numbers. | — |
 | Connection | Networking on/off, `listen_addr`, `dial_addr`, mDNS, devices connected (`live` count) and `connections`, serving devices, Windows Firewall status with Allow (Tauri) | State word; E1 `remote_addr`, direction, open since (`opened_at_utc`), RTT, bytes tx/rx with since-open rates, lost packets; known addresses with provenance (seen nearby with `addrs[]` and age, last known `last_addr`); `last_error`; **Connect** form (optional `ip:port`, validated; the address is only a hint because the pinned key decides), **Disconnect** (E5, tooltip "Until you connect again or the service restarts") | Nearby: addrs, Pair… |
@@ -433,7 +435,7 @@ The column chooser sits in the header context menu. The last visible column cann
 
 Source: `GET /api/jobs` → `{active: Job[], recent: Job[]}` (**E3**), polled every 2 s while Jobs, Dashboard or Activity is visible and every 5 s otherwise (the status bar Sharing item needs it). Without E3 (404), the page shows the slot strip plus "This service version does not report jobs", and nothing else. No client-made rows.
 
-**Header strip** (one line above the table): `Slots 1 of 4 in use · devices may use up to 3 · waiting 0 of 32 · rejected since service start: 2 (queue full 2, timed out 0)`. Sources: `status.queue`, `network.peer_slots`, and `/metrics` `common_requests_rejected_total{reason}` (polled every 5 s on Jobs only).
+**Header strip** (one line above the table): `Slots 1 of 4 in use · devices may use up to 3 · waiting 0 of 32 · rejected since service start: 2 (queue full 2, timed out 0)`. Sources: `status.queue`, `network.peer_slots`, and `/metrics` `ucompute_requests_rejected_total{reason}` (polled every 5 s on Jobs only).
 
 To the right, one **token-rate sparkline** with three series: on this computer (local target, local origin), sent to devices (`target` is a peer), served for devices (`kind === "served_for_peer"`). Each sample is the change in summed `completion_tokens` over active and newly finished jobs between two job polls, divided by the actual interval. Requires E3 live `completion_tokens`; without it the sparkline is absent. Gaps are stored as null. Caption: "Tokens/s, sampled while Dashboard, Jobs or Activity was open, last ≤ 1 h." No `/metrics` token series exists anywhere.
 
@@ -499,7 +501,7 @@ Copy ID is in the context menu and on the copy shortcut.
 
 **Session controller (`src/sections/chat/session.ts`, owner D).** A module-level controller owns the in-flight reply: the `client_ref`, the `AbortController`, the partial text and the history writes. The Chat view only subscribes. So a reply keeps streaming when the user navigates away, and Jobs → Stop (via `ownStreams`) saves `stopped:true` with the partial text.
 
-**Own-request identity.** `api.chat` generates `client_ref = crypto.randomUUID()`, registers `ownStreams[client_ref]` **before** `fetch`, and sends the header `X-Common-Client-Ref` (only when `status.engine` is present, i.e. the service is E2 or later and allows the header in CORS, §4 E2). The id from the first chunk is still captured as `job_id`. Both are stored on the history message.
+**Own-request identity.** `api.chat` generates `client_ref = crypto.randomUUID()`, registers `ownStreams[client_ref]` **before** `fetch`, and sends the header `X-UCompute-Client-Ref` (only when `status.engine` is present, i.e. the service is E2 or later and allows the header in CORS, §4 E2). The id from the first chunk is still captured as `job_id`. Both are stored on the history message.
 
 **Destination** (the `runTarget` store; the existing RunOn becomes `DestinationPicker`):
 - Options:
@@ -534,7 +536,7 @@ For peer runs the timing label reads "measured by <device>; GPU/CPU not reported
 - No per-conversation aggregate: a conversation spans destinations and models, so one median would mix them.
 
 **History:**
-- One conversation, kept in localStorage `common.chat` (unchanged key; reads and writes in try/catch). Each message gains `client_ref` and `job_id` when known.
+- One conversation, kept in localStorage `ucompute.chat` (unchanged key; reads and writes in try/catch). Each message gains `client_ref` and `job_id` when known.
 - Settings › Privacy states what is kept where (§2.7) and offers "Delete chat history on this computer".
 
 **Must keep (tests):** incremental streaming; Stop under 300 ms; the stopped flag with partial text saved; "Ran on"; local-only enforcement; remote runs with nothing loaded locally; the role names "Message", "Send" and "Stop".
@@ -602,9 +604,9 @@ Everything is filtered client-side.
 | Execution | Default device Auto/CPU/GPU; context length (null = model default). Both are client-side, sent with each load (existing). Caption: "Applies to models this app loads; loads requested by other programs or paired devices use the service defaults." Admission limits (read-only): `max_concurrent`, `max_queue`. | `settings` store; `status.queue` |
 | Network | Networking switch; device name (pairing name override, placeholder `network.device_name`); discovery (mDNS) on/off (read-only); `listen_addr`, `dial_addr`; Windows only: the Firewall notice with the §2.2 wording and "Allow on private networks" | `PUT /api/network`; Tauri `firewall_status` / `allow_through_firewall`; `FirewallNotice` (`src/ui/`) |
 | Sharing & permissions | "Run requests for paired devices" (`serve_peers`, disabled while networking is off, with the reason); device quota (read-only); `peer_slots` (read-only); **Groups** editor (`GroupsEditor`, `src/ui/`): create, members, "Members may run prompts for each other". There is no group delete route, so the page says "Remove all members to stop a group applying" (N9 deferred). The pooled flag is **not shown** (pooled inference does not exist) and is round-tripped unchanged on PUT. | `PUT /api/network`; `/api/groups` |
-| Privacy | Mode: Local only / Trusted devices, with the disclosure and "I understand" before PUT (existing flow). There is no "Public compute" control: no backend exists, and F-10-10's "public (when gated)" is met by its absence until a gate exists. What is kept: "The service never stores prompts or replies. It keeps request details (model, device, tokens, timing) in memory until it restarts. It also keeps a log of pairing, connections and requests to and from other devices (`audit.jsonl`). Your conversation is stored only in this app on this computer." Action: "Delete chat history on this computer", which clears `common.chat` after confirmation. | `/api/privacy` |
+| Privacy | Mode: Local only / Trusted devices, with the disclosure and "I understand" before PUT (existing flow). There is no "Public compute" control: no backend exists, and F-10-10's "public (when gated)" is met by its absence until a gate exists. What is kept: "The service never stores prompts or replies. It keeps request details (model, device, tokens, timing) in memory until it restarts. It also keeps a log of pairing, connections and requests to and from other devices (`audit.jsonl`). Your conversation is stored only in this app on this computer." Action: "Delete chat history on this computer", which clears `ucompute.chat` after confirmation. | `/api/privacy` |
 | Security | This device: id grouped 8×8 for comparison, short label. Revoked devices table: short label, revoked at, by, seq (`revocations[]`). | `/api/network`, `/api/peers` |
-| Storage | Disk free; total size of downloaded models (sum of `bytes` where `downloaded`). Model folder: "not reported by the service" (COMMON_HOME is not served). | `hardware`, `models` |
+| Storage | Disk free; total size of downloaded models (sum of `bytes` where `downloaded`). Model folder: "not reported by the service" (UCOMPUTE_HOME is not served). | `hardware`, `models` |
 
 **Absent by design:** contributor, credit, public compute, Swarm and Cloud controls; the API key entry (nothing sets it today; YAGNI); notifications.
 
@@ -812,20 +814,20 @@ Never animated:
 The essential ones are E1 through E5. The rules for every addition:
 - Loopback API only.
 - Ids, counts, codes and durations only, never prompt or completion text.
-- Documented in `crates/common-api/openapi.json`, which the `route_inventory_matches_openapi_document` test keeps equal to `ROUTES`.
+- Documented in `crates/ucompute-api/openapi.json`, which the `route_inventory_matches_openapi_document` test keeps equal to `ROUTES`.
 - Tested, including a shape test against the UI's golden fixtures (below).
 - Multi-daemon tests are **SINGLE-HOST** in their names and evidence, and never satisfy a two-machine criterion.
 
-**Golden fixtures.** A writes `apps/desktop/src/test/fixtures/api/{peers_e1,status_e2,jobs_e3,peers_e5}.json` in Phase 0 from this section, and `mocks.ts` loads them. E adds `crates/common-api/tests/ui_fixtures.rs`, which reads those files (read-only) and asserts each real response has the same keys and JSON types, recursively, ignoring values. A mismatch is resolved by message between A and E, never by one editing the other's file.
+**Golden fixtures.** A writes `apps/desktop/src/test/fixtures/api/{peers_e1,status_e2,jobs_e3,peers_e5}.json` in Phase 0 from this section, and `mocks.ts` loads them. E adds `crates/ucompute-api/tests/ui_fixtures.rs`, which reads those files (read-only) and asserts each real response has the same keys and JSON types, recursively, ignoring values. A mismatch is resolved by message between A and E, never by one editing the other's file.
 
 ### E0. User-facing strings that name old sections (with E2)
 
-`error.rs` ("…in Peers.", "open Diagnostics", "Review Privacy and Network settings"), `mesh.rs:555` ("enter its address under Peers") and `pairing.rs:126` ("allow Common under Peers") name sections that will not exist. E rewords them so they also work in CLI output, for example "in the desktop app's Devices section" and "open Activity in the desktop app, or run `common diagnostics`" (the CLI command exists). A updates `errors.ts` in the same merge, because `errors.test.ts` requires the two to match exactly.
+`error.rs` ("…in Peers.", "open Diagnostics", "Review Privacy and Network settings"), `mesh.rs:555` ("enter its address under Peers") and `pairing.rs:126` ("allow UCompute under Peers") name sections that will not exist. E rewords them so they also work in CLI output, for example "in the desktop app's Devices section" and "open Activity in the desktop app, or run `ucompute diagnostics`" (the CLI command exists). A updates `errors.ts` in the same merge, because `errors.test.ts` requires the two to match exactly.
 
 ### E1. Peer capabilities and connection details in `GET /api/peers` (no new route, no protocol change)
 
 **Fields, per `peers[]`:**
-- `capabilities: { common_version, protocol_minor, engines: string[], issued_at_utc, free_memory_bytes, hardware: HardwareReport | null, models: { sha256, id: string | null }[] } | null`
+- `capabilities: { ucompute_version, protocol_minor, engines: string[], issued_at_utc, free_memory_bytes, hardware: HardwareReport | null, models: { sha256, id: string | null }[] } | null`
   - `hardware` comes from a typed parse of `hardware_json`. Garbage becomes `null` (the UI says "Sent in a format this version cannot read"); raw peer JSON is never passed through.
   - `models` resolves `cached_model_sha256` against the local store and catalog.
   - The openapi description states the timing honestly: `hardware` and `free_memory_bytes` are measured when the peer's networking started; `issued_at_utc` is when the record was signed, at this connection's handshake.
@@ -853,11 +855,11 @@ The essential ones are E1 through E5. The rules for every addition:
 - `loaded` gains `in_flight: number`, `loaded_for: "local" | "peer:<hex>"`, `loaded_at_utc`, and `context_note` (already on the wire; add it to openapi and the client).
 - No `rss_bytes`: it costs a synchronous `ps` per poll on unix and is never available on Windows (YAGNI; §6).
 
-**CORS.** Add `x-common-client-ref` to `Access-Control-Allow-Headers` in `lib.rs::cors`. The client sends the header only when `status.engine` is present, so an older service never sees a preflight it would refuse.
+**CORS.** Add `x-ucompute-client-ref` to `Access-Control-Allow-Headers` in `lib.rs::cors`. The client sends the header only when `status.engine` is present, so an older service never sees a preflight it would refuse.
 
 **Implementation (suggested):**
 - `ModelManager` keeps a std-mutex snapshot of `LoadedModelInfo` plus `loaded_for`/`loaded_at`, updated on load and unload, and a `loading: Option<(id, Instant)>` set and cleared around the load.
-- Add `ensure_loaded_for(id, opts, origin)`; `ensure_loaded` stays as the `Local` wrapper, so only `remote.rs::execute` changes its call (to `Peer(peer)`). The other callers (`admin.rs`, `openai.rs`, `common-cli/src/run.rs`, tests) are untouched.
+- Add `ensure_loaded_for(id, opts, origin)`; `ensure_loaded` stays as the `Local` wrapper, so only `remote.rs::execute` changes its call (to `Peer(peer)`). The other callers (`admin.rs`, `openai.rs`, `ucompute-cli/src/run.rs`, tests) are untouched.
 - `status`, `/api/models` and `/v1/models` read the snapshot, never the slot mutex.
 
 **Why:** today the 2.5 s status poll and `/api/models` hang for the whole hash-verify plus engine start, so the UI cannot show "Loading X", and a paired device's load is indistinguishable from a local one.
@@ -866,7 +868,7 @@ The essential ones are E1 through E5. The rules for every addition:
 - The test holds `st.manager.loaded.lock().await`. `GET /api/status` with a 1 s client timeout returns 200 with `engine.state == "loading"` or the snapshot. This fails today by timing out.
 - A real stories15M load ends with `engine.state == "ready"`, `loaded_for == "local"`.
 - SINGLE-HOST: a served request that loads a model on B gives B `loaded_for == "peer:<A>"`.
-- A CORS preflight with `Access-Control-Request-Headers: x-common-client-ref` from an allowed origin succeeds.
+- A CORS preflight with `Access-Control-Request-Headers: x-ucompute-client-ref` from an allowed origin succeeds.
 
 ### E3. Job registry: `GET /api/jobs`
 
@@ -877,7 +879,7 @@ The essential ones are E1 through E5. The rules for every addition:
 | Field | Type / values |
 |---|---|
 | `id` | the response id (`chatcmpl-…` / `cmpl-…`) once known; before the first token, a registry id; for served-for-peer rows, the peer's `request_id` |
-| `client_ref?` | from the optional `X-Common-Client-Ref` header (≤ 64 chars of `[A-Za-z0-9-]`, otherwise ignored), on `/v1/chat/completions` and `/v1/completions`. An id, never text. |
+| `client_ref?` | from the optional `X-UCompute-Client-Ref` header (≤ 64 chars of `[A-Za-z0-9-]`, otherwise ignored), on `/v1/chat/completions` and `/v1/completions`. An id, never text. |
 | `kind` | `chat` \| `completion` \| `embeddings` \| `served_for_peer` |
 | `model_id` | string |
 | `target` | `"local"` \| `"peer:<hex>"` |
@@ -896,13 +898,13 @@ All the states are real:
 - `loading` = inside `ensure_loaded`
 - `running` = generating
 
-**Hooks:** one drop-guard per request in `openai::run`, `run_remote`, `embeddings`, and the served stream in `remote.rs` (`handle_stream`/`execute`). The row is created at the start of the handler, before admission, so `client_ref` is visible while queued and loading. The guard updates on admit, load, every chunk (token count), first token, `Done`, error and drop. Served-for-peer rows come from a registry handle placed in `common-observability`, passed through `remote::ServeOptions`, and finished next to the existing `remote_request` audit line.
+**Hooks:** one drop-guard per request in `openai::run`, `run_remote`, `embeddings`, and the served stream in `remote.rs` (`handle_stream`/`execute`). The row is created at the start of the handler, before admission, so `client_ref` is visible while queued and loading. The guard updates on admit, load, every chunk (token count), first token, `Done`, error and drop. Served-for-peer rows come from a registry handle placed in `ucompute-observability`, passed through `remote::ServeOptions`, and finished next to the existing `remote_request` audit line.
 
 **Why:** the Jobs section, the Dashboard "Running now" block, the Jobs sparkline, the Devices Jobs column, Performance tab and "Requested by", the status bar Sharing item, Activity's Execution rows and the Chat → job link. Without E3 only aggregate counts exist.
 
 **Tests (`real_engine.rs` style, stories15M):**
 - During a streaming chat there is one active row with `state:"running", target:"local"`, and its `completion_tokens` rises across two polls.
-- With `max_concurrent=1` and a second request carrying `X-Common-Client-Ref`, that ref is on a row with `state:"queued"`.
+- With `max_concurrent=1` and a second request carrying `X-UCompute-Client-Ref`, that ref is on a row with `state:"queued"`.
 - Aborting that queued request ends its row as `cancelled`; if the server cannot observe the abort until admission, the test asserts and documents that instead (the UI then labels Stop "takes effect when it starts").
 - After `[DONE]` the row is in `recent` with `completion_tokens == usage.completion_tokens` and `ttft_ms` set.
 - A queue-full rejection appears with `error_code:"overloaded"`.
@@ -1019,15 +1021,15 @@ Owns:
 
 **E. Backend.**
 Owns:
-- `crates/common-api/src/{lib.rs, mesh.rs, admin.rs, openai.rs, jobs.rs (new)}`
-- `crates/common-api/openapi.json`
-- `crates/common-api/tests/{mesh.rs, api.rs, real_engine.rs, jobs.rs, ui_fixtures.rs, common/mod.rs}`
-- `crates/common-core/src/error.rs` (E0 strings, `peer_held`)
-- `crates/common-runtime/src/manager.rs`
-- `crates/common-network/src/{health.rs, transport.rs, remote.rs, pairing.rs}`
-- `crates/common-network/tests/remote_single_host.rs` (its `ServeOptions {…}` literal at ≈745 breaks when E3 adds a field; switch it to `..ServeOptions::standalone()` or add the field)
-- `crates/common-observability/src/lib.rs`
-- `proto/common/v1/control.proto` (the `CLOSE_HELD` comment only)
+- `crates/ucompute-api/src/{lib.rs, mesh.rs, admin.rs, openai.rs, jobs.rs (new)}`
+- `crates/ucompute-api/openapi.json`
+- `crates/ucompute-api/tests/{mesh.rs, api.rs, real_engine.rs, jobs.rs, ui_fixtures.rs, support/mod.rs}`
+- `crates/ucompute-core/src/error.rs` (E0 strings, `peer_held`)
+- `crates/ucompute-runtime/src/manager.rs`
+- `crates/ucompute-network/src/{health.rs, transport.rs, remote.rs, pairing.rs}`
+- `crates/ucompute-network/tests/remote_single_host.rs` (its `ServeOptions {…}` literal at ≈745 breaks when E3 adds a field; switch it to `..ServeOptions::standalone()` or add the field)
+- `crates/ucompute-observability/src/lib.rs`
+- `proto/ucompute/v1/control.proto` (the `CLOSE_HELD` comment only)
 
 E never edits `apps/desktop` (it only reads the golden fixtures).
 
@@ -1040,7 +1042,7 @@ E never edits `apps/desktop` (it only reads the golden fixtures).
 Agents report their evidence in their final messages and do not edit these files.
 
 **Machine budget (this Mac: 8 GB RAM, about 6 GiB free disk, `target/` 18 GB).**
-- E builds with `CARGO_TARGET_DIR=/Users/nasr/repos/common/target`, shared and serial. No second target directory.
+- E builds with `CARGO_TARGET_DIR=/Users/nasr/repos/ucompute/target`, shared and serial. No second target directory.
 - Frontend worktrees never run cargo.
 - At most two vitest runs at a time.
 - Free cache space (owner-authorized) before the `pnpm tauri build` in §5.5 step 4.
@@ -1202,7 +1204,7 @@ Every removed or renamed case is listed in its commit message with its replaceme
    - `pnpm build` passes (tsc strict plus vite).
    - Record both in `docs/VERIFICATION.md`.
 2. **Backend:**
-   - `CARGO_TARGET_DIR=$PWD/target COMMON_HOME=$PWD/.common cargo test -p common-api -p common-runtime -p common-network -p common-observability -p common-core` passes, including the new E0–E5 tests, `ui_fixtures.rs`, the route inventory ↔ openapi test and the real-engine stories15M tests.
+   - `CARGO_TARGET_DIR=$PWD/target UCOMPUTE_HOME=$PWD/.ucompute cargo test -p ucompute-api -p ucompute-runtime -p ucompute-network -p ucompute-observability -p ucompute-core` passes, including the new E0–E5 tests, `ui_fixtures.rs`, the route inventory ↔ openapi test and the real-engine stories15M tests.
    - `python3 scripts/validate_registry.py` passes.
 3. **Real-render contrast and a11y:**
    - Start two SINGLE-HOST dev daemons on loopback ports and pair them, so the warn, danger, connected and refused states actually appear.
@@ -1225,7 +1227,7 @@ Every removed or renamed case is listed in its commit message with its replaceme
      - NVDA (or Narrator) reads grid cells with their column headers
 6. **Physical two-machine checks** (Mac plus Windows laptop). These are **not SINGLE-HOST**; evidence goes in `docs/evidence/desktop-ui2-two-machine-<date>.md`.
    1. Pair through the Pair dialog on both apps and add each to a group that allows prompts. Each Devices table shows the other with State "Connected", Can run there "Can send" and Can use this computer "Yes". After one remote chat, the sender shows "Can send · last request done".
-   2. The Mac's Hardware tab for the laptop equals `common hardware --json` run on the laptop, and vice versa, on static fields only: host, cpu, gpus, backends and `memory.total_bytes`. Record `issued_at_utc`.
+   2. The Mac's Hardware tab for the laptop equals `ucompute hardware --json` run on the laptop, and vice versa, on static fields only: host, cpu, gpus, backends and `memory.total_bytes`. Record `issued_at_utc`.
    3. Run a remote chat from the Mac. It appears as an active job on the Mac (`target peer:`, live tokens rising) and as Served for device on the laptop, with the same `request_id`; the laptop's status bar reads "Serving 1 request for <Mac>". Activity on both shows `remote_request`.
    4. Pull the laptop's network. Within about 10 s the Mac shows Reconnecting, Unreachable or Not seen nearby (Not responding may appear briefly). Activity shows one `peer_lost` (E4). **Nothing** shows Connected from a cached mDNS record.
    5. Disconnect the laptop from the Mac. The Mac stays "Disconnected by you"; the laptop shows "Disconnected by <Mac>" and its redials are refused. Connect from the Mac restores the link (E5).
@@ -1265,7 +1267,7 @@ Every removed or renamed case is listed in its commit message with its replaceme
 
 ## 7. Open owner decisions (the plan works with either answer)
 
-1. **Visible brand.** Decided 2026-10-22 (D-021): UCompute is the product's name and Common its former name, so the rail and window title show "UCompute" (clearance not claimed). `productName` and `identifier` in `tauri.conf.json`, which affect bundle and installer names and data paths, stay "Common" for now: D-021 keeps code identifiers unchanged until a separate rename after physical acceptance. Until then the macOS app menu (built by `Menu.default()` from `productName`), the Dock and the installer say "Common" while the window and rail say "UCompute"; this mismatch is known and accepted.
+1. **Visible brand.** Decided 2026-10-22 (D-021): UCompute is the product's name, so the rail and window title show "UCompute" (clearance not claimed). `productName` and `identifier` in `tauri.conf.json`, which affect bundle and installer names and data paths, keep the former name for now: D-021 keeps code identifiers unchanged until a separate rename after physical acceptance. Until then the macOS app menu (built by `Menu.default()` from `productName`), the Dock and the installer show the former name while the window and rail say "UCompute"; this mismatch is known and accepted.
 2. **N2 peer status broadcast.** It would enable a true peer Busy state, live peer free memory and the "Loaded there" field, but discloses the loaded model to every paired device.
 3. **E5 hold persistence and reach.** The plan holds in memory until Connect or a restart, and the hold also refuses the other device's dials (it reads "Disconnected by <name>"). Persisting holds across restarts would need a `peers.json` field.
 
@@ -1276,7 +1278,7 @@ Every removed or renamed case is listed in its commit message with its replaceme
 Accepted in full unless listed here. Merged or rejected points:
 
 - **Peer availability words.** Critique 1 proposed "Permitted here / Available / Refused last request"; critique 3 proposed "Can send" (neutral). Merged: "Can send" by default, upgraded to ok only by a real `done` outcome on the current connection, warn for refusals. "Available" is never used for a peer.
-- **Client reference header name.** Critique 2's `X-Common-Client-Tag`/`client_tag` was not used; critiques 1 and 3 agreed on `X-Common-Client-Ref`/`client_ref`. Added what none of them noted: the CORS allow-list currently admits only `authorization, content-type`, so E2 adds the header and the client sends it only to services that report `status.engine`.
+- **Client reference header name.** Critique 2's `X-UCompute-Client-Tag`/`client_tag` was not used; critiques 1 and 3 agreed on `X-UCompute-Client-Ref`/`client_ref`. Added what none of them noted: the CORS allow-list currently admits only `authorization, content-type`, so E2 adds the header and the client sends it only to services that report `status.engine`.
 - **What the held device sees.** Critique 2 mapped `CLOSE_HELD` to the existing `peer_lost`. Rejected in favour of critique 3's distinct code (`peer_held`): under the new Connection rules `peer_lost` would read as "Not seen nearby" or "Unreachable", which is false for a device that was deliberately refused.
 - **Token-rate sparklines.** Critique 3 asked to delete them; critique 1 asked to feed them from live E3 token counts. Kept one sparkline (Jobs only, three series) fed by live E3 counts, which is a real rate; the `/metrics` series, "last decode tok/s" and the all-model mean TTFT are deleted as critique 3 asked. Critique 3's optional plain "tokens generated" counter was not kept (YAGNI).
 - **Peer free memory.** Critique 1's "muted with age from `issued_at`" was rejected: `issued_at` is the handshake time while the value was measured at the peer's network start (critique 3, verified in `transport.rs`). Peer cells show `—`; the snapshot is in the inspector with its caveat.

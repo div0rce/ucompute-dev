@@ -1,4 +1,6 @@
-# Migrating every device from Common to UCompute (D-028, D-029)
+# Migrating every device to the UCompute names (D-028, D-029, D-030)
+
+In the table below, `<former>` stands for the former name (D-030: it is not written out).
 
 D-028 removes every compatibility path: renamed builds neither accept the old protocol identifiers nor read old
 variables or folders. D-029 adds three conditions: no user data is deleted automatically, every supported machine
@@ -9,11 +11,11 @@ procedure. It starts once the rename pull request is merged and a renamed build 
 
 | Device | Old installation | Old data | Kept by default |
 |---|---|---|---|
-| Owner's Mac (M2) | `/Applications/Common.app` (candidate 1, D-025) and the previous app kept as `Common.app.prev` | `~/Library/Application Support/Common` (identity `8983-9a1e-e341`, pairings, groups, audit, models, engine); `~/Library/Logs/org.commoncompute.desktop` | models (re-hashed), settings; identity and pairings by choice (§3) |
-| This repository's fixture home | `.common/` (renamed to `.ucompute/` by the rename itself, a move, nothing deleted) | engine archives, test models | everything |
-| sentinel (Ubuntu) | `~/src/common` (engineering tree, `target/release/common`), the soak's `~/.common-soak`, `~/.common-acceptance`, `~/.common-test`, `~/soak` | the acceptance identity, models (stories15M, qwen2.5 0.5B q4_k_m and q8_0, 1.5B q4_k_m), engine | models (re-hashed); the soak results already collected |
-| Windows laptop | `%LOCALAPPDATA%\Programs\Common` (593d4ea app), verifier installs under `CommonVerify*`, `C:\Users\jessg\src\common`, scheduled tasks `CommonTest*` | `%LOCALAPPDATA%\Common` (identity, pairings, models, engine) | models (re-hashed) |
-| Kyle's Mac | `Common.app` (6ab9f8b) | its own data folder | migrated when it is next reachable, the same way |
+| Owner's Mac (M2) | `/Applications/<Former>.app` (candidate 1, D-025) and the previous app kept as `<Former>.app.prev` | `~/Library/Application Support/<Former>` (identity `8983-9a1e-e341`, pairings, groups, audit, models, engine); `~/Library/Logs/` under the former bundle id | models (re-hashed), settings; identity and pairings by choice (§3) |
+| This repository's fixture home | `.<former>/` (renamed to `.ucompute/` by the rename itself, a move, nothing deleted) | engine archives, test models | everything |
+| sentinel (Ubuntu) | `~/src/<former>` (engineering tree, `target/release/<former>`), the soak's `~/.<former>-soak`, `~/.<former>-acceptance`, `~/.<former>-test`, `~/soak` | the acceptance identity, models (stories15M, qwen2.5 0.5B q4_k_m and q8_0, 1.5B q4_k_m), engine | models (re-hashed); the soak results already collected |
+| Windows laptop | `%LOCALAPPDATA%\Programs\<Former>` (593d4ea app), verifier installs under `<Former>Verify*`, `C:\Users\jessg\src\<former>`, scheduled tasks `<Former>Test*` | `%LOCALAPPDATA%\<Former>` (identity, pairings, models, engine) | models (re-hashed) |
+| Kyle's Mac | `<Former>.app` (6ab9f8b) | its own data folder | migrated when it is next reachable, the same way |
 
 ## 2. Before reinstalling (condition 1)
 
@@ -45,7 +47,7 @@ Each item gives PASS/FAIL with evidence in `docs/evidence/migration-<device>-<da
    sentinel; SINGLE-HOST elsewhere).
 5. Mesh between updated Mac, Linux and Windows: discovery, fresh pairing (including a refused wrong code), revocation.
 6. Outdated build: an old-build device dialling or being dialled by a renamed one fails at the TLS handshake with a
-   readable error (no ALPN in common), and is never treated as a paired peer.
+   readable error (no shared ALPN), and is never treated as a paired peer.
 7. Failed installation: an interrupted or refused install leaves the previous working state usable, or the device can
    be restored from its backup.
 
@@ -58,11 +60,11 @@ changes: ALPNs `ucompute/1` and `ucompute-pair/1`; pairing payload `ucompute-pai
 `ucompute-pair/1 confirm`; signature contexts `ucompute/1 capabilities\0` and `ucompute-revocation/1` (the signed mDNS
 advert's canonical form starts `v=1`); mDNS service `_ucompute._udp`; protobuf package `ucompute.v1`.
 
-Only legacy Common support goes. Discovery, encrypted transport, secure pairing, revocation, persistent configuration
+Only support for the former names goes. Discovery, encrypted transport, secure pairing, revocation, persistent configuration
 and storage all stay, under the new names, and so does versioning between UCompute releases: the major version is in
 the ALPN, compatible minors negotiate `min(minor)`, and an incompatible peer gets a typed `protocol_incompatible` or
 `peer_unauthorized` with an update hint. The rename must not weaken verification: every signature keeps its own
-context, and tests refuse the old `common/1` and `common-pair/1` ALPNs and `common-pair:v1:` payloads (`tls.rs`,
+context, and tests refuse any other ALPN and any other `<name>-pair:` payload, the former ones included (`tls.rs`,
 `pairing.rs` in `crates/ucompute-network`). An upgrade and compatibility strategy between UCompute versions is decided
-before broad public adoption. This procedure is one-time and manual; no permanent Common-to-UCompute migration code is
+before broad public adoption. This procedure is one-time and manual; no permanent migration code from the former names is
 built.

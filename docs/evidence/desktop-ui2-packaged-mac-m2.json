@@ -5,8 +5,8 @@
       "step": "binaries are arm64 and link only system libraries",
       "ok": true,
       "archs": {
-        "common": "arm64",
-        "common-desktop": "arm64"
+        "ucompute": "arm64",
+        "ucompute-desktop": "arm64"
       }
     },
     {
@@ -14,8 +14,8 @@
       "ok": true,
       "built": "target/release",
       "identical": {
-        "common": true,
-        "common-desktop": true
+        "ucompute": true,
+        "ucompute-desktop": true
       }
     },
     {
@@ -45,14 +45,14 @@
         [
           47913,
           47904,
-          "/private/tmp/claude-501/-Users-nasr-repos-common/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/private/tmp/claude-501/-Users-nasr-repos-ucompute/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
     {
       "step": "fresh install provisioned the pinned engine inside the new HOME",
       "ok": true,
-      "data_dir": "/private/tmp/claude-501/-Users-nasr-repos-common/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/home/Library/Application Support/Common",
+      "data_dir": "/private/tmp/claude-501/-Users-nasr-repos-ucompute/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/home/Library/Application Support/UCompute",
       "engine": [
         "b11609",
         "llama-b11609-bin-macos-arm64.tar.gz"
@@ -89,7 +89,7 @@
         [
           47952,
           47948,
-          "/private/tmp/claude-501/-Users-nasr-repos-common/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/private/tmp/claude-501/-Users-nasr-repos-ucompute/c6046140-0994-4a98-afeb-263ccac4d615/scratchpad/verify-ui2-142906/work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
@@ -125,12 +125,12 @@
     }
   ],
   "dmg": {
-    "path": "target/release/bundle/dmg/Common_0.1.0_aarch64.dmg",
+    "path": "target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg",
     "sha256": "6149b645b0d19c8f5f04895806ac57e5f302855b44291683e01dd8cf3f1d0f5d",
     "bytes": 6168440
   },
   "binaries_in_dmg": {
-    "common": {
+    "ucompute": {
       "sha256": "623876ae81fbbf74dca081bd9f72600d3a2738ce998c8898c629c3f9c6c7dffb",
       "archs": "arm64",
       "libs": [
@@ -138,7 +138,7 @@
         "/usr/lib/libSystem.B.dylib"
       ]
     },
-    "common-desktop": {
+    "ucompute-desktop": {
       "sha256": "a1c9a6b1598c62c40fae69806bcdf89bed49c78e4828702678adc13e35293268",
       "archs": "arm64",
       "libs": [
@@ -159,5 +159,5 @@
       ]
     }
   },
-  "daemon_version": "common 0.1.0"
+  "daemon_version": "ucompute 0.1.0"
 }

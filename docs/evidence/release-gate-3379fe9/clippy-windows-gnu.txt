@@ -1,16 +1,16 @@
-    Checking common-models v0.1.0 (<repo>/crates/common-models)
-    Checking common-runtime v0.1.0 (<repo>/crates/common-runtime)
-    Checking common-network v0.1.0 (<repo>/crates/common-network)
-    Checking common-api v0.1.0 (<repo>/crates/common-api)
-    Checking common-cli v0.1.0 (<repo>/crates/common-cli)
+    Checking ucompute-models v0.1.0 (<repo>/crates/ucompute-models)
+    Checking ucompute-runtime v0.1.0 (<repo>/crates/ucompute-runtime)
+    Checking ucompute-network v0.1.0 (<repo>/crates/ucompute-network)
+    Checking ucompute-api v0.1.0 (<repo>/crates/ucompute-api)
+    Checking ucompute-cli v0.1.0 (<repo>/crates/ucompute-cli)
 error[E0425]: cannot find type `Reaped` in this scope
-   --> crates/common-cli/tests/cli.rs:433:35
+   --> crates/ucompute-cli/tests/cli.rs:433:35
     |
 433 | fn serve_with_engine() -> Option<(Reaped, u32)> {
     |                                   ^^^^^^ not found in this scope
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:345:8
+   --> crates/ucompute-cli/tests/cli.rs:345:8
     |
 344 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -22,13 +22,13 @@ help: you might be missing a type parameter
     |                     ++++++++
 
 error[E0433]: cannot find type `Stdio` in this scope
-   --> crates/common-cli/tests/cli.rs:454:25
+   --> crates/ucompute-cli/tests/cli.rs:454:25
     |
 454 |                 .stdout(Stdio::piped())
     |                         ^^^^^ use of undeclared type `Stdio`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:12:14
+   --> crates/ucompute-cli/tests/cli.rs:12:14
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -41,13 +41,13 @@ help: consider importing this struct
     |
 
 error[E0433]: cannot find type `Stdio` in this scope
-   --> crates/common-cli/tests/cli.rs:455:25
+   --> crates/ucompute-cli/tests/cli.rs:455:25
     |
 455 |                 .stderr(Stdio::piped())
     |                         ^^^^^ use of undeclared type `Stdio`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:12:14
+   --> crates/ucompute-cli/tests/cli.rs:12:14
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -60,13 +60,13 @@ help: consider importing this struct
     |
 
 error[E0425]: cannot find value `Reaped` in this scope
-   --> crates/common-cli/tests/cli.rs:457:22
+   --> crates/ucompute-cli/tests/cli.rs:457:22
     |
 457 |                 .map(Reaped)
     |                      ^^^^^^ not found in this scope
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:345:8
+   --> crates/ucompute-cli/tests/cli.rs:345:8
     |
 344 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -74,13 +74,13 @@ note: found an item that was configured out
     |        ^^^^^^
 
 error[E0433]: cannot find type `Instant` in this scope
-   --> crates/common-cli/tests/cli.rs:459:28
+   --> crates/ucompute-cli/tests/cli.rs:459:28
     |
 459 |             let deadline = Instant::now() + Duration::from_secs(30);
     |                            ^^^^^^^ use of undeclared type `Instant`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:15:22
+   --> crates/ucompute-cli/tests/cli.rs:15:22
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -93,13 +93,13 @@ help: consider importing this struct
     |
 
 error[E0433]: cannot find type `Duration` in this scope
-   --> crates/common-cli/tests/cli.rs:459:45
+   --> crates/ucompute-cli/tests/cli.rs:459:45
     |
 459 |             let deadline = Instant::now() + Duration::from_secs(30);
     |                                             ^^^^^^^^ use of undeclared type `Duration`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:15:12
+   --> crates/ucompute-cli/tests/cli.rs:15:12
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -112,13 +112,13 @@ help: consider importing this struct
     |
 
 error[E0433]: cannot find type `Instant` in this scope
-   --> crates/common-cli/tests/cli.rs:465:21
+   --> crates/ucompute-cli/tests/cli.rs:465:21
     |
 465 |                     Instant::now() < deadline,
     |                     ^^^^^^^ use of undeclared type `Instant`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:15:22
+   --> crates/ucompute-cli/tests/cli.rs:15:22
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -131,13 +131,13 @@ help: consider importing this struct
     |
 
 error[E0433]: cannot find type `Duration` in this scope
-   --> crates/common-cli/tests/cli.rs:468:36
+   --> crates/ucompute-cli/tests/cli.rs:468:36
     |
 468 |                 std::thread::sleep(Duration::from_millis(100));
     |                                    ^^^^^^^^ use of undeclared type `Duration`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:15:12
+   --> crates/ucompute-cli/tests/cli.rs:15:12
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -150,13 +150,13 @@ help: consider importing this struct
     |
 
 error[E0433]: cannot find type `Duration` in this scope
-   --> crates/common-cli/tests/cli.rs:474:32
+   --> crates/ucompute-cli/tests/cli.rs:474:32
     |
 474 |     conn.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
     |                                ^^^^^^^^ use of undeclared type `Duration`
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:15:12
+   --> crates/ucompute-cli/tests/cli.rs:15:12
     |
   9 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -169,13 +169,13 @@ help: consider importing this struct
     |
 
 error[E0425]: cannot find function `health_ok` in this scope
-   --> crates/common-cli/tests/cli.rs:461:20
+   --> crates/ucompute-cli/tests/cli.rs:461:20
     |
 461 |                 if health_ok(port) {
     |                    ^^^^^^^^^ not found in this scope
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:415:4
+   --> crates/ucompute-cli/tests/cli.rs:415:4
     |
 413 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -184,7 +184,7 @@ note: found an item that was configured out
     |    ^^^^^^^^^
 
 error[E0599]: no method named `read_to_string` found for struct `std::net::TcpStream` in the current scope
-   --> crates/common-cli/tests/cli.rs:477:10
+   --> crates/ucompute-cli/tests/cli.rs:477:10
     |
 477 |     conn.read_to_string(&mut resp).unwrap();
     |          ^^^^^^^^^^^^^^
@@ -205,13 +205,13 @@ help: there is a method `read_to_end` with a similar name
     |
 
 error[E0425]: cannot find function `pid_alive` in this scope
-   --> crates/common-cli/tests/cli.rs:487:13
+   --> crates/ucompute-cli/tests/cli.rs:487:13
     |
 487 |     assert!(pid_alive(engine_pid), "engine {engine_pid} running after load");
     |             ^^^^^^^^^ not found in this scope
     |
 note: found an item that was configured out
-   --> crates/common-cli/tests/cli.rs:383:4
+   --> crates/ucompute-cli/tests/cli.rs:383:4
     |
 382 | #[cfg(unix)]
     |       ---- the item is gated here
@@ -220,5 +220,5 @@ note: found an item that was configured out
 
 Some errors have detailed explanations: E0425, E0433, E0599.
 For more information about an error, try `rustc --explain E0425`.
-error: could not compile `common-cli` (test "cli") due to 12 previous errors
+error: could not compile `ucompute-cli` (test "cli") due to 12 previous errors
 warning: build failed, waiting for other jobs to finish...

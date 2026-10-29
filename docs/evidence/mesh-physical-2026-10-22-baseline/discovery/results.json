@@ -76,7 +76,7 @@
       "b_new_audit": []
     },
     {
-      "step": "manual: a hint with no Common device falls through to the pinned address and is not saved",
+      "step": "manual: a hint with no UCompute device falls through to the pinned address and is not saved",
       "ok": true,
       "t": "2026-10-22T21:50:20Z",
       "status": 200,
@@ -144,7 +144,7 @@
       "seconds": 1.04,
       "health": "disconnected",
       "lost_reason": "closed_by_peer",
-      "cmd_output": "SUCCESS: Attempted to run the scheduled task \"CommonTestQuit\"."
+      "cmd_output": "SUCCESS: Attempted to run the scheduled task \"UComputeTestQuit\"."
     },
     {
       "step": "quit: B's daemon closed the connection itself (graceful stop, not the kill fallback)",

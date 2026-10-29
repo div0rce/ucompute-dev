@@ -1,21 +1,23 @@
 # Linux user-level install verified on sentinel (2026-10-24, 00:33 UTC) — SINGLE-HOST, EXPERIMENTAL
 
-First check of the Linux install path of platform readiness plan M6: a tarball holding the `common` binary, LICENSE,
-the systemd user unit `packaging/linux/common.service` and its install notes, verified from the tarball by
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
+First check of the Linux install path of platform readiness plan M6: a tarball holding the `ucompute` binary, LICENSE,
+the systemd user unit `packaging/linux/ucompute.service` and its install notes, verified from the tarball by
 `packaging/linux/verify_linux_install.py` on one Linux machine. Not a release and not distributable yet: no
 signature and no owner approval of the format (spec section 4, M9).
 
 - Host: sentinel, Ubuntu 26.04 LTS x86_64, Intel Core i9-9900K, glibc 2.43, systemd user manager of a desktop
   session, lingering off (`docs/environment/linux-test-host.md`).
-- Build: `packaging/linux/make-tarball.sh ~/pkg-out` in sentinel's `~/src/common` (the c811a90 tree, code equal to
-  ce54da1, with this commit's `packaging/linux/` files copied in): `cargo build --release --locked -p common-cli`,
-  `common 0.1.0`. Tarball `common-0.1.0-linux-x86_64.tar.gz`, sha256
+- Build: `packaging/linux/make-tarball.sh ~/pkg-out` in sentinel's `~/src/ucompute` (the c811a90 tree, code equal to
+  ce54da1, with this commit's `packaging/linux/` files copied in): `cargo build --release --locked -p ucompute-cli`,
+  `ucompute 0.1.0`. Tarball `ucompute-0.1.0-linux-x86_64.tar.gz`, sha256
   `ea682daee72bbecc5200468b99fec20a6428feb05a8321a7b96dbb2f6a044371`.
-- Command: `python3 -I packaging/linux/verify_linux_install.py --tarball ~/pkg-out/common-0.1.0-linux-x86_64.tar.gz
+- Command: `python3 -I packaging/linux/verify_linux_install.py --tarball ~/pkg-out/ucompute-0.1.0-linux-x86_64.tar.gz
   --out verify.json` (port 18600, a throwaway unit name, a fresh data folder; the shipped unit with only ExecStart's
-  path and port changed and COMMON_HOME added).
+  path and port changed and UCOMPUTE_HOME added).
 - Result: **ALL PASS, 15 checks** (`linux-install-2026-10-24/verify-linux-install.json`): SHA256SUMS verifies; the
-  unit starts and the daemon is healthy within 10 s; `common setup` provisions and verifies the pinned b11609 CPU
+  unit starts and the daemon is healthy within 10 s; `ucompute setup` provisions and verifies the pinned b11609 CPU
   engine and `ldd` resolves it; stories15M pulled, loaded on the CPU (6 of 6 layers) and completed to the golden text;
   after a SIGKILL of the daemon, systemd started a new one, healthy 2.67 s after the kill, and the killed daemon's
   engine was gone (the unit's default `KillMode=control-group`); golden again after the restart; `systemctl --user
@@ -28,7 +30,7 @@ signature and no owner approval of the format (spec section 4, M9).
   misspelt key in a copy was reported, so the check can fail); ALL PASS, 16 checks
   (`linux-install-2026-10-24/verify-linux-install-lint.json`), same tarball.
 - **At 0b0c1a4 (about 04:40 local, 2026-10-24), with the round 6 and 7 runtime:** `mac-host.sh sync` of HEAD into sentinel's
-  `~/src/common`, `make-tarball.sh` (191 packages in the notices), tarball sha256
+  `~/src/ucompute`, `make-tarball.sh` (191 packages in the notices), tarball sha256
   `a99a77f2bf2bda228acb2cf328e1d18f1b3c132c8119b9dad10654f1152b7d5d`: ALL PASS, 16 checks, the SIGKILL recovery
   in 2.67 s with the killed daemon's engine gone (`linux-install-2026-10-24/verify-linux-install-0b0c1a4.json`).
 - Not covered: the documented install paths themselves (`~/.local/bin`, port 8192, the real unit name: the owner's
@@ -37,7 +39,7 @@ signature and no owner approval of the format (spec section 4, M9).
 
 ## Soak smoke, the same evening (pre-round-6 build)
 
-`tests/soak/local_soak.py` (M5 step 1) ran for 5 minutes against `target/release/common serve --port 18500` built
+`tests/soak/local_soak.py` (M5 step 1) ran for 5 minutes against `target/release/ucompute serve --port 18500` built
 from the c811a90 tree, with a fresh home and an engine kill every 10 cycles. Before the first kill: every step typed
 and golden, golden p95 22 ms, 4 of 40 burst requests refused `overloaded`. After the first engine SIGKILL the daemon
 never served again: every inference request returned a typed `backend_failed` and a reload did not help, and the
