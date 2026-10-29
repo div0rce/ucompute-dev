@@ -35,6 +35,11 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
   (min/avg/max, sentinel under load); P1's preflight re-measures it with both hosts quiet, and an Ethernet cable
   remains the fix if the jitter stays.
 - Windows laptop and Kyle's Mac: offline.
+- Sentinel's local desktop: the owner's GNOME session (seat0, Wayland, Firefox open) has been logged in since before
+  the second soak; `who` does not list it. P1's preflight requires no other session (OD-10). The owner asked
+  engineering on 2026-10-29 to end it itself: right before P1, after the soak has ended, find div0rce's seat0 session
+  (`loginctl list-sessions`) and run `loginctl terminate-session <id>` (Firefox restores its tabs on next launch),
+  then run the preflight. Not before the soak ends: a change on sentinel during the soak is another interference window.
 
 ## Owner actions that unblock something
 
