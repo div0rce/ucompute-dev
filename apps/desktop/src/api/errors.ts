@@ -1,5 +1,5 @@
 // Plain-language explanations for every stable error code (F-10-06).
-// Texts mirror `ErrorCode::user_message` in crates/common-core/src/error.rs; errors.test.ts parses that file
+// Texts mirror `ErrorCode::user_message` in crates/ucompute-core/src/error.rs; errors.test.ts parses that file
 // and fails if a code or a message drifts.
 
 import { ApiError, SLOW, UNREACHABLE } from "./client";
@@ -11,43 +11,43 @@ export interface Explanation {
 
 export const ERROR_CODES: Record<string, Explanation> = {
   invalid_request: { title: "The request was not understood.", next_step: "Check the prompt and settings, then try again." },
-  model_not_found: { title: "That model is not in Common's catalog.", next_step: "Pick a model from the library or import a GGUF file." },
+  model_not_found: { title: "That model is not in UCompute's catalog.", next_step: "Pick a model from the library or import a GGUF file." },
   model_not_downloaded: { title: "This model has not been downloaded yet.", next_step: "Download it from the model library, then run it." },
   model_file_invalid: { title: "This model file is damaged or is not a GGUF file.", next_step: "Delete it and download the model again." },
-  integrity_mismatch: { title: "The downloaded file does not match its published checksum.", next_step: "Common deleted the file. Download it again; if this repeats, the source may be compromised." },
+  integrity_mismatch: { title: "The downloaded file does not match its published checksum.", next_step: "UCompute deleted the file. Download it again; if this repeats, the source may be compromised." },
   insufficient_memory: { title: "This model needs more memory than your computer has available.", next_step: "Choose a smaller model or quantization, lower the context length, or close other apps." },
   context_too_long: { title: "The prompt is longer than this model can read at once.", next_step: "Shorten the prompt or choose a model with a larger context window." },
-  backend_unavailable: { title: "The inference engine is not installed or failed verification.", next_step: "Run Common's setup to download the pinned engine." },
-  backend_failed: { title: "The inference engine stopped unexpectedly.", next_step: "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run common diagnostics) and share them." },
-  gpu_unavailable: { title: "Your GPU could not be used for this model.", next_step: "Common can run it on the CPU instead, which will be slower." },
+  backend_unavailable: { title: "The inference engine is not installed or failed verification.", next_step: "Run UCompute's setup to download the pinned engine." },
+  backend_failed: { title: "The inference engine stopped unexpectedly.", next_step: "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run ucompute diagnostics) and share them." },
+  gpu_unavailable: { title: "Your GPU could not be used for this model.", next_step: "UCompute can run it on the CPU instead, which will be slower." },
   timeout: { title: "The model took too long to respond.", next_step: "Try a shorter prompt or a smaller model." },
   cancelled: { title: "The request was stopped.", next_step: "Nothing further is needed." },
-  overloaded: { title: "Common is busy with other requests.", next_step: "Wait a moment and try again." },
+  overloaded: { title: "UCompute is busy with other requests.", next_step: "Wait a moment and try again." },
   download_failed: { title: "The download did not complete.", next_step: "Check your internet connection and try again; downloads resume where they stopped." },
   not_implemented: { title: "This feature is not available yet.", next_step: "Check the roadmap in the documentation." },
-  policy_denied: { title: "Your settings do not allow this action.", next_step: "Review the privacy and network settings (Settings in the desktop app, or common privacy)." },
+  policy_denied: { title: "Your settings do not allow this action.", next_step: "Review the privacy and network settings (Settings in the desktop app, or ucompute privacy)." },
   unauthorized: { title: "This computer is not authorized to use the API.", next_step: "Provide the API key configured on the server." },
-  io: { title: "Common could not read or write a file.", next_step: "Check disk space and permissions." },
-  internal: { title: "Something went wrong inside Common.", next_step: "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run common diagnostics) and share them." },
-  peer_unauthorized: { title: "This computer is not authorized to run that on the selected device.", next_step: "Pair the device and add it to a group that allows prompts (Devices in the desktop app, or common groups)." },
+  io: { title: "UCompute could not read or write a file.", next_step: "Check disk space and permissions." },
+  internal: { title: "Something went wrong inside UCompute.", next_step: "Try again. If it keeps failing, copy the diagnostics from Activity in the desktop app (or run ucompute diagnostics) and share them." },
+  peer_unauthorized: { title: "This computer is not authorized to run that on the selected device.", next_step: "Pair the device and add it to a group that allows prompts (Devices in the desktop app, or ucompute groups)." },
   peer_revoked: { title: "That device's access was revoked.", next_step: "Pair it again if you trust it." },
   pairing_locked: { title: "Too many failed pairing attempts.", next_step: "Wait a minute, then start pairing again with a fresh code." },
   pairing_failed: { title: "Pairing did not complete.", next_step: "Check the code and that both devices are on the same network, then try again." },
   peer_lost: { title: "The connection to the other device was lost.", next_step: "Check that it is awake and on the network, then retry." },
-  protocol_incompatible: { title: "The other device runs an incompatible version of Common.", next_step: "Update Common on both devices." },
-  frame_too_large: { title: "A message from the other device was too large and was rejected.", next_step: "Update Common on both devices; if this persists, revoke the device." },
+  protocol_incompatible: { title: "The other device runs an incompatible version of UCompute.", next_step: "Update UCompute on both devices." },
+  frame_too_large: { title: "A message from the other device was too large and was rejected.", next_step: "Update UCompute on both devices; if this persists, revoke the device." },
   peer_held: { title: "The other device disconnected this computer.", next_step: "It must connect again from its side (Connect in its desktop app's Devices section)." },
 };
 
 /** Desktop-only condition, not a daemon code: fetch itself failed. */
 const UNREACHABLE_EXPLANATION: Explanation = {
-  title: "Common's background service is not running.",
-  next_step: "Reopen the app so it can start the service, or run common serve from a terminal.",
+  title: "UCompute's background service is not running.",
+  next_step: "Reopen the app so it can start the service, or run ucompute serve from a terminal.",
 };
 
 /** Desktop-only condition: a poll with a timeout got no answer in time, while `/health` may still answer. */
 const SLOW_EXPLANATION: Explanation = {
-  title: "Common's background service is running but did not answer in time.",
+  title: "UCompute's background service is running but did not answer in time.",
   next_step: "It is probably busy loading a model. This updates by itself when it answers.",
 };
 

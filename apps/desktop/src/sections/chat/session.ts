@@ -64,7 +64,7 @@ export function contextFor(messages: StoredMessage[], target: Target): StoredMes
 
 /**
  * Sends `text` as the next user message and streams the reply. The client ref is registered in `ownStreams` before
- * the request is sent; it goes out as `X-Common-Client-Ref` only to a service that reports `status.engine` (E2 and
+ * the request is sent; it goes out as `X-UCompute-Client-Ref` only to a service that reports `status.engine` (E2 and
  * later allow the header in CORS; an older one would refuse the preflight).
  */
 export async function send(text: string, model: string, target: Target): Promise<void> {

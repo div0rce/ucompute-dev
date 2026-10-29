@@ -1,5 +1,5 @@
 """Offline checks of discovery_two_machine.py's own logic against SYNTHETIC fake daemons (fake_mesh.py) and a fake
-clock: no network, machine or daemon is involved, so nothing here is evidence of Common.
+clock: no network, machine or daemon is involved, so nothing here is evidence of UCompute.
 Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 """
 import os
@@ -10,9 +10,9 @@ from fake_mesh import Mesh, drive, load
 ALL = ("--steps", "state,manual,pair,quit,crash,wifi,offline", "--quit-b", "quit", "--crash-b", "crash",
        "--start-b", "start", "--procs-b", "procs", "--wifi-cycle-b", "wifi", "--watch", "5",
        "--bogus-addr", "192.0.2.1:8193", "--stranger", "http://s", "--stranger-addr", "10.0.0.9:8193")
-HINT = "manual: a hint with no Common device falls through to a known address and is not saved"
+HINT = "manual: a hint with no UCompute device falls through to a known address and is not saved"
 REQ5 = "manual: the address shown on B connects A to B (requirement 5)"
-STRANGER = "manual: another Common device at the hinted address is not trusted (requirement 8)"
+STRANGER = "manual: another UCompute device at the hinted address is not trusted (requirement 8)"
 WIFI = "wifi: B's Wi-Fi drops, A loses B, then a new connection forms"
 CACHED = "crash: B's signed record may stay cached, but A never shows it as connected"
 TTL = "crash: the cached record leaves nearby by the mDNS TTL (about 120 s after the last announcement)"

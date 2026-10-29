@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""SINGLE-HOST M3 evidence driver: two `common serve` daemons on ONE machine. Never two-machine evidence.
+"""SINGLE-HOST M3 evidence driver: two `ucompute serve` daemons on ONE machine. Never two-machine evidence.
 
-    M3_DIR=<dir holding a/ b/ (COMMON_HOMEs) bin/common raw/> python3 m3_evidence.py <cmd>
+    M3_DIR=<dir holding a/ b/ (UCOMPUTE_HOMEs) bin/ucompute raw/> python3 m3_evidence.py <cmd>
     cmds: step1 (starts both) step2 step3 step4 step5 step6 step7 stop
 
 Every HTTP call goes to <M3_DIR>/raw/<cmd>.jsonl with the UTC time, an equivalent curl line, the
@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 D = os.environ["M3_DIR"]
-BIN = os.environ.get("COMMON_BIN", f"{D}/bin/common")
+BIN = os.environ.get("UCOMPUTE_BIN", f"{D}/bin/ucompute")
 NODES = {"a": (18301, 18401), "b": (18302, 18402)}
 MODEL = "stories15M-q4_0"
 PROMPT = "Once upon a time, a little rabbit"
@@ -126,15 +126,15 @@ def alive(pid):
 def start(n):
     api, net = NODES[n]
     args = [BIN, "serve", "--port", str(api), "--network", "--serve-peers", "--listen-port", str(net), "-v"]
-    env = {**os.environ, "COMMON_HOME": f"{D}/{n}"}
+    env = {**os.environ, "UCOMPUTE_HOME": f"{D}/{n}"}
     out = open(f"{D}/raw/daemon-{n}.log", "a")
-    out.write(f"\n===== {utc()} start: COMMON_HOME={D}/{n} {' '.join(args)}\n")
+    out.write(f"\n===== {utc()} start: UCOMPUTE_HOME={D}/{n} {' '.join(args)}\n")
     out.flush()
     spawn = time.time()
     p = subprocess.Popen(args, env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                          start_new_session=True)
     open(f"{D}/{n}.pid", "w").write(str(p.pid))
-    rec("spawn", node=n, pid=p.pid, cmd=f"COMMON_HOME={D}/{n} {' '.join(args)}", spawn_utc=utc(spawn))
+    rec("spawn", node=n, pid=p.pid, cmd=f"UCOMPUTE_HOME={D}/{n} {' '.join(args)}", spawn_utc=utc(spawn))
     return p.pid, spawn
 
 

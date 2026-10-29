@@ -30,10 +30,10 @@ const statusError = createStore<{ error: MappedError; at: number } | null>(null)
 const nameOf = (p: PeerRecord) => p.name || shortLabel(p.id);
 /** "123456" -> "123 456": easier to read aloud across a room. */
 const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
-/** The code field takes either the six digits or a pasted `common-pair:v1:...` payload (which carries the address). */
-const isPayload = (code: string) => code.trim().startsWith("common-pair:");
+/** The code field takes either the six digits or a pasted `ucompute-pair:v1:...` payload (which carries the address). */
+const isPayload = (code: string) => code.trim().startsWith("ucompute-pair:");
 /** The device id a pasted payload names, if any. */
-const payloadId = (code: string) => /^common-pair:v\d+:([0-9a-f]{64}):/.exec(code.trim())?.[1] ?? null;
+const payloadId = (code: string) => /^ucompute-pair:v\d+:([0-9a-f]{64}):/.exec(code.trim())?.[1] ?? null;
 
 function finish(result: NonNullable<ReturnType<typeof pairResult.get>>) {
   statusError.set(null);

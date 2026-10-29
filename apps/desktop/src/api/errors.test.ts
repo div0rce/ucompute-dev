@@ -1,11 +1,11 @@
-// Keeps the TypeScript error table in sync with crates/common-core/src/error.rs (F-10-06).
+// Keeps the TypeScript error table in sync with crates/ucompute-core/src/error.rs (F-10-06).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, UNREACHABLE } from "./client";
 import { ERROR_CODES, explain, mapError } from "./errors";
 
-const rs = readFileSync(join(__dirname, "../../../../crates/common-core/src/error.rs"), "utf8");
+const rs = readFileSync(join(__dirname, "../../../../crates/ucompute-core/src/error.rs"), "utf8");
 
 /** Variants listed in `ErrorCode::ALL`. */
 function variantsInAll(): string[] {
@@ -63,7 +63,7 @@ describe("mapError", () => {
     expect(mapError("something_new", "x").title).toBe(ERROR_CODES.internal.title);
   });
   it("explains an unreachable daemon without a daemon code", () => {
-    expect(explain(new ApiError(UNREACHABLE, "boom")).next_step).toMatch(/common serve/);
+    expect(explain(new ApiError(UNREACHABLE, "boom")).next_step).toMatch(/ucompute serve/);
   });
   it("explains plain Errors as internal", () => {
     expect(explain(new Error("nope")).code).toBe("internal");

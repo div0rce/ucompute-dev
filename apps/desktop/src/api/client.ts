@@ -151,7 +151,7 @@ export interface NetworkState {
   peer_slots: number;
 }
 
-/** A pinned device as the daemon stores it (`common_identity::PeerRecord`). */
+/** A pinned device as the daemon stores it (`ucompute_identity::PeerRecord`). */
 export interface PeerRecord {
   id: string;
   name: string;
@@ -194,7 +194,7 @@ export interface Peer extends PeerRecord {
  * reported); `issued_at_utc` is when the record was signed, at this connection's handshake. Not independently verified.
  */
 export interface PeerCapabilities {
-  common_version: string;
+  ucompute_version: string;
   protocol_minor: number;
   engines: string[];
   issued_at_utc: string;
@@ -241,7 +241,7 @@ export type JobKind = "chat" | "completion" | "embeddings" | "served_for_peer";
 export interface Job {
   /** Response id (`chatcmpl-…`) once known; a registry id before; the peer's `request_id` for served rows. */
   id: string;
-  /** From `X-Common-Client-Ref`; matches `ownStreams` and chat history for requests this app sent. */
+  /** From `X-UCompute-Client-Ref`; matches `ownStreams` and chat history for requests this app sent. */
   client_ref?: string | null;
   kind: JobKind;
   model_id: string;
@@ -536,7 +536,7 @@ export const api = {
 
   /**
    * Streams a chat completion. `onDelta` receives each new text fragment. Abort via `signal` to stop.
-   * `opts.clientRef` is sent as `X-Common-Client-Ref` (E3 matches it to a job row). The caller sends it only to a
+   * `opts.clientRef` is sent as `X-UCompute-Client-Ref` (E3 matches it to a job row). The caller sends it only to a
    * service that reports `status.engine` (E2 and later allow the header in CORS; an older one would refuse the preflight).
    */
   async chat(
@@ -554,7 +554,7 @@ export const api = {
         // stream_options.include_usage makes the daemon append a final chunk with usage + timings (OpenAI semantics).
         // `target` is only sent for a peer so local requests keep the M1 wire shape.
         body: JSON.stringify({ ...rest, ...(target !== "local" ? { target } : {}), stream: true, stream_options: { include_usage: true } }),
-        ...(opts.clientRef ? { headers: { "X-Common-Client-Ref": opts.clientRef } } : {}),
+        ...(opts.clientRef ? { headers: { "X-UCompute-Client-Ref": opts.clientRef } } : {}),
         signal,
       });
     } catch (err) {
@@ -620,7 +620,7 @@ export const api = {
   /** Without a name the daemon announces this computer's own name. */
   pairStart: (name?: string) => json<PairingSession>("/api/pair/start", { method: "POST", body: JSON.stringify(name ? { name } : {}) }),
   pairStatus: () => json<PairingStatus>("/api/pair/status"),
-  /** `code` is the six digits (then `addr` is required) or a whole `common-pair:v1:...` payload. */
+  /** `code` is the six digits (then `addr` is required) or a whole `ucompute-pair:v1:...` payload. */
   pairJoin: ({ name, ...body }: { addr?: string; code: string; name?: string }) =>
     json<PeerRecord>("/api/pair/join", { method: "POST", body: JSON.stringify(name ? { ...body, name } : body) }),
   groups: async (o?: ReqOpts) => (await get<{ groups: Group[] }>("/api/groups", o)).groups,

@@ -8,39 +8,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verify_packaged_app import daemon_restarted, gatekeeper_rejected, log_holds_both_runs, names_packages  # noqa: E402
 
 L = "listening on http://127.0.0.1:8192\n"
-RUN = lambda pid: f"common-desktop: started the daemon, pid {pid}\n" + L  # noqa: E731
-EARLIER = RUN(11) + "common-desktop: daemon healthy on 127.0.0.1:8192\n" + RUN(22)  # stages 1 and 5
+RUN = lambda pid: f"ucompute-desktop: started the daemon, pid {pid}\n" + L  # noqa: E731
+EARLIER = RUN(11) + "ucompute-desktop: daemon healthy on 127.0.0.1:8192\n" + RUN(22)  # stages 1 and 5
 
 
 class LogHoldsBothRuns(unittest.TestCase):
     def test_killed_run_restart_note_and_restarted_run(self):
-        text = EARLIER + "common-desktop: daemon exited with code None, signal Some(9)\n" \
-            "common-desktop: restarting the daemon in 1s\n" + RUN(33)
+        text = EARLIER + "ucompute-desktop: daemon exited with code None, signal Some(9)\n" \
+            "ucompute-desktop: restarting the daemon in 1s\n" + RUN(33)
         self.assertTrue(log_holds_both_runs(text, 22, 33))
 
     def test_restarted_run_output_missing(self):
         # Two listening lines from earlier launches and the restart note: the restarted daemon logged nothing.
-        text = EARLIER + "common-desktop: restarting the daemon in 1s\n" \
-            "common-desktop: started the daemon, pid 33\n"
+        text = EARLIER + "ucompute-desktop: restarting the daemon in 1s\n" \
+            "ucompute-desktop: started the daemon, pid 33\n"
         self.assertFalse(log_holds_both_runs(text, 22, 33))
 
     def test_no_restart_note_or_wrong_pid(self):
         self.assertFalse(log_holds_both_runs(EARLIER + RUN(33), 22, 33))
-        text = EARLIER + "common-desktop: restarting the daemon in 1s\n" + RUN(33)
+        text = EARLIER + "ucompute-desktop: restarting the daemon in 1s\n" + RUN(33)
         self.assertFalse(log_holds_both_runs(text, 2, 33), "pid 2 is not pid 22")
         self.assertFalse(log_holds_both_runs(text, 22, 3), "pid 3 is not pid 33")
 
     def test_killed_run_start_note_without_its_listening_line(self):
         # Round 6b: the killed daemon's start note is there but it never logged its listening line; the restarted
         # run is complete. Earlier launches' listening lines must not stand in for it.
-        text = RUN(11) + "common-desktop: started the daemon, pid 22\n" \
-            "common-desktop: daemon exited with code None, signal Some(9)\n" \
-            "common-desktop: restarting the daemon in 1s\n" + RUN(33)
+        text = RUN(11) + "ucompute-desktop: started the daemon, pid 22\n" \
+            "ucompute-desktop: daemon exited with code None, signal Some(9)\n" \
+            "ucompute-desktop: restarting the daemon in 1s\n" + RUN(33)
         self.assertFalse(log_holds_both_runs(text, 22, 33))
 
 
 class Stage6(unittest.TestCase):
-    TEXT = EARLIER + "common-desktop: restarting the daemon in 1s\n" + RUN(33)
+    TEXT = EARLIER + "ucompute-desktop: restarting the daemon in 1s\n" + RUN(33)
 
     def test_restarted_by_the_app_within_10_s(self):
         self.assertTrue(daemon_restarted(5, 5, 9.8, self.TEXT, 22, 33))
@@ -76,8 +76,8 @@ class Notices(unittest.TestCase):
 
 class Gatekeeper(unittest.TestCase):
     def test_rejected_needs_a_failing_exit_and_the_word(self):
-        self.assertTrue(gatekeeper_rejected(3, "/x/Common.app: rejected\nsource=no usable signature"))
-        self.assertFalse(gatekeeper_rejected(0, "/x/Common.app: accepted\nsource=Notarized Developer ID"))
+        self.assertTrue(gatekeeper_rejected(3, "/x/UCompute.app: rejected\nsource=no usable signature"))
+        self.assertFalse(gatekeeper_rejected(0, "/x/UCompute.app: accepted\nsource=Notarized Developer ID"))
         self.assertFalse(gatekeeper_rejected(1, "spctl: unknown error"))
 
 

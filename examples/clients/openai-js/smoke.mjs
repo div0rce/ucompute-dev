@@ -1,10 +1,10 @@
-// Runs the unmodified official OpenAI JS client against `common serve` (only base_url differs).
-// Usage: COMMON_BASE_URL=http://127.0.0.1:8192/v1 COMMON_MODEL=stories15M-q4_0 node smoke.mjs
+// Runs the unmodified official OpenAI JS client against `ucompute serve` (only base_url differs).
+// Usage: UCOMPUTE_BASE_URL=http://127.0.0.1:8192/v1 UCOMPUTE_MODEL=stories15M-q4_0 node smoke.mjs
 import OpenAI from "openai";
 
-const baseURL = process.env.COMMON_BASE_URL ?? "http://127.0.0.1:8192/v1";
-const model = process.env.COMMON_MODEL ?? "stories15M-q4_0";
-const client = new OpenAI({ baseURL, apiKey: process.env.COMMON_API_KEY ?? "not-needed-on-loopback" });
+const baseURL = process.env.UCOMPUTE_BASE_URL ?? "http://127.0.0.1:8192/v1";
+const model = process.env.UCOMPUTE_MODEL ?? "stories15M-q4_0";
+const client = new OpenAI({ baseURL, apiKey: process.env.UCOMPUTE_API_KEY ?? "not-needed-on-loopback" });
 
 const models = await client.models.list();
 const ids = [];

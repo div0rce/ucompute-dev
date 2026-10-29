@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 environment inspection for Project Common (spec section 16 step 1).
+# Phase 1 environment inspection for UCompute (spec section 16 step 1).
 #
 # Read-only. Writes one Markdown report under docs/environment/ and prints its path.
 # Never prints secrets: no env dumps, no tokens, git email masked.
@@ -87,7 +87,7 @@ fi
 # ------------------------------------------------------------------ Metal device capabilities
 if [ "$OS" = "Darwin" ]; then
   section "Metal device (MTLDevice)"
-  SWIFT_BASE="$(mktemp -t common_metal)"
+  SWIFT_BASE="$(mktemp -t ucompute_metal)"
   SWIFT_SRC="$SWIFT_BASE.swift"
   cat >"$SWIFT_SRC" <<'SWIFT'
 import Metal

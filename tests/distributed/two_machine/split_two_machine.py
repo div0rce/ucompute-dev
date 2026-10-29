@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """WP-04 P1: one model split between this Mac (H, the head: a dev daemon built from this commit) and the Linux
-stage host (R, sentinel), with llama.cpp RPC carried only inside Common's authenticated QUIC connection
+stage host (R, sentinel), with llama.cpp RPC carried only inside UCompute's authenticated QUIC connection
 (plan docs/design/wp04-implementation-plan-2026-10-23.md section 3, ADR-0005). Configuration P only, at the lab's
 split points. A daemon API run: no app window is driven.
 
@@ -57,7 +57,7 @@ R_CMDS = {
 H_CMDS = {
     "git": "git rev-parse HEAD && git status --porcelain",
     "procs": "pgrep -fl 'llama-serve[r]|ggml-rpc-serve[r]|cargo [b]uild|cargo [t]est|rust[c] |local_soa[k]"
-             "|common-deskto[p]' || true",
+             "|ucompute-deskto[p]' || true",
     "load": "sysctl -n vm.loadavg",
     "power": "pmset -g batt",
     "caffeinate": "pgrep -x caffeinate || true",
@@ -191,13 +191,13 @@ def listeners(ss_text):
 
 
 def listeners_bad(ss_text, rpc_allowed=False):
-    """The run user's listeners other than Common's: the daemon may listen on TCP only on loopback (its UDP peer
+    """The run user's listeners other than UCompute's: the daemon may listen on TCP only on loopback (its UDP peer
     endpoint and mDNS are expected), ggml-rpc-server only on TCP loopback and only during a session."""
     bad = []
     for proto, local, names in listeners(ss_text):
         for n in names:
             loop = local.startswith("127.0.0.1:")
-            if n == "common" and (proto != "tcp" or loop):
+            if n == "ucompute" and (proto != "tcp" or loop):
                 continue
             if n == "ggml-rpc-server" and rpc_allowed and proto == "tcp" and loop:
                 continue
@@ -240,7 +240,7 @@ def timing(r):
 
 
 def lab_input(runs, link):
-    """The lab's lab-input.json (SCORING-INPUT.md). Common's /v1/completions returns no token ids, so `ids` is
+    """The lab's lab-input.json (SCORING-INPUT.md). UCompute's /v1/completions returns no token ids, so `ids` is
     left out (optional there)."""
     return {"link": link, "runs": runs}
 
@@ -248,7 +248,7 @@ def lab_input(runs, link):
 # --- the run
 
 def r_clean(tag, rpc_allowed=False):
-    """R runs no rpc-server (unless allowed) and listens only where Common does; saves what it saw."""
+    """R runs no rpc-server (unless allowed) and listens only where UCompute does; saves what it saw."""
     rpc, ss = shell("r", "rpc"), shell("r", "ss")
     save(f"r/pgrep-{tag}.txt", rpc)
     save(f"r/ss-ltnup-{tag}.txt", ss)
@@ -267,7 +267,7 @@ def preflight(prereg):
     ss = shell("r", "ss")
     save("r/ss-ltnup-preflight.txt", ss)
     bad = listeners_bad(ss)
-    checks["r_only_common_listens"] = {"ok": not bad, "others": bad}
+    checks["r_only_ucompute_listens"] = {"ok": not bad, "others": bad}
     others = who_others(shell("r", "who"))
     checks["r_who_empty"] = {"ok": not others, "others": others}
     hp = shell("h", "procs")
@@ -508,7 +508,7 @@ def p1(args, prereg, lab_runs, rows):
         step_na("deny_unpaired", "H and R arrived paired")
     groups(a, rid, False, remote=True)
     groups(b, hid, False, remote=True)
-    # (b) and (c): a group without pooling reads peer_unauthorized on either side (common-policy evaluate, may_serve)
+    # (b) and (c): a group without pooling reads peer_unauthorized on either side (ucompute-policy evaluate, may_serve)
     nogroup = "no trusted group allows pooled inference"
     deny("deny_remote_only", a, probe, ("peer_unauthorized",), text=nogroup)  # (b)
     groups(a, rid, True)
@@ -534,10 +534,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--r-sh", default="scripts/mac-host.sh run", help="prefix that runs one shell command on R")
     ap.add_argument("--r-ip", help="R's LAN address (default: from R's dial address)")
-    ap.add_argument("--h-home", default=os.environ.get("COMMON_HOME", ".common-split"))
+    ap.add_argument("--h-home", default=os.environ.get("UCOMPUTE_HOME", ".ucompute-split"))
     ap.add_argument("--h-log", help="H's daemon log")
-    ap.add_argument("--r-home", default="$HOME/.common-acceptance")
-    ap.add_argument("--r-log", default="$HOME/.common-acceptance.log")
+    ap.add_argument("--r-home", default="$HOME/.ucompute-acceptance")
+    ap.add_argument("--r-log", default="$HOME/.ucompute-acceptance.log")
     ap.add_argument("--link", choices=("wifi", "wired"), default="wifi")
     ap.add_argument("--models", default="R1a,R1b")
     ap.add_argument("--prereg", default=os.path.join(HERE, "split_prereg.json"))

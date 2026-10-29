@@ -145,6 +145,16 @@ class ValidatorTests(unittest.TestCase):
                 rows[0][field] = old
                 self.write(f, rows, regen=False)
 
+    def test_d028_rename_is_the_only_allowed_rewording(self):
+        # rows[0] is F-01-01, whose criterion names `ucompute hardware --json` (D-028); any other change still fails.
+        f, rows = self.rows()
+        self.assertIn("`ucompute hardware --json`", rows[0]["acceptance_criteria"])
+        rows[0]["acceptance_criteria"] = rows[0]["acceptance_criteria"].replace("in <2 s", "in <20 s")
+        self.write(f, rows, regen=False)
+        code, out = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("changed from ddc39f6", out)
+
     def test_missing_additive_row_rejected(self):
         f, rows = self.rows()
         self.write(f, [r for r in rows if r["id"] != "U-01"], regen=False)

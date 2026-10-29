@@ -2,6 +2,22 @@
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-28/29 — Claude Code — candidate 1 published; Windows app verified; soaks; WP-04 round 8; GitHub sync; total rename to UCompute (unit, SINGLE-HOST, one-machine packaged checks)
+
+**Implemented / verified:**
+- Milestone A1: candidate 1 (`Common_0.1.0_aarch64.dmg`, SHA-256 a3239588…dd6d) approved (D-025, cohort the owner alone), published as a stage snapshot and received ("Yes, it works"); Access download check passed.
+- Milestone D (part): Windows NSIS app built natively from 77262a5 on the laptop, `verify_windows_app.ps1` ALL PASS 13/13 (b341a74).
+- Milestone C: the 24 h soak of 2026-10-24/25 FAIL on one untyped no-response in about 556k burst requests (cause not determined); a 3 h overload-only rerun PASS (0 in 716k); the second 24 h soak runs until about 07:43 UTC 2026-10-30, with documented interference from the rename runs and its reading rule fixed before the verdict (`docs/evidence/linux-soak-2026-10-29.md`).
+- WP-04 round 8 (C3–C6, C8) committed with 14 review findings open (`docs/design/wp04-round8-open-findings.md`); the lab's P1 prompt check passed (65 tokens, 12/12).
+- Decisions: D-026 (Mode B on CPU engines, user choice, default option B), D-027/D-028 (total rename, no compatibility; GitHub: private `div0rce/ucompute-dev` as origin, PRs with CI, the public `div0rce/ucompute` untouched), D-029 (no automatic data deletion, per-machine acceptance test, frozen protocol identifiers, capability retention); ADR-0006 zero-trust execution (Proposed); ADR-0003 §9.16.
+- The rename itself (this commit): see `docs/VERIFICATION.md` 2026-10-29 D-028.
+
+**Ledger:** NOT_STARTED 103 · IN_PROGRESS 6 · IMPLEMENTED_UNVERIFIED 8 · VERIFIED 36 · BLOCKED 0 · INFEASIBLE 0 (153 rows).
+
+**Limitations:** no device runs a renamed build yet; renamed packages (DMG, NSIS, tarball) not built or verified; Linux suite after the rename not clean (environmental, see VERIFICATION); the Mac flood timing test needs an idle machine.
+
+**Next:** push `rename/ucompute` to the private origin and open the PR; WP-04 fix pass (workflow `wp04-fix-pass`, no sentinel until the soak ends); collect the soak with the 37cd454 copy of `run_soak_linux.sh`; after it, the Linux suites, device migration per `docs/release/migration-to-ucompute.md`, S1, then P1 (end sentinel's desktop session first, owner-approved).
+
 ## 2026-10-23/24 — Claude Code — Linux host onboarded; fixed builds on two machines; WP-04 designed; fix round 6; Linux install path (TWO-MACHINE daemon API, SINGLE-HOST, unit)
 
 **Implemented / verified:**

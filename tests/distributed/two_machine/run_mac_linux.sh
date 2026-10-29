@@ -1,15 +1,15 @@
 #!/bin/bash
-# Linux host (A, a `common serve` daemon built from this checkout's HEAD) <-> this Mac (B, its installed app):
+# Linux host (A, a `ucompute serve` daemon built from this checkout's HEAD) <-> this Mac (B, its installed app):
 # discovery, connection-state, mesh and hold checks against the two daemons. A daemon API run, not an app UI run.
 #
 #   LINUX_HOST=<ip> LINUX_USER=<user> OUT=<evidence dir> [NO_MDNS=1] [STEPS=...] [MESH=0] [HOLD=0] \
-#     [CROSS_HOLD=1 [BIN=<common binary>]] tests/distributed/two_machine/run_mac_linux.sh
+#     [CROSS_HOLD=1 [BIN=<ucompute binary>]] tests/distributed/two_machine/run_mac_linux.sh
 #
 # Roles are swapped against run_mac_windows.sh: the Linux daemon is A, the Mac's app B. Since ce54da1 the catalog pins
 # the llama.cpp CPU build for Linux (D-024), so both directions run (B -> A on the Linux CPU engine).
 # A's API (127.0.0.1:8192 on the Linux host) is reached through an SSH tunnel on 18304, closed when the run ends.
-# A's daemon runs as target/release/common in ~/src/common (matched by that start of its command line, never by
-# the ssh shell whose command text contains it) with COMMON_HOME=~/.common-acceptance (its own identity),
+# A's daemon runs as target/release/ucompute in ~/src/ucompute (matched by that start of its command line, never by
+# the ssh shell whose command text contains it) with UCOMPUTE_HOME=~/.ucompute-acceptance (its own identity),
 # started here when it is not running and stopped at the end. B (this Mac's app) is quit with SIGTERM to the app (the
 # Cmd+Q path), crashed with SIGKILL and started with `open -a`. Exit codes and restore as in run_mac_windows.sh.
 #
@@ -19,8 +19,8 @@
 #     [LINK=wifi|wired] [MODELS=R1a,R1b] [LAB=<ucompute-core-lab checkout>] [H_PORT=18320] [H_LISTEN=18420] \
 #     tests/distributed/two_machine/run_mac_linux.sh
 #
-# The head H is a dev daemon from this checkout (target/release/common, built from HEAD with a clean tree; sync the
-# same HEAD to the Linux host and build it there first) with COMMON_HOME=.common-split, hardlinked from .common's
+# The head H is a dev daemon from this checkout (target/release/ucompute, built from HEAD with a clean tree; sync the
+# same HEAD to the Linux host and build it there first) with UCOMPUTE_HOME=.ucompute-split, hardlinked from .ucompute's
 # models and backends (no extra disk). The Linux daemon A is the stage host R. The installed app is quit for the
 # run and started again at the end; A's and H's state is saved and put back (state.py). The driver,
 # split_two_machine.py, runs under caffeinate -dimsu and writes the run directory $OUT; with LAB set, the lab's
@@ -34,9 +34,9 @@ export MAC_HOST="$LINUX_HOST" MAC_USER="$LINUX_USER" MAC_KEY="$KEY"
 H=scripts/mac-host.sh  # also drives a Linux host (ssh, a login shell's PATH plus ~/.cargo/bin)
 A=http://127.0.0.1:18304 B=http://127.0.0.1:8192
 # shellcheck disable=SC2016  # expanded on the Linux host
-A_START='cd ~/src/common && test -x target/release/common && { pgrep -f "^target/release/common serve" >/dev/null ||
-  { COMMON_HOME=$HOME/.common-acceptance nohup target/release/common serve --network --serve-peers -v \
-    >>$HOME/.common-acceptance.log 2>&1 </dev/null & sleep 1; }; } && pgrep -f "^target/release/common serve"'
+A_START='cd ~/src/ucompute && test -x target/release/ucompute && { pgrep -f "^target/release/ucompute serve" >/dev/null ||
+  { UCOMPUTE_HOME=$HOME/.ucompute-acceptance nohup target/release/ucompute serve --network --serve-peers -v \
+    >>$HOME/.ucompute-acceptance.log 2>&1 </dev/null & sleep 1; }; } && pgrep -f "^target/release/ucompute serve"'
 
 tunnel() {
   pkill -f "1830[4]:127.0.0.1:8192" 2>/dev/null || true
@@ -45,33 +45,33 @@ tunnel() {
   for _ in $(seq 20); do curl -s -m 2 "$A/health" >/dev/null && return 0; sleep 0.5; done
   echo "A's API is not answering through the tunnel"; return 1
 }
-$H run "$A_START" >/dev/null || { echo "A's daemon did not start (build it: cargo build --release -p common-cli)"; exit 1; }
+$H run "$A_START" >/dev/null || { echo "A's daemon did not start (build it: cargo build --release -p ucompute-cli)"; exit 1; }
 tunnel || exit 1
 
 if [ "${SPLIT:-}" = 1 ]; then
-  HS="http://127.0.0.1:${H_PORT:-18320}" HOME_H="$PWD/.common-split" APP_WAS_UP=0 HPID=""
-  test -x target/release/common || { echo "H is not built: cargo build --release -p common-cli"; exit 1; }
+  HS="http://127.0.0.1:${H_PORT:-18320}" HOME_H="$PWD/.ucompute-split" APP_WAS_UP=0 HPID=""
+  test -x target/release/ucompute || { echo "H is not built: cargo build --release -p ucompute-cli"; exit 1; }
   mkdir -p "$OUT/h" "$HOME_H"
-  (cd .common && pax -rwlk models backends "$HOME_H")  # hardlinks (B-010: the disk is tight)
+  (cd .ucompute && pax -rwlk models backends "$HOME_H")  # hardlinks (B-010: the disk is tight)
   # shellcheck disable=SC2329  # run by the EXIT trap
   split_cleanup() {
     rc=$?
     set +e
     [ -f "$OUT/state-before.json" ] && { python3 -I tests/distributed/two_machine/state.py restore "$OUT/state-before.json" || rc=1; }
     [ -n "$HPID" ] && kill "$HPID" 2>/dev/null && wait "$HPID" 2>/dev/null
-    $H run 'pkill -TERM -f "^target/release/common serve"' >/dev/null 2>&1
+    $H run 'pkill -TERM -f "^target/release/ucompute serve"' >/dev/null 2>&1
     pkill -f "1830[4]:127.0.0.1:8192" 2>/dev/null
-    [ "$APP_WAS_UP" = 1 ] && open -a /Applications/Common.app
+    [ "$APP_WAS_UP" = 1 ] && open -a /Applications/UCompute.app
     exit "$rc"
   }
   trap split_cleanup EXIT
-  if pgrep -x common-desktop >/dev/null; then
+  if pgrep -x ucompute-desktop >/dev/null; then
     APP_WAS_UP=1
-    pkill -TERM -x common-desktop
+    pkill -TERM -x ucompute-desktop
     for _ in $(seq 30); do curl -s -m 1 "$B/health" >/dev/null || break; sleep 1; done
   fi
   # shellcheck disable=SC2086
-  COMMON_HOME="$HOME_H" target/release/common serve --port "${H_PORT:-18320}" --network \
+  UCOMPUTE_HOME="$HOME_H" target/release/ucompute serve --port "${H_PORT:-18320}" --network \
     --listen-port "${H_LISTEN:-18420}" $MDNS_FLAG -v >>"$OUT/h/daemon.log" 2>&1 </dev/null &
   HPID=$!
   for _ in $(seq 60); do curl -s -m 1 "$HS/health" >/dev/null && break; sleep 0.5; done
@@ -89,11 +89,11 @@ if [ "${SPLIT:-}" = 1 ]; then
 fi
 curl -s -m 5 "$B/health" >/dev/null || { echo "B (this Mac's app) is not running"; exit 1; }
 
-QUIT="pkill -TERM -x common-desktop"
-CRASH="pkill -KILL -x common-desktop"
-START="open -a /Applications/Common.app"
+QUIT="pkill -TERM -x ucompute-desktop"
+CRASH="pkill -KILL -x ucompute-desktop"
+START="open -a /Applications/UCompute.app"
 # B's own daemon (the app's exact arguments) and its engine only: the CROSS_HOLD daemons run the same binary.
-PROCS="pgrep -f 'MacOS/common serve --host 127.0.0.1 --port 8192|Application Support/Common/backends/.*llama-server' | wc -l | tr -d ' '"
+PROCS="pgrep -f 'MacOS/ucompute serve --host 127.0.0.1 --port 8192|Application Support/UCompute/backends/.*llama-server' | wc -l | tr -d ' '"
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
@@ -109,7 +109,7 @@ cleanup() {
     echo "RESTORE INCOMPLETE: rerun python3 -I tests/distributed/two_machine/state.py restore $OUT/state-before.json" >&2
     rc=1
   }
-  $H run 'pkill -TERM -f "^target/release/common serve"' >/dev/null 2>&1  # the Linux host runs nothing of ours after the run
+  $H run 'pkill -TERM -f "^target/release/ucompute serve"' >/dev/null 2>&1  # the Linux host runs nothing of ours after the run
   pkill -f "1830[4]:127.0.0.1:8192" 2>/dev/null
   [ -n "${XH:-}" ] && rm -rf "$XH"
   exit "$rc"
@@ -136,14 +136,14 @@ pair_ab || exit 1
 
 XHOLD=""
 if [ "${CROSS_HOLD:-}" = 1 ]; then
-  BIN="${BIN:-/Applications/Common.app/Contents/MacOS/common}"
-  XH=$(mktemp -d "${TMPDIR:-/tmp}/common-xhold.XXXXXX")
+  BIN="${BIN:-/Applications/UCompute.app/Contents/MacOS/ucompute}"
+  XH=$(mktemp -d "${TMPDIR:-/tmp}/ucompute-xhold.XXXXXX")
   xdaemon() {
     mkdir -p "$XH/$1/models"
-    ln -s "$PWD/.common/backends" "$XH/$1/backends"
-    ln -s "$PWD/.common/models/blobs" "$XH/$1/models/blobs"
-    ln -s "$PWD/.common/models/manifests" "$XH/$1/models/manifests"
-    COMMON_HOME="$XH/$1" "$BIN" serve --port "$2" --network --serve-peers --listen-port "$3" --no-mdns \
+    ln -s "$PWD/.ucompute/backends" "$XH/$1/backends"
+    ln -s "$PWD/.ucompute/models/blobs" "$XH/$1/models/blobs"
+    ln -s "$PWD/.ucompute/models/manifests" "$XH/$1/models/manifests"
+    UCOMPUTE_HOME="$XH/$1" "$BIN" serve --port "$2" --network --serve-peers --listen-port "$3" --no-mdns \
       >"$OUT/xhold-$1.log" 2>&1 &
     for _ in $(seq 60); do curl -s -m 1 "127.0.0.1:$2/health" >/dev/null && return 0; sleep 0.5; done
     echo "throwaway daemon $1 did not answer: $OUT/xhold-$1.log"; return 1

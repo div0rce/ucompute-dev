@@ -44,7 +44,7 @@ const useFrozen = (): string | null => frozenWhy(frameState(daemon.use(), networ
 /** In place of a live value while the rows are busy or stale, as the table's `live` columns. */
 const NOT_REFRESHED = <Unavailable reason="not refreshed" />;
 
-/** Raw value first (what `common hardware --json` prints), human form second. */
+/** Raw value first (what `ucompute hardware --json` prints), human form second. */
 const bytes = (n: number | null | undefined) => (n == null ? "Not reported" : `${n.toLocaleString()} bytes (${humanBytes(n)})`);
 const yes = (b: boolean) => (b ? "On" : "Off");
 
@@ -209,7 +209,7 @@ function PeerOverview({ r, p }: { r: DeviceRow; p: Peer }) {
           { k: "Groups", v: p.groups.join(", ") || "None" },
           {
             k: "Software",
-            v: caps ? `Common ${caps.common_version} · protocol minor ${caps.protocol_minor} · ${caps.engines.join(", ") || "no engine reported"}` : <Unavailable reason={capsGap(caps) ?? ""} />,
+            v: caps ? `UCompute ${caps.ucompute_version} · protocol minor ${caps.protocol_minor} · ${caps.engines.join(", ") || "no engine reported"}` : <Unavailable reason={capsGap(caps) ?? ""} />,
           },
         ]}
       />
@@ -351,7 +351,7 @@ function HardwareTables({ hw }: { hw: Hardware }) {
   );
 }
 
-/** `/api/hardware` in full: the same values `common hardware --json` prints (F-10-04), plus the raw JSON. */
+/** `/api/hardware` in full: the same values `ucompute hardware --json` prints (F-10-04), plus the raw JSON. */
 function SelfHardware() {
   const h = hardware.use();
   const [probing, setProbing] = useState(false);
@@ -362,7 +362,7 @@ function SelfHardware() {
       {h.error && <ErrorNotice error={h.error} />}
       <div className="tab-head">
         <p className="small muted">
-          What Common found on this computer, probed {h.at ? when(h.at) : "—"} in {num(h.data.probe_ms, 1)} ms. The same values <code>common hardware --json</code> prints.
+          What UCompute found on this computer, probed {h.at ? when(h.at) : "—"} in {num(h.data.probe_ms, 1)} ms. The same values <code>ucompute hardware --json</code> prints.
         </p>
         <button
           type="button"
@@ -652,7 +652,7 @@ function NearbyConnection({ r }: { r: DeviceRow }) {
 }
 
 export const NETWORK_HELP = (listen: string | null | undefined, mdns: boolean) =>
-  `Off by default. When on, Common listens${listen ? ` on ${listen}` : ""} for connections from paired devices only, encrypted and checked against the key saved at pairing.${mdns ? " It also announces its id on this network so paired devices can find it." : ""}`;
+  `Off by default. When on, UCompute listens${listen ? ` on ${listen}` : ""} for connections from paired devices only, encrypted and checked against the key saved at pairing.${mdns ? " It also announces its id on this network so paired devices can find it." : ""}`;
 
 function SelfConnection() {
   const net = network.use().data;

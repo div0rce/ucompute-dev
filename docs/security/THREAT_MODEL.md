@@ -1,14 +1,14 @@
-# Threat Model — Project Common
+# Threat Model — Project UCompute
 
 > Current reading note (2026-10-18): original M0/M1 actor tables and Appendix A retain historical planning labels. The dated implementation corrections and infrastructure extension below take precedence for current implementation; no new security tests or public-execution approval are implied.
 
-- **Requirement:** F-06-06 (M0). Companion test: `default_config_binds_localhost` in `crates/common-api` (written separately).
+- **Requirement:** F-06-06 (M0). Companion test: `default_config_binds_localhost` in `crates/ucompute-api` (written separately).
 - **Status:** living document; revise at every milestone that adds a trust zone (M3, M7, M9, M10, M12). Last revised 2026-10-29 (WP-04 pooled session: §2.13 M4-01, R5, R11, SD-07 note); 2026-10-19 (§6 infrastructure extension; R2 desktop update); 2026-10-15 for M3 as built.
 - **Inputs:** `docs/SPEC_HANDOFF_V2.md` §7, §9, §18.6; `docs/REQUIREMENTS.csv`; ADR-0001; ADR-0002; ADR-0003 (§9, implementation notes); `docs/evidence/m3-single-host-2026-10-15.md`; `docs/research/COMPETITIVE_MATRIX.md` (llama.cpp RPC notes); `AGENTS.md`; decisions D-004, D-007; blockers B-002, B-005, B-006, B-007, B-008, B-011.
 - **Method:** STRIDE per actor. S spoofing, T tampering, R repudiation, I information disclosure, D denial of service, E elevation of privilege.
 - **Reading the mitigation tables.** `Requirement` is an exact ID from `docs/REQUIREMENTS.csv`; `—` means no row covers the mitigation (collected in §5.2). `Milestone` is the row's milestone. `Today` is the state in this branch: `present` (code + passing test), `present (SINGLE-HOST)` (code + passing test on one machine only; never two-machine evidence, B-002), `stub` (types/doc exist, logic unimplemented), `none`.
 
-M3 (Common Mesh) is built: pairing, an authenticated QUIC peer endpoint, LAN discovery, revocation, policy, quotas, audit, and Mode B (one whole request on one paired device). It is **off by default**. With default settings the only listener is the loopback API and nothing leaves the device. All M3 evidence is SINGLE-HOST (B-002). §2.13 maps each mesh threat to its mitigation and test; the per-actor tables point there.
+M3 (UCompute Mesh) is built: pairing, an authenticated QUIC peer endpoint, LAN discovery, revocation, policy, quotas, audit, and Mode B (one whole request on one paired device). It is **off by default**. With default settings the only listener is the loopback API and nothing leaves the device. All M3 evidence is SINGLE-HOST (B-002). §2.13 maps each mesh threat to its mitigation and test; the per-actor tables point there.
 
 This revision updates M3 rows only. M1 rows keep their 2026-10-14 state and need their own re-check. Everything in M4 or later is **not mitigated today**, except WP-04's pooled session (2026-10-29: §2.13 M4-01, R5, R11; unit, synthetic and SINGLE-HOST tests only, ADR-0005 §9).
 
@@ -20,10 +20,10 @@ This revision updates M3 rows only. M1 rows keep their 2026-10-14 state and need
 client (CLI, OpenAI SDK, desktop later)
    │ HTTP, 127.0.0.1:8192, optional API key
    ▼
-common-api  ── admission control, typed errors, metrics ──┐
+ucompute-api  ── admission control, typed errors, metrics ──┐
    │ HTTP on loopback, per-process random --api-key        │
    ▼                                                        ▼
-llama-server (pinned b11609, 127.0.0.1:<ephemeral>,    $COMMON_HOME/
+llama-server (pinned b11609, 127.0.0.1:<ephemeral>,    $UCOMPUTE_HOME/
   --no-webui --offline --metrics, scrubbed env)           backends/   models/{blobs,manifests,partial}/
                                                           runs/  logs/  identity/ (M3)
 ```
@@ -33,10 +33,10 @@ The engine is a child process (ADR-0002). Its port is never exposed; its API key
 M3 adds three listeners, and only after the user turns peer networking on:
 
 ```
-paired device ◀── QUIC, TLS 1.3, raw Ed25519 keys, UDP 8193 on every interface ──▶ common-api (Node)
+paired device ◀── QUIC, TLS 1.3, raw Ed25519 keys, UDP 8193 on every interface ──▶ ucompute-api (Node)
                   pinned keys only; QUIC Retry before TLS
 another device ──▶ pairing endpoint, ephemeral UDP port, only during a 120 s window
-LAN            ◀─▶ mDNS _common._udp.local., signed TXT (off with networking, or mdns = false)
+LAN            ◀─▶ mDNS _ucompute._udp.local., signed TXT (off with networking, or mdns = false)
 ```
 
 State, all mode 0600: `identity/device.key` and `device.pub` (directory 0700), `identity/peers.json` (pins, groups, revocations), `config.json` (privacy, networking, serving, peer quotas), `logs/audit*.jsonl`.
@@ -50,7 +50,7 @@ State, all mode 0600: `identity/device.key` and `device.pub` (directory 0700), `
 | Z2 Public swarm | Unpaired, pseudonymous contributors and requesters | F | Hostile by default. Every message is attacker-controlled | no (M9/M10, Gate F) |
 | Z3 Managed cloud / enterprise | Cloud burst targets, enterprise federation, SSO IdP | G | Contractual; explicit cost and policy consent per use | no (M12) |
 
-Data crosses a zone boundary only through Common's authenticated, encrypted transport (F-02-03, F-06-03). There is no plaintext peer path and llama.cpp's `rpc-server` is never reachable beyond loopback (D-007, `AGENTS.md`).
+Data crosses a zone boundary only through UCompute's authenticated, encrypted transport (F-02-03, F-06-03). There is no plaintext peer path and llama.cpp's `rpc-server` is never reachable beyond loopback (D-007, `AGENTS.md`).
 
 ### 1.3 Assets
 
@@ -60,7 +60,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Model weights + manifests | `models/blobs/sha256-*`, `models/manifests/*.json`, `catalog/*.json` | low–medium (license-dependent, X-08) | **critical** — wrong weights = silent model substitution | medium |
 | Engine binaries + pins | `backends/<name>/<release>/`, `catalog/backends.json` | low | **critical** — runs as the user | medium |
 | Device identity keys (M3) | `identity/device.key`, a 0600 file (no keychain, ADR-0003 D1) | **critical** | critical | medium |
-| API keys | Common API key (config); engine key (process memory only) | high | — | — |
+| API keys | UCompute API key (config); engine key (process memory only) | high | — | — |
 | Audit logs (M3) | `logs/audit*.jsonl`: rotated at 8 MiB, about 32 MiB kept, plus `audit.security.jsonl` | medium (metadata, no prompts) | high | low |
 | Credits ledger (M10) | local SQLite, hash-chained | low | high | low |
 | User hardware, time, energy | CPU/GPU/RAM/disk/battery | — | — | **high** — the product's whole value exchange |
@@ -83,7 +83,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Model blob re-hashed against manifest before load | F-05-01, F-01-05 | M1 | stub (`Store::verify`) |
 | Hardware probe runs unprivileged (no setuid helpers) | F-01-01 | M1 | stub |
 
-**Not mitigated.** Same-user local processes: anything running as the same OS user can read `$COMMON_HOME` and connect to loopback; this is the OS trust boundary and Common does not claim to defend against it. Data-directory permissions (0700) are not required by any row (gap 7).
+**Not mitigated.** Same-user local processes: anything running as the same OS user can read `$UCOMPUTE_HOME` and connect to loopback; this is the OS trust boundary and UCompute does not claim to defend against it. Data-directory permissions (0700) are not required by any row (gap 7).
 
 ### 2.2 Malicious model file
 
@@ -93,7 +93,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 | Mitigation | Requirement | Milestone | Today |
 |---|---|---|---|
-| Common parses GGUF metadata in Rust before handing the file to the engine; truncated/corrupt files return `ModelFileInvalid`, never crash (1,000-mutation fuzz) | F-01-02 | M1 | stub (`common-models/gguf.rs`) |
+| UCompute parses GGUF metadata in Rust before handing the file to the engine; truncated/corrupt files return `ModelFileInvalid`, never crash (1,000-mutation fuzz) | F-01-02 | M1 | stub (`ucompute-models/gguf.rs`) |
 | Only hash-verified blobs reach the engine; untrusted import is explicit (`Store::import`) | F-05-01, F-01-05 | M1 | stub |
 | Memory feasibility and context planning reject infeasible loads before spawn (`InsufficientMemory`, `ContextTooLong`) | F-01-03, F-01-08 | M1 | stub |
 | Engine is a separate process: a crash surfaces as `BackendFailed`, not daemon death | F-01-06 (ADR-0002) | M1 | stub |
@@ -110,7 +110,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 | Mitigation | Requirement | Milestone | Today |
 |---|---|---|---|
-| Names must pass `common_core::paths::safe_name` (single component, no leading dot, ASCII set) | F-01-05 (`path_traversal_in_name_rejected`) | M1 | **present** (`safe_names` test) |
+| Names must pass `ucompute_core::paths::safe_name` (single component, no leading dot, ASCII set) | F-01-05 (`path_traversal_in_name_rejected`) | M1 | **present** (`safe_names` test) |
 | Manifest hash is authoritative; mismatch fails the load; schema validated | F-05-01 | M1 | stub |
 | Catalog URLs pinned to immutable revisions; manifest records `source_url` | F-05-10 | M6 | stub (doc comment only) |
 | Engine archive: SHA-256 and byte count checked before extraction; members rejected on traversal/absolute/symlink-out; every extracted file re-verified against the archive | — (ADR-0002 §1–2; gap 3) | M1 | stub (`ensure_backend`, `verify_backend`) |
@@ -131,7 +131,7 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 | Model downloads require `https://`; SHA-256 verified; one flipped byte deletes the partial | F-01-05 (`tls_required_for_remote`, `corrupted_byte_rejected`) | M1 | stub |
 | Unverified (unpinned) model files require explicit confirmation | F-06-09 | M6 | none |
 | `cargo-deny` license allowlist + `cargo-audit` in CI | F-06-09 (ADR-0001 §2) | M6 | none (CI blocked, B-007) |
-| Execution manifest pins model hash, backend version, quant, seed | X-15 | M1 | stub (`common-core/manifest.rs` roundtrip present) |
+| Execution manifest pins model hash, backend version, quant, seed | X-15 | M1 | stub (`ucompute-core/manifest.rs` roundtrip present) |
 | Signed/checksummed installers; updater verifies Ed25519 signature; unsigned update rejected; rollback | F-10-01, F-10-07 | M2 / M13 | none (B-008: no signing identities) |
 | Fixtures downloaded at test time, never bundled | — (B-011) | M1 | policy only |
 
@@ -287,18 +287,18 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 **Not mitigated.** Contributor liability for generated content is a policy question, not a technical control; disclosure text (F-10-10, F-10-08) is the only planned measure.
 
-### 2.13 Common Mesh (M3) as built: threat → mitigation → test
+### 2.13 UCompute Mesh (M3) as built: threat → mitigation → test
 
 **Actors.** A passive or active attacker on the LAN; an unpaired device; a revoked device; a man in the middle during pairing; a paired device that floods or misbehaves; a hostile link aimed at the desktop app.
 **Scope.** What runs in this branch. Every test is a unit test or **SINGLE-HOST** (one Mac). None is two-machine evidence (B-002). ADR-0003 §9 gives each test's file. The two-daemon run is `docs/evidence/m3-single-host-2026-10-15.md`.
 
 | # | Threat | Mitigation as built | Tests | Requirement |
 |---|---|---|---|---|
-| M3-01 | Passive LAN observer reads prompts or completions | QUIC with TLS 1.3 only. The quinn `Endpoint` is the only socket type in `common-network`. 0-RTT off. | `packet_capture_contains_no_plaintext_prompt_single_host`, `no_plaintext_mode_exists` | F-02-03, F-06-03 |
+| M3-01 | Passive LAN observer reads prompts or completions | QUIC with TLS 1.3 only. The quinn `Endpoint` is the only socket type in `ucompute-network`. 0-RTT off. | `packet_capture_contains_no_plaintext_prompt_single_host`, `no_plaintext_mode_exists` | F-02-03, F-06-03 |
 | M3-02 | Unpaired device connects to the peer endpoint | The verifier rejects an unpinned key inside the TLS handshake (`unknown_ca`). No stream opens; no Capabilities are sent. | `unpinned_key_rejected` | F-02-03 |
 | M3-03 | The dialled address answers with another key (spoofed record, hijacked address), or a party on the path forges a refusal | The dialler accepts only the one key it expects. A refusal is the device's own answer only after the dialler has read that device's Hello on the control stream: until then QUIC Initial packets (keys from the public connection id) are still processed, so any close, TLS alert or application code, can be forged even after the pinned key was shown and the handshake completed. An unproven refusal reads "did not prove it is <name>" (`peer_unauthorized`), never "revoked", "disconnected by" or "incompatible", and the next address is tried; a forged protocol-mismatch close (`PV`, `no_application_protocol`) reads the same way with an update hint, and a frame-size close (`FT`) without one: since 780c2b9 neither shows as 426 `protocol_incompatible` or 413 `frame_too_large` in `last_error`, and a claimed mismatch no longer stops `health::supervise` (neither ever ended a dial walk: only a proven `peer_held` or `peer_revoked` does, `peer_connection_via`). A proven refusal (`ErrorMsg{peer_held}` on the control stream, a close after the Hello, or this store's own verdict) ends the dial. Every address is a hint. Cost: a genuine revocation by the other device, a hold by a minor-0 build, and a genuinely newer-major device that closes before its Hello read `peer_unauthorized` at the dialler; `supervise` keeps redialling a device that revoked this one, with backoff capped at 30 s (only tests call `supervise`; the daemon's sync loop redials every pinned device with backoff up to 300 s, as before). | `server_key_not_pinned_by_client_rejected`, `a_close_before_the_device_proved_its_key_proves_nothing`, `a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host`, `forged_revoked_alert_before_the_key_is_not_a_revocation`, `a_refusal_before_the_device_proved_its_key_does_not_end_the_dial_single_host`, `a_held_refusal_ends_the_dial_single_host`, `supervise_retries_after_an_unproven_refusal_single_host` | F-02-03 |
 | M3-04 | Revoked device reconnects, also with a cached TLS session | The verifier refuses revoked keys (`certificate_revoked`). No tickets, no resumption. The store is checked again after registration. | `revoked_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `revoked_key_cannot_reconnect_with_cached_session`, `revoked_during_control_handshake_is_closed` | F-06-05 |
-| M3-05 | Downgrade to TLS 1.2 or an older protocol | Every config pins TLS 1.3. ALPN `common/1`. A major mismatch is `protocol_incompatible` when proven (a Hello read with another major, or this side's own negotiation failed); a mismatch claimed before the Hello, an ALPN refusal included, reads `peer_unauthorized` with an update hint (M3-03, 780c2b9). | `tls12_downgrade_attempt_fails`, `wrong_alpn_fails` (the raw `map_conn_error` result, `ProtocolIncompatible`, not what the dialler reads), `protocol_major_mismatch_is_typed`, `a_close_before_the_device_proved_its_key_proves_nothing` (a `no_application_protocol` alert reads `peer_unauthorized`; an unproven `CLOSE_PROTOCOL` carries the update hint), `a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host` (forged `CLOSE_PROTOCOL` and `no_application_protocol`) | F-06-03, F-08-10 |
+| M3-05 | Downgrade to TLS 1.2 or an older protocol | Every config pins TLS 1.3. ALPN `ucompute/1`. A major mismatch is `protocol_incompatible` when proven (a Hello read with another major, or this side's own negotiation failed); a mismatch claimed before the Hello, an ALPN refusal included, reads `peer_unauthorized` with an update hint (M3-03, 780c2b9). | `tls12_downgrade_attempt_fails`, `wrong_alpn_fails` (the raw `map_conn_error` result, `ProtocolIncompatible`, not what the dialler reads), `protocol_major_mismatch_is_typed`, `a_close_before_the_device_proved_its_key_proves_nothing` (a `no_application_protocol` alert reads `peer_unauthorized`; an unproven `CLOSE_PROTOCOL` carries the update hint), `a_close_forged_after_the_genuine_flight_is_not_a_refusal_single_host` (forged `CLOSE_PROTOCOL` and `no_application_protocol`) | F-06-03, F-08-10 |
 | M3-06 | Peer claims another identity in Hello, or alters a Capabilities record | Hello `peer_id` must equal the TLS identity. The Capabilities signature is checked over the exact bytes received, with a context prefix, before decoding. | `capabilities_signature_covers_the_bytes_sent`, `capabilities_exchanged_after_handshake` | F-02-04 |
 | M3-07 | Oversized or malformed control frames | 1 MiB bound checked before allocation. Capabilities over 64 KiB → `frame_too_large`. Unknown fields and variants are skipped. | `frame_bound_checked_before_allocation`, `oversized_capability_message_rejected`, `unknown_field_tolerated`, `unknown_oneof_variant_tolerated` | F-02-04, F-08-10 |
 | M3-08 | Flood of QUIC Initials from spoofed source addresses | QUIC Retry before any TLS work. Inbound `peer_rejected` lines capped at 20 a minute; the rest are counted. | `rejection_audit_is_rate_limited`, `rejection_audit_lines_are_capped_per_minute` (no test isolates the Retry) | — |
@@ -332,29 +332,29 @@ Data crosses a zone boundary only through Common's authenticated, encrypted tran
 
 **Still open (M3).**
 - **Two-machine evidence (R2, B-002).** Every row above ran on one Mac. Real LAN mDNS, Wi-Fi jitter against the 4 s idle timeout and a kernel capture on a LAN interface are untested. SINGLE-HOST evidence never satisfies a criterion that needs two machines (F-02-01 LAN discovery, F-03-01, F-03-02, Gate D, two installs pairing through the UI). Rows whose criteria do not depend on topology (pairing cryptography, policy, revocation, capture, liveness) were marked `VERIFIED` from SINGLE-HOST tests on 2026-10-15; see `docs/REQUIREMENTS.csv`.
-- **rustls `tls12` is compiled in (R9).** reqwest (hyper-rustls) enables it. No Common config uses it.
+- **rustls `tls12` is compiled in (R9).** reqwest (hyper-rustls) enables it. No UCompute config uses it.
 - **`spake2` 0.4.0 is unaudited (R10)** and, by its own statement, probably not constant-time.
-- A compromised paired device reads every prompt it runs (§4). Common cannot detect that.
+- A compromised paired device reads every prompt it runs (§4). UCompute cannot detect that.
 - No kernel packet capture yet: `tcpdump` needs sudo. The in-process relay capture stands in.
 - No test isolates the QUIC Retry. The pairing endpoint has no Retry; its lockout and one-at-a-time loop bound it.
 - Private key bytes are not zeroized in memory.
 - The `peer_rejected` cap is one global window: a flood hides other rejections for that minute (the count is kept).
 - The revocation audience map lives in memory. A record this store never saw can re-revoke a re-paired device (fails closed).
-- With networking on, the peer endpoint binds every interface. Common does not manage the OS firewall; the endpoint accepts only pinned keys.
-- The CLI sends `COMMON_API_KEY` to whatever answers on the loopback port named in `serve.json` (same-user boundary, R6).
+- With networking on, the peer endpoint binds every interface. UCompute does not manage the OS firewall; the endpoint accepts only pinned keys.
+- The CLI sends `UCOMPUTE_API_KEY` to whatever answers on the loopback port named in `serve.json` (same-user boundary, R6).
 - No bandwidth probe (F-02-07), and no byte or session quotas yet.
 
 ## 3. Secure defaults
 
 Verbatim list. A test suite should be able to assert each item; §Appendix A maps them to tests.
 
-1. **SD-01** The Common API binds `127.0.0.1` by default (`ApiConfig::default().host == "127.0.0.1"`).
+1. **SD-01** The UCompute API binds `127.0.0.1` by default (`ApiConfig::default().host == "127.0.0.1"`).
 2. **SD-02** A non-loopback bind without an API key is refused at startup with `ErrorCode::PolicyDenied`.
 3. **SD-03** There is no plaintext peer transport path; peer connections are mutually authenticated and encrypted, with no downgrade negotiation.
 4. **SD-04** Off-device execution is default-deny: with default configuration no request leaves the device.
 5. **SD-05** Resource contribution is off by default; a fresh install accepts zero external workloads.
 6. **SD-06** Public swarm participation is disabled by default and remains disabled until Gate F.
-7. **SD-07** Engine ports (`llama-server`, `rpc-server`) bind loopback only, carry a per-process random API key, and are never exposed by Common. *(Note 2026-10-29, WP-04: `ggml-rpc-server` has no API key option; its loopback port is protected by the socket-owner checks and the command filter instead (§2.13 M4-01, R11), and its bytes leave the device only inside the authenticated QUIC connection.)*
+7. **SD-07** Engine ports (`llama-server`, `rpc-server`) bind loopback only, carry a per-process random API key, and are never exposed by UCompute. *(Note 2026-10-29, WP-04: `ggml-rpc-server` has no API key option; its loopback port is protected by the socket-owner checks and the command filter instead (§2.13 M4-01, R11), and its bytes leave the device only inside the authenticated QUIC connection.)*
 8. **SD-08** Prompts are never logged: not in engine logs, API logs, metrics, error messages, execution records or diagnostics bundles.
 9. **SD-09** Model files are SHA-256-verified against their manifest before the engine is started on them; mismatch is `IntegrityMismatch`/`ModelFileInvalid`, not a load.
 10. **SD-10** Archive extraction (engine releases) refuses path traversal, absolute paths and symlinks escaping the destination; names pass `safe_name`.
@@ -367,7 +367,7 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 
 - **A peer that executes a layer range sees the activations for that range.** For the first and last stages that is a thin transform away from the prompt and the output; for middle stages activations are still invertible in practice for many architectures. Encryption in transit (F-02-03) protects against observers on the wire and relays (F-02-06), not against the endpoint. Spec §9: "TLS does not hide prompts from a peer processing them."
 - **Local-only is the only private mode.** Modes B–G disclose the workload to every executing peer. Pairing a device (F-02-02) is granting it read access to whatever policy allows routing to it. The privacy selector (F-10-10) and policy engine (F-06-07) exist to make that disclosure explicit and enforce the boundary, not to remove it.
-- **Confidential computing (F-06-11) is research.** No attestation path exists; no CC hardware is available (B-005). Nothing in Common may claim confidential execution without verified attestation.
+- **Confidential computing (F-06-11) is research.** No attestation path exists; no CC hardware is available (B-005). Nothing in UCompute may claim confidential execution without verified attestation.
 - **Verifiable inference (F-06-12) is research.** Redundancy (X-07) and activation-hash spot checks are statistical detection, not proof. They are never described as cryptographic proof unless they are.
 - **Authentication is not authorization.** A valid peer identity (F-06-01) proves who; policy (F-06-02, F-06-07, I-05) decides whether. Both exist since M3: identity in the TLS verifier, policy in `PolicyEngine::evaluate` (sending) and `may_serve` (serving).
 - **Mode B shows the whole prompt.** In M3 a paired device runs the whole request, so it reads the full prompt and output, not only activations. The disclosure says this before the user leaves `local_only` (SD-14).
@@ -378,15 +378,15 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 
 | # | Risk | Why it remains | Owner action |
 |---|---|---|---|
-| R1 | **TOCTOU between hash verification and engine load.** `Store::verify` re-hashes the blob; the engine then opens the path by name. A same-user writer can swap the file in between. | Loopback-and-same-user is the OS trust boundary; `llama-server` takes a path, not an fd. Mitigation options: open once and hash the open fd, hard-link into a private per-run directory, or verify via `/proc/self/fd` style path. | Decide in M1 implementation; document in `common-artifacts`. |
+| R1 | **TOCTOU between hash verification and engine load.** `Store::verify` re-hashes the blob; the engine then opens the path by name. A same-user writer can swap the file in between. | Loopback-and-same-user is the OS trust boundary; `llama-server` takes a path, not an fd. Mitigation options: open once and hash the open fd, hard-link into a private per-run directory, or verify via `/proc/self/fd` style path. | Decide in M1 implementation; document in `ucompute-artifacts`. |
 | R2 | **Bounded physical coverage (updated 2026-10-19).** Mac/Windows Mode B, hotspot discovery and two installed desktop apps pairing through their UIs have evidence ([desktop two-machine](../evidence/desktop-two-machine-2026-10-19.md)); pooling, clean-account installs and Windows multi-user ACL isolation do not. | No LAN kernel packet capture; limited host/network configurations. | Retain SINGLE-HOST capture labels; see [two-machine evidence](../evidence/m3-two-machine-2026-10-18.md). Do not infer arbitrary platform or distributed-execution security. |
 | R3 | **Public signing and executed release CI unavailable (B-007/008).** Mac artifact is ad-hoc signed; pipeline definitions exist, not a demonstrated release pipeline. | Developer ID/Windows signing and publication authorization absent; origin exists. | Qualify signed exact artifacts and target-native CI before public promotion. |
 | R4 | **Upstream engine binary is trusted at pin time.** The SHA-256 pins what was downloaded, not what the source produces. | No reproducible build of llama.cpp releases. | Consider building from the pinned `source_commit` in CI once B-007 is resolved. |
-| R5 | **llama.cpp memory-safety surface.** GGUF loader and `rpc-server` are C++ with known robustness issues (COMPETITIVE_MATRIX: #15055, #13185, #20315; no fuzzer upstream). Since WP-04 (2026-10-29) **both RPC parsers** face a peer-chosen byte stream in a pooled session: `ggml-rpc-server` on the stage host reads the head's commands, and the head's `llama-server` RPC client reads the stage's replies. | Not Common's code. The command filter (ADR-0005 D4) narrows two known capability paths on the stage side only; nothing filters the replies the head reads. | Process isolation now (ADR-0002); `RLIMIT_AS`, PDEATHSIG and nice 10 on the Linux stage host; pooling only between owner-controlled devices that opted in on both ends; sandbox at M7 (F-06-08, OD-8); never expose beyond loopback (D-007). |
-| R6 | **Same-user local attacker.** Anything running as the user can read `$COMMON_HOME` and reach loopback ports. | Inherent to desktop OS model. | Document in user privacy notes. M3 chose a 0600 file over the keychain (ADR-0003 D1); revisit with signed builds (M13). |
+| R5 | **llama.cpp memory-safety surface.** GGUF loader and `rpc-server` are C++ with known robustness issues (COMPETITIVE_MATRIX: #15055, #13185, #20315; no fuzzer upstream). Since WP-04 (2026-10-29) **both RPC parsers** face a peer-chosen byte stream in a pooled session: `ggml-rpc-server` on the stage host reads the head's commands, and the head's `llama-server` RPC client reads the stage's replies. | Not UCompute's code. The command filter (ADR-0005 D4) narrows two known capability paths on the stage side only; nothing filters the replies the head reads. | Process isolation now (ADR-0002); `RLIMIT_AS`, PDEATHSIG and nice 10 on the Linux stage host; pooling only between owner-controlled devices that opted in on both ends; sandbox at M7 (F-06-08, OD-8); never expose beyond loopback (D-007). |
+| R6 | **Same-user local attacker.** Anything running as the user can read `$UCOMPUTE_HOME` and reach loopback ports. | Inherent to desktop OS model. | Document in user privacy notes. M3 chose a 0600 file over the keychain (ADR-0003 D1); revisit with signed builds (M13). |
 | R7 | **Fixture license (B-011).** TinyStories weights have no verified license. | Upstream ambiguity. | Never bundle; download at test time. |
-| R8 | **Engine secret handling (corrected 2026-10-18).** Code uses a temporary `--api-key-file`, not the secret in argv. | Same-user memory/file access remains; Windows ACL guarantees require native tests. | `crates/common-runtime/src/llamacpp/process.rs`; recorded `key_file_is_owner_only_and_never_overwritten` test in VERIFICATION. Do not equate Unix mode tests with Windows isolation. |
-| R9 | **rustls `tls12` is compiled into the binary.** reqwest (hyper-rustls) enables the feature, so TLS 1.2 code ships although no Common config uses it. | Cargo feature unification: reqwest's `rustls-tls` turns it on through hyper-rustls. | Every peer config pins TLS 1.3 (`tls12_downgrade_attempt_fails`). Remove it when reqwest can be built without it. |
+| R8 | **Engine secret handling (corrected 2026-10-18).** Code uses a temporary `--api-key-file`, not the secret in argv. | Same-user memory/file access remains; Windows ACL guarantees require native tests. | `crates/ucompute-runtime/src/llamacpp/process.rs`; recorded `key_file_is_owner_only_and_never_overwritten` test in VERIFICATION. Do not equate Unix mode tests with Windows isolation. |
+| R9 | **rustls `tls12` is compiled into the binary.** reqwest (hyper-rustls) enables the feature, so TLS 1.2 code ships although no UCompute config uses it. | Cargo feature unification: reqwest's `rustls-tls` turns it on through hyper-rustls. | Every peer config pins TLS 1.3 (`tls12_downgrade_attempt_fails`). Remove it when reqwest can be built without it. |
 | R10 | **`spake2` 0.4.0 is unaudited** and, by its own statement, probably not constant-time. | Accepted in ADR-0003 D2 for a short-lived pairing code. | It protects only a one-time 120 s code; lockout after 5 failures; long-term trust rests on TLS 1.3 + pinned Ed25519 keys. Track `spake2` 0.5. |
 | R11 | **Other local users on loopback during a pooled session.** On either host another OS user can connect to the bridge's or rpc-server's `127.0.0.1` port, or bind rpc-server's port first. | Loopback carries no user identity; rpc-server has no authentication. The owner checks are polled. | H gives a tunnel only to a connection its own `llama-server` owns; R sends nothing until its child owns the listener and checks every established client at each tunnel open and every second, ending the session on a stranger (ADR-0005 D3, D4; window at most 1 s). Same-user processes remain R6. P1 checks `who` on the stage host (OD-10). |
 
@@ -398,7 +398,7 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 4. "Prompts never logged" at M1 — F-09-03 covers metrics, F-06-10 (M3) covers bundles; engine stdout, API logs and `runs/` records have no row.
 5. Non-loopback bind requires API key; API key comparison and `Unauthorized` — F-09-01 only asserts the default bind.
 6. HTTP request body size bound — F-08-08 bounds queue and concurrency, not body bytes.
-7. Data-directory permissions (0700 on `$COMMON_HOME`, 0600 on manifests/audit/ledger) — F-06-01 covers only the identity key.
+7. Data-directory permissions (0700 on `$UCOMPUTE_HOME`, 0600 on manifests/audit/ledger) — F-06-01 covers only the identity key.
 8. Catalog/manifest signing for any remotely fetched catalog — F-05-01 accepts hash alone.
 9. Disk quota / partial-download cleanup — F-05-03 (M6) is eviction policy, not a bound.
 10. TOCTOU (R1) — no row requires verify-then-load atomicity.
@@ -406,7 +406,7 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 ### 5.3 Open questions
 
 - Transport: settled for M3 as `quinn` + `rustls` with pinned raw keys (ADR-0003 D3). Whether M9 adds an `iroh` adapter or its own relay is still open (F-02-06).
-- Whether `rpc-server` is wrapped (tunnelled through Common's transport) or replaced with Common-native activation frames (F-03-03) — M4. COMPETITIVE_MATRIX recommends not reusing the wire protocol as-is.
+- Whether `rpc-server` is wrapped (tunnelled through UCompute's transport) or replaced with UCompute-native activation frames (F-03-03) — M4. COMPETITIVE_MATRIX recommends not reusing the wire protocol as-is.
 - Key storage: settled for M3 as a 0600 file (ADR-0003 D1). Keychain support waits for signed builds (B-008).
 - Whether redundancy (X-07) tolerances for cross-backend nondeterminism leave a usable detection margin for F-07-09.
 
@@ -414,34 +414,34 @@ Verbatim list. A test suite should be able to assert each item; §Appendix A map
 
 | Default | Test name | Location | Covers | State |
 |---|---|---|---|---|
-| SD-01 | `default_config_binds_localhost` | `crates/common-api` | F-06-06 | planned (in progress by API agent) |
-| SD-01 | `external_interface_not_bound_by_default` | `crates/common-api` (integration: start `serve`, assert only 127.0.0.1 socket) | F-06-06 | planned |
-| SD-01 | `api_binds_localhost_by_default` | `crates/common-api` | F-09-01 | planned (may alias SD-01 above) |
-| SD-02 | `nonloopback_bind_without_key_is_policy_denied` | `crates/common-api` | gap 5 | planned |
-| SD-03 | `no_plaintext_mode_exists`, `tls12_downgrade_attempt_fails`, `wrong_alpn_fails`, `unpinned_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `packet_capture_contains_no_plaintext_prompt_single_host` | `crates/common-network` | F-06-03, F-02-03 | present (SINGLE-HOST) |
-| SD-04 | `default_deny`, `unauthorized_peer_request_refused` | `crates/common-policy` | F-06-02 | present |
-| SD-04 | `defaults_are_local_only_and_a_peer_target_is_refused_without_any_network`, `local_only_never_leaves_device_10k_single_host` | `crates/common-api/tests/mesh.rs` | F-06-02, F-06-07 | present (SINGLE-HOST) |
-| SD-04 | `local_only_never_leaves_device_fuzz` | `crates/common-policy` | F-06-07 | present |
-| SD-05 | `default_off`, `no_contribution_without_opt_in` | `crates/common-metering` (M7) | F-07-01 | planned M7 |
-| SD-06 | `gate_disabled_by_default` (settlement) plus a swarm-flag default test | `crates/common-metering`, `crates/common-network` | F-07-11; swarm flag has no row (spec §22) | planned M9/M10 |
-| SD-07 | `engine_binds_loopback_with_random_key` | `crates/common-runtime` (`llamacpp.rs`) | gap 1 | planned M1 |
-| SD-08 | `metrics_contain_no_prompts` | `crates/common-api` | F-09-03 | planned M1 |
-| SD-08 | `errors_redact_secrets` | `crates/common-core` | F-08-03 | planned M1 (`error_codes_are_stable` present) |
-| SD-08 | `engine_log_and_run_record_contain_no_prompt` | `crates/common-runtime` | gap 4 | planned M1 |
-| SD-08 | `diagnostics_bundle_redacted`, `audit_rejects_content_bearing_fields` | `crates/common-observability` | F-06-10 | present |
-| SD-08 | `private_key_absent_from_real_logs_and_bundle_single_host` | `crates/common-cli/tests/mesh_single_host.rs` | F-06-01, F-06-10 | present (SINGLE-HOST) |
-| SD-09 | `hash_verify`, `corrupted_byte_rejected`, `manifest_signature_or_hash_required` | `crates/common-artifacts` | F-01-05, F-05-01 | planned M1 |
-| SD-09 | `malformed_gguf_rejected_without_crash` | `crates/common-models` | F-01-02 | planned M1 |
-| SD-10 | `safe_names` | `crates/common-core/src/paths.rs` | F-01-05 | **present** |
-| SD-10 | `path_traversal_in_name_rejected` | `crates/common-artifacts` | F-01-05 | planned M1 |
-| SD-10 | `archive_member_traversal_rejected`, `extracted_files_match_archive` | `crates/common-artifacts` (`backend.rs`) | gap 3 | planned M1 |
-| SD-11 | `engine_env_is_scrubbed` | `crates/common-runtime` | gap 2 | planned M1 |
-| SD-12 | `queue_bound`, `overload_returns_429`, `overload_does_not_oom` | `crates/common-api` | F-08-08 | planned M1 |
-| SD-12 | `oversized_body_rejected` | `crates/common-api` | gap 6 | planned M1 |
-| SD-12 | `oversized_capability_message_rejected`, `frame_bound_checked_before_allocation` | `crates/common-network` | F-02-04 | present |
-| SD-12 | `oversized_or_mismatched_dim_frame_rejected` | `crates/common-distributed` | F-03-03 | planned M4 |
-| SD-13 | `network_disabled_refuses_to_listen`, `disabled_config_is_inert`, `settings_default_off_and_round_trip_0600` | `crates/common-network`, `crates/common-api` | F-06-02 | present |
-| SD-14 | `disclosure_names_the_risk`, `privacy_mode_enforced_end_to_end_single_host` | `crates/common-api` | F-10-10 | present (SINGLE-HOST) |
+| SD-01 | `default_config_binds_localhost` | `crates/ucompute-api` | F-06-06 | planned (in progress by API agent) |
+| SD-01 | `external_interface_not_bound_by_default` | `crates/ucompute-api` (integration: start `serve`, assert only 127.0.0.1 socket) | F-06-06 | planned |
+| SD-01 | `api_binds_localhost_by_default` | `crates/ucompute-api` | F-09-01 | planned (may alias SD-01 above) |
+| SD-02 | `nonloopback_bind_without_key_is_policy_denied` | `crates/ucompute-api` | gap 5 | planned |
+| SD-03 | `no_plaintext_mode_exists`, `tls12_downgrade_attempt_fails`, `wrong_alpn_fails`, `unpinned_key_rejected`, `revoked_client_cannot_resume_with_cached_session`, `packet_capture_contains_no_plaintext_prompt_single_host` | `crates/ucompute-network` | F-06-03, F-02-03 | present (SINGLE-HOST) |
+| SD-04 | `default_deny`, `unauthorized_peer_request_refused` | `crates/ucompute-policy` | F-06-02 | present |
+| SD-04 | `defaults_are_local_only_and_a_peer_target_is_refused_without_any_network`, `local_only_never_leaves_device_10k_single_host` | `crates/ucompute-api/tests/mesh.rs` | F-06-02, F-06-07 | present (SINGLE-HOST) |
+| SD-04 | `local_only_never_leaves_device_fuzz` | `crates/ucompute-policy` | F-06-07 | present |
+| SD-05 | `default_off`, `no_contribution_without_opt_in` | `crates/ucompute-metering` (M7) | F-07-01 | planned M7 |
+| SD-06 | `gate_disabled_by_default` (settlement) plus a swarm-flag default test | `crates/ucompute-metering`, `crates/ucompute-network` | F-07-11; swarm flag has no row (spec §22) | planned M9/M10 |
+| SD-07 | `engine_binds_loopback_with_random_key` | `crates/ucompute-runtime` (`llamacpp.rs`) | gap 1 | planned M1 |
+| SD-08 | `metrics_contain_no_prompts` | `crates/ucompute-api` | F-09-03 | planned M1 |
+| SD-08 | `errors_redact_secrets` | `crates/ucompute-core` | F-08-03 | planned M1 (`error_codes_are_stable` present) |
+| SD-08 | `engine_log_and_run_record_contain_no_prompt` | `crates/ucompute-runtime` | gap 4 | planned M1 |
+| SD-08 | `diagnostics_bundle_redacted`, `audit_rejects_content_bearing_fields` | `crates/ucompute-observability` | F-06-10 | present |
+| SD-08 | `private_key_absent_from_real_logs_and_bundle_single_host` | `crates/ucompute-cli/tests/mesh_single_host.rs` | F-06-01, F-06-10 | present (SINGLE-HOST) |
+| SD-09 | `hash_verify`, `corrupted_byte_rejected`, `manifest_signature_or_hash_required` | `crates/ucompute-artifacts` | F-01-05, F-05-01 | planned M1 |
+| SD-09 | `malformed_gguf_rejected_without_crash` | `crates/ucompute-models` | F-01-02 | planned M1 |
+| SD-10 | `safe_names` | `crates/ucompute-core/src/paths.rs` | F-01-05 | **present** |
+| SD-10 | `path_traversal_in_name_rejected` | `crates/ucompute-artifacts` | F-01-05 | planned M1 |
+| SD-10 | `archive_member_traversal_rejected`, `extracted_files_match_archive` | `crates/ucompute-artifacts` (`backend.rs`) | gap 3 | planned M1 |
+| SD-11 | `engine_env_is_scrubbed` | `crates/ucompute-runtime` | gap 2 | planned M1 |
+| SD-12 | `queue_bound`, `overload_returns_429`, `overload_does_not_oom` | `crates/ucompute-api` | F-08-08 | planned M1 |
+| SD-12 | `oversized_body_rejected` | `crates/ucompute-api` | gap 6 | planned M1 |
+| SD-12 | `oversized_capability_message_rejected`, `frame_bound_checked_before_allocation` | `crates/ucompute-network` | F-02-04 | present |
+| SD-12 | `oversized_or_mismatched_dim_frame_rejected` | `crates/ucompute-distributed` | F-03-03 | planned M4 |
+| SD-13 | `network_disabled_refuses_to_listen`, `disabled_config_is_inert`, `settings_default_off_and_round_trip_0600` | `crates/ucompute-network`, `crates/ucompute-api` | F-06-02 | present |
+| SD-14 | `disclosure_names_the_risk`, `privacy_mode_enforced_end_to_end_single_host` | `crates/ucompute-api` | F-10-10 | present (SINGLE-HOST) |
 
 Present today: `safe_names`, `error_codes_are_stable`, `backoff_is_bounded`, `every_code_has_status_type_and_user_message`, `openai_json_shape`, and the rows marked `present` above (M3, 2026-10-15). M1 rows still marked planned were not re-checked in this revision. Tests marked M4+ cannot run until the corresponding crate exists; tests for gaps 1–6 need requirement rows or an amendment to an existing row before they can carry evidence in the ledger.
 
@@ -474,7 +474,7 @@ All entries below are committed design/verification obligations. Public executio
 | Relay/routing abuse, public ingress floods | Network availability, operator bandwidth bill | Authenticated bounded relay sessions, budgets/limits, no arbitrary destination proxying, isolation, operator shutdown and abuse response; churn/flood/cost-bound experiments | WP-11; F-02-06/11, F-06-04, Gate F |
 | Privacy-policy bypass, logging or retention leak | Prompts, outputs, local files and metadata | Explicit target/permission flow, local-only packet-negative tests, no content in default logs, consented aggregate analytics, retention/deletion tests | WP-06/08/10; F-06-07/10, X-14, U-02 |
 | Compromised update or rollback | Persistent unauthorized code or lost data | Signed artifacts, tamper refusal, pinned provenance, migration/rollback with user-data retention and malicious update tests | WP-08; F-10-07, F-06-09 |
-| Windows Firewall rule for the bundled daemon (desktop consent step, 2026-10-21) | Host exposure, owner consent | Added only after the user presses "Allow on private networks" and confirms the Windows elevation (UAC) prompt; one inbound rule "Common (paired devices)" scoped to the bundled common.exe path, UDP, Private profile only, never Public/Domain or all programs; the elevated cmd.exe runs from System32 so a planted netsh.exe in the app folder cannot run elevated; the daemon still refuses unpaired keys before any work and pairing still needs the SPAKE2 code; the notice stays while Windows treats the current network as Public (the rule does not apply there). Detection is one read-only PowerShell query (`Get-NetFirewallRule -DisplayName` with its port and application filters, non-localized enum values, UTF-8, ending with an `end` marker); a read that fails or stops early is reported as not read, never as "no rule". Allow deletes only this program's own rule (`delete rule name=… program=<path>`), so other Windows accounts' rules of the same name stay. Both reads keep their errors and the script throws anything but a not-found error before `end` (round 2, 2026-10-22). The app counts the daemon as its own only once its own child has printed `listening on http://127.0.0.1:8192` (on stdout or stderr; exact match after trimming trailing whitespace) and while it runs (round 5, ffe1a47); while it is still starting the firewall commands wait up to 20 s. A daemon it adopted, one that has exited, or another daemon holding 8192 while its own is still starting is neither checked nor given a rule (status `adopted`, Allow refused), and on Windows Quit sends `POST /api/shutdown` only to a daemon its own child bound, otherwise it kills its own child, so it never asks another daemon to stop. Domain-profile networks are reported (`domain_networks`) with a note pointing to the administrator. Limits: a first launch that downloads the engine for longer than 20 s reads `adopted` until the UI reads again; the ownership check relies on the CLI's listening line, pinned by a desktop test that reads the CLI source, not by a CLI test; a stale rule this account added for an older install path is no longer removed (Private UDP for a program that is gone); per-user uninstall cannot remove the rule (no elevation); the PowerShell read is unit-tested on its parser and script text only and still needs a physical Windows check (including an access-denied or provider-failure case), ideally on a localized Windows or under a non-ASCII user name | apps/desktop/src-tauri/src/firewall.rs; apps/desktop/src-tauri/src/lib.rs (`a_daemon_still_starting_is_not_ours_until_it_binds_the_port`, `the_listening_line_for_our_address_marks_the_bind`, `quit_asks_the_port_to_stop_only_when_our_daemon_bound_it`, `a_daemon_that_exited_is_no_longer_ours`); F-10-05; the consent step itself evidenced on the laptop 2026-10-22 (`docs/evidence/mesh-physical-2026-10-22-eduroam.md`, netsh-era detection) |
+| Windows Firewall rule for the bundled daemon (desktop consent step, 2026-10-21) | Host exposure, owner consent | Added only after the user presses "Allow on private networks" and confirms the Windows elevation (UAC) prompt; one inbound rule "UCompute (paired devices)" scoped to the bundled ucompute.exe path, UDP, Private profile only, never Public/Domain or all programs; the elevated cmd.exe runs from System32 so a planted netsh.exe in the app folder cannot run elevated; the daemon still refuses unpaired keys before any work and pairing still needs the SPAKE2 code; the notice stays while Windows treats the current network as Public (the rule does not apply there). Detection is one read-only PowerShell query (`Get-NetFirewallRule -DisplayName` with its port and application filters, non-localized enum values, UTF-8, ending with an `end` marker); a read that fails or stops early is reported as not read, never as "no rule". Allow deletes only this program's own rule (`delete rule name=… program=<path>`), so other Windows accounts' rules of the same name stay. Both reads keep their errors and the script throws anything but a not-found error before `end` (round 2, 2026-10-22). The app counts the daemon as its own only once its own child has printed `listening on http://127.0.0.1:8192` (on stdout or stderr; exact match after trimming trailing whitespace) and while it runs (round 5, ffe1a47); while it is still starting the firewall commands wait up to 20 s. A daemon it adopted, one that has exited, or another daemon holding 8192 while its own is still starting is neither checked nor given a rule (status `adopted`, Allow refused), and on Windows Quit sends `POST /api/shutdown` only to a daemon its own child bound, otherwise it kills its own child, so it never asks another daemon to stop. Domain-profile networks are reported (`domain_networks`) with a note pointing to the administrator. Limits: a first launch that downloads the engine for longer than 20 s reads `adopted` until the UI reads again; the ownership check relies on the CLI's listening line, pinned by a desktop test that reads the CLI source, not by a CLI test; a stale rule this account added for an older install path is no longer removed (Private UDP for a program that is gone); per-user uninstall cannot remove the rule (no elevation); the PowerShell read is unit-tested on its parser and script text only and still needs a physical Windows check (including an access-denied or provider-failure case), ideally on a localized Windows or under a non-ASCII user name | apps/desktop/src-tauri/src/firewall.rs; apps/desktop/src-tauri/src/lib.rs (`a_daemon_still_starting_is_not_ours_until_it_binds_the_port`, `the_listening_line_for_our_address_marks_the_bind`, `quit_asks_the_port_to_stop_only_when_our_daemon_bound_it`, `a_daemon_that_exited_is_no_longer_ours`); F-10-05; the consent step itself evidenced on the laptop 2026-10-22 (`docs/evidence/mesh-physical-2026-10-22-eduroam.md`, netsh-era detection) |
 | Compromised or misleading public site, download page or DNS | Installer integrity, visitor privacy, user trust | Hashes and signatures published only from the docs/VERIFICATION.md promotion record and checked by the F-10-07 updater independently of the site; no third-party analytics or tracking; claim check before each publication; preview access enforced at the hosting layer | WP-08/13; F-10-07, F-06-09, X-14; spec §29.5 |
 
 Residual risk (D-019 self-compute exclusion). Beneficial ownership and economic control cannot be established perfectly in a decentralized network: one person can operate unlinked accounts, devices, network paths and payment instruments that no proportionate check connects. The controls above detect common links and bound the gain rather than eliminate it. Under backed issuance an undetected self-dealing cycle with purchased credits retires the platform fee and creates no credits while its funding stays collected; if the funding purchase is charged back or a usage bill fails after the colluding provider's share is released, that share is a credit backed only by the loss reserve, bounded per requester and in total by the exposure limits X_t and dispute-window holds and counted in L_t. The remaining exposure is grant-funded cycles (bounded by per-identity and per-period grant budgets), contribution history, reputation and reciprocity priority bought with self-dealt volume at the cost of the platform fee (F-07-08 lower-confidence weighting bounds identity count, not history one identity buys; the U-05 collusion simulation bounds the resulting grant and fair-access gain), and distorted demand, liquidity and capacity-coverage measurements in the spec §29.4 model, which therefore report detected self-dealing volume and exclude it. Trusted access shares the same limit: an owner can allowlist identities it controls, which is harmless because trusted jobs earn nothing and add no contribution weight. A modified grantee client can strip the originating funding class and resell free capacity out of band; this creates no credits, because the buyer's spend backs the earning, but it breaches the granting owner's consent. It is bounded by that grant's limits and schedule, the owner's activity review and revocation, and for fair access by the Sybil-bounded share.

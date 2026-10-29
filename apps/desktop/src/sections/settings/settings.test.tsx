@@ -60,7 +60,7 @@ describe("Settings", () => {
     await open("general");
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     expect(ui.get().theme).toBe("dark");
-    expect(JSON.parse(localStorage.getItem("common.ui")!).theme).toBe("dark");
+    expect(JSON.parse(localStorage.getItem("ucompute.ui")!).theme).toBe("dark");
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
     await user.click(screen.getByRole("radio", { name: "System" }));
     await waitFor(() => expect(document.documentElement.dataset.theme).toBeUndefined());
@@ -150,7 +150,7 @@ describe("Settings", () => {
     await user.click(screen.getByRole("button", { name: "Delete chat history on this computer" }));
     await user.click(within(screen.getByRole("group", { name: "Delete chat history?" })).getByRole("button", { name: "Delete chat history" }));
     expect(chatHistory.get().messages).toEqual([]);
-    expect(JSON.parse(localStorage.getItem("common.chat")!)).toEqual({ messages: [] });
+    expect(JSON.parse(localStorage.getItem("ucompute.chat")!)).toEqual({ messages: [] });
     expect(screen.getByRole("button", { name: "Delete chat history on this computer" })).toHaveProperty("disabled", true);
   });
 

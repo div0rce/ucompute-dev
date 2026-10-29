@@ -1,0 +1,38 @@
+[package]
+name = "ucompute-api"
+description = "Local HTTP API: OpenAI-compatible endpoints, health, metrics, admission control (F-09-01..03, F-08-08)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucompute-core = { workspace = true }
+ucompute-hardware = { workspace = true }
+ucompute-models = { workspace = true }
+ucompute-artifacts = { workspace = true }
+ucompute-runtime = { workspace = true }
+ucompute-identity = { workspace = true }
+ucompute-policy = { workspace = true }
+ucompute-observability = { workspace = true }
+ucompute-network = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prometheus = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# gethostname for `mesh::device_name` (already in the build through ucompute-cli).
+libc = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+async-trait = { workspace = true }

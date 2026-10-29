@@ -1,4 +1,4 @@
-//! Thin shell: make sure the Common daemon is serving on loopback, tell the UI where it is, restart the
+//! Thin shell: make sure the UCompute daemon is serving on loopback, tell the UI where it is, restart the
 //! daemon this app started when it dies, keep its output in a capped log, and stop it again on exit.
 //! Everything else is HTTP from the webview.
 
@@ -17,12 +17,12 @@ use tauri_plugin_shell::ShellExt;
 mod firewall;
 
 /// The exact arguments the app starts the bundled daemon with, one whitespace-separated line.
-/// `crates/common-cli/tests/desktop_sidecar.rs` and `scripts/build-sidecar.mjs` read the same file and
+/// `crates/ucompute-cli/tests/desktop_sidecar.rs` and `scripts/build-sidecar.mjs` read the same file and
 /// fail when the CLI they build does not accept these arguments, so the app and its bundled daemon
 /// cannot drift apart again (a stale sidecar rejected `--exit-with-parent` and never started).
 const DAEMON_ARGS: &str = include_str!("../daemon-args.txt");
-/// Basename of the `bundle.externalBin` entry in tauri.conf.json (`binaries/common`).
-const SIDECAR: &str = "common"; // tauri resolves sidecars by basename next to the app executable
+/// Basename of the `bundle.externalBin` entry in tauri.conf.json (`binaries/ucompute`).
+const SIDECAR: &str = "ucompute"; // tauri resolves sidecars by basename next to the app executable
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a quitting app waits for the daemon to stop its engine and exit after it was asked to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -79,7 +79,7 @@ fn end_with_this_app(pid: u32) {
             ok
         };
     if !assigned {
-        eprintln!("common-desktop: could not tie the daemon to this app; it may outlive a crash");
+        eprintln!("ucompute-desktop: could not tie the daemon to this app; it may outlive a crash");
     }
 }
 
@@ -212,7 +212,7 @@ impl Daemon {
     fn new(log_path: Option<PathBuf>) -> Self {
         let log = log_path.as_deref().and_then(|p| {
             LogFile::open(p, LOG_CAP)
-                .map_err(|e| eprintln!("common-desktop: cannot open the daemon log {}: {e}", p.display()))
+                .map_err(|e| eprintln!("ucompute-desktop: cannot open the daemon log {}: {e}", p.display()))
                 .ok()
         });
         Daemon {
@@ -230,15 +230,15 @@ impl Daemon {
     fn log(&self, line: &[u8]) {
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(Err(e)) = log.as_mut().map(|f| f.write_line(line)) {
-            eprintln!("common-desktop: cannot write the daemon log: {e}; not writing it any more");
+            eprintln!("ucompute-desktop: cannot write the daemon log: {e}; not writing it any more");
             *log = None;
         }
     }
 
     /// This shell's own line about the daemon: on stderr and in the log.
     fn note(&self, msg: &str) {
-        eprintln!("common-desktop: {msg}");
-        self.log(format!("common-desktop: {msg}").as_bytes());
+        eprintln!("ucompute-desktop: {msg}");
+        self.log(format!("ucompute-desktop: {msg}").as_bytes());
     }
 
     /// The daemon this app started exited with `code`: the wait before restarting it, or `None` when it is not
@@ -371,8 +371,8 @@ impl Run {
     }
 }
 
-/// `common serve` prints `listening on http://<addr>` once it has bound its port, before it starts
-/// peer networking or anything else (crates/common-cli `serve`). Changing that line makes the app
+/// `ucompute serve` prints `listening on http://<addr>` once it has bound its port, before it starts
+/// peer networking or anything else (crates/ucompute-cli `serve`). Changing that line makes the app
 /// treat its own daemon as another one: fail closed (no firewall check, Quit kills it on Windows).
 fn is_listening_line(line: &[u8], addr: SocketAddr) -> bool {
     String::from_utf8_lossy(line).trim_end() == format!("listening on http://{addr}")
@@ -403,12 +403,12 @@ fn stop_daemon(child: CommandChild, run: &Run) {
             std::thread::sleep(Duration::from_millis(50));
         }
         if exited.load(Ordering::SeqCst) {
-            eprintln!("common-desktop: daemon stopped");
+            eprintln!("ucompute-desktop: daemon stopped");
             return;
         }
-        eprintln!("common-desktop: daemon still running {STOP_TIMEOUT:?} after the stop request; killing it");
+        eprintln!("ucompute-desktop: daemon still running {STOP_TIMEOUT:?} after the stop request; killing it");
     } else {
-        eprintln!("common-desktop: could not ask the daemon to stop; killing it");
+        eprintln!("ucompute-desktop: could not ask the daemon to stop; killing it");
     }
     // The daemon's own job object ends its engine on Windows.
     let _ = child.kill();
@@ -493,7 +493,7 @@ fn quit_on_signals(handle: tauri::AppHandle) {
     }
     std::thread::spawn(move || loop {
         if QUIT_SIGNAL.load(Ordering::SeqCst) {
-            eprintln!("common-desktop: quit signal received");
+            eprintln!("ucompute-desktop: quit signal received");
             handle.exit(0);
             return;
         }
@@ -536,7 +536,7 @@ fn spawn_daemon(app: &tauri::AppHandle, s: &mut Supervised) -> bool {
     let daemon = app.state::<Daemon>();
     let addr = daemon_addr();
     // The sidecar may be absent in `pnpm dev` without a packaged binary; the UI then shows
-    // "service not running" and the developer starts `common serve` by hand.
+    // "service not running" and the developer starts `ucompute serve` by hand.
     let started = match app.shell().sidecar(SIDECAR) {
         Ok(cmd) => cmd
             .args(daemon_args())
@@ -570,7 +570,7 @@ fn spawn_daemon(app: &tauri::AppHandle, s: &mut Supervised) -> bool {
                     if is_listening_line(&l, addr) {
                         ev_run.bound.store(true, Ordering::SeqCst);
                     }
-                    eprint!("common: {}", String::from_utf8_lossy(&l));
+                    eprint!("ucompute: {}", String::from_utf8_lossy(&l));
                     daemon.log(&l);
                 }
                 CommandEvent::Terminated(p) => {
@@ -759,7 +759,7 @@ mod tests {
         ));
         // The CLI's own line (`serve`, printed right after the bind): a change there fails here instead of
         // silently making the app's own daemon "not ours".
-        assert!(include_str!("../../../../crates/common-cli/src/main.rs")
+        assert!(include_str!("../../../../crates/ucompute-cli/src/main.rs")
             .contains(r#"println!("listening on http://{addr}");"#));
     }
 
@@ -862,7 +862,7 @@ mod tests {
         let text = fs::read_to_string(&log).unwrap();
         assert!(
             text.ends_with(
-                "common-desktop: could not start the daemon in 3 restart attempts within 60s; not trying again\n"
+                "ucompute-desktop: could not start the daemon in 3 restart attempts within 60s; not trying again\n"
             ),
             "{text}"
         );
@@ -883,7 +883,7 @@ mod tests {
         let text = fs::read_to_string(&log).unwrap();
         assert!(
             text.ends_with(
-                "common-desktop: the daemon exited again after 3 restart attempts within 60s; not restarting it\n"
+                "ucompute-desktop: the daemon exited again after 3 restart attempts within 60s; not restarting it\n"
             ),
             "{text}"
         );
@@ -919,9 +919,9 @@ mod tests {
         assert!(!d.lock().start_failed);
     }
 
-    /// A fresh `<temp>/common-desktop-<name>-<pid>/daemon.log` path; returns the folder and the path.
+    /// A fresh `<temp>/ucompute-desktop-<name>-<pid>/daemon.log` path; returns the folder and the path.
     fn temp_log(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("common-desktop-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ucompute-desktop-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let log = dir.join("daemon.log");
         (dir, log)
@@ -931,7 +931,7 @@ mod tests {
     /// the older one), so two files at most, the newest lines in `daemon.log`; a restarted app appends.
     #[test]
     fn the_daemon_log_rotates_at_its_cap_and_keeps_one_older_file() {
-        let dir = std::env::temp_dir().join(format!("common-desktop-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ucompute-desktop-log-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("logs").join("daemon.log");
         let older = dir.join("logs").join("daemon.log.1");

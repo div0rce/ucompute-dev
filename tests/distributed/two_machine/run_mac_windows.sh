@@ -6,18 +6,18 @@
 # either app, a wrong code typed by hand, the Windows firewall consent step, the Mac-side group and run steps.
 #
 #   WIN_HOST=<laptop ip or name> OUT=<evidence dir> [NO_MDNS=1] [STEPS=...] [MESH=0] [HOLD=0] \
-#     [CROSS_HOLD=1 [BIN=<common binary>]] tests/distributed/two_machine/run_mac_windows.sh
+#     [CROSS_HOLD=1 [BIN=<ucompute binary>]] tests/distributed/two_machine/run_mac_windows.sh
 #
 # B's API (127.0.0.1:8192 on the laptop) is reached through an SSH tunnel on 18302, closed when the run ends;
-# nothing on the laptop listens beyond loopback except Common's own authenticated peer transport. cdp.mjs
+# nothing on the laptop listens beyond loopback except UCompute's own authenticated peer transport. cdp.mjs
 # needs its own tunnel to the app's WebView2 debugging port, opened by hand and closed after use:
 # ssh -f -N -L 19222:127.0.0.1:9222 <user>@<laptop>.
-# B is quit, crashed and started through the scheduled tasks CommonTestQuit (taskkill without /f, like
-# closing the window), Stop-Process -Force and CommonTestLaunch, which run in the signed-in desktop session
+# B is quit, crashed and started through the scheduled tasks UComputeTestQuit (taskkill without /f, like
+# closing the window), Stop-Process -Force and UComputeTestLaunch, which run in the signed-in desktop session
 # (setup: docs/environment/windows-test-host.md). The quit step passes only when A saw B's daemon close the
 # connection itself (peer_lost "closed_by_peer"), not the app's kill fallback.
-# CROSS_HOLD=1 starts two throwaway daemons on this Mac (BIN, default the installed app's `common`; fresh
-# COMMON_HOMEs that link this checkout's .common engines and models; peer endpoints on 18431/18432, which B
+# CROSS_HOLD=1 starts two throwaway daemons on this Mac (BIN, default the installed app's `ucompute`; fresh
+# UCOMPUTE_HOMEs that link this checkout's .ucompute engines and models; peer endpoints on 18431/18432, which B
 # must reach) for the hold driver's cross-hold step; they are stopped and their homes deleted at the end.
 # A driver whose step FAILed (exit 3) does not stop the run; the run then exits 1. A driver that stops (exit 1)
 # ends the run. Whatever happens, both sides are put back as saved (state.py), with B's app started and the
@@ -26,7 +26,7 @@ set -euo pipefail  # a crashed driver must stop the run, not hide behind tee
 cd "$(dirname "$0")/../../.."
 : "${WIN_HOST:?set WIN_HOST}" "${OUT:?set OUT}"
 export WIN_HOST
-KEY="${WIN_KEY:-$HOME/.ssh/common_hp_ed25519}"
+KEY="${WIN_KEY:-$HOME/.ssh/ucompute_hp_ed25519}"
 USER_="${WIN_USER:-jessg}"
 H=scripts/windows-host.sh
 mkdir -p "$OUT"
@@ -42,11 +42,11 @@ tunnel() {  # (re)open the tunnel to B's API, at the address the wifi step last 
 }
 tunnel || exit 1
 
-QUIT="$H run 'schtasks /run /tn CommonTestQuit'"
-CRASH="$H ps 'Stop-Process -Name common-desktop -Force'"
-START="$H run 'schtasks /run /tn CommonTestLaunch'"
-PROCS="$H ps '@(Get-Process common,llama-server -ErrorAction SilentlyContinue).Count'"
-WIFI="$H run 'schtasks /run /tn CommonTestWifi'"  # disconnects B's Wi-Fi and rejoins the same profile (detached on B)
+QUIT="$H run 'schtasks /run /tn UComputeTestQuit'"
+CRASH="$H ps 'Stop-Process -Name ucompute-desktop -Force'"
+START="$H run 'schtasks /run /tn UComputeTestLaunch'"
+PROCS="$H ps '@(Get-Process ucompute,llama-server -ErrorAction SilentlyContinue).Count'"
+WIFI="$H run 'schtasks /run /tn UComputeTestWifi'"  # disconnects B's Wi-Fi and rejoins the same profile (detached on B)
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
@@ -75,14 +75,14 @@ trap cleanup EXIT
 
 XHOLD=""
 if [ "${CROSS_HOLD:-}" = 1 ]; then
-  BIN="${BIN:-/Applications/Common.app/Contents/MacOS/common}"
-  XH=$(mktemp -d "${TMPDIR:-/tmp}/common-xhold.XXXXXX")
+  BIN="${BIN:-/Applications/UCompute.app/Contents/MacOS/ucompute}"
+  XH=$(mktemp -d "${TMPDIR:-/tmp}/ucompute-xhold.XXXXXX")
   xdaemon() {  # name api-port peer-port: a throwaway daemon (a child of this script, so cleanup stops it)
     mkdir -p "$XH/$1/models"
-    ln -s "$PWD/.common/backends" "$XH/$1/backends"
-    ln -s "$PWD/.common/models/blobs" "$XH/$1/models/blobs"
-    ln -s "$PWD/.common/models/manifests" "$XH/$1/models/manifests"
-    COMMON_HOME="$XH/$1" "$BIN" serve --port "$2" --network --serve-peers --listen-port "$3" --no-mdns \
+    ln -s "$PWD/.ucompute/backends" "$XH/$1/backends"
+    ln -s "$PWD/.ucompute/models/blobs" "$XH/$1/models/blobs"
+    ln -s "$PWD/.ucompute/models/manifests" "$XH/$1/models/manifests"
+    UCOMPUTE_HOME="$XH/$1" "$BIN" serve --port "$2" --network --serve-peers --listen-port "$3" --no-mdns \
       >"$OUT/xhold-$1.log" 2>&1 &
     for _ in $(seq 60); do curl -s -m 1 "127.0.0.1:$2/health" >/dev/null && return 0; sleep 0.5; done
     echo "throwaway daemon $1 did not answer: $OUT/xhold-$1.log"

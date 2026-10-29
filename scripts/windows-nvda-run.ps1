@@ -1,4 +1,4 @@
-# NVDA (2026.2 portable; sha256 f3f8d299…ca824, nvaccess.org release post) speech capture for the Common app on a test laptop (a test with NVDA itself, silent):
+# NVDA (2026.2 portable; sha256 f3f8d299…ca824, nvaccess.org release post) speech capture for the UCompute app on a test laptop (a test with NVDA itself, silent):
 #   start: refuse unless the signed-in user has been idle -MinIdle seconds and no NVDA runs; start a portable
 #          NVDA with a seeded config (silence synth, no sounds, no browse mode on page load, no update or
 #          add-on network checks) logging at level IO (12) to a raw log; bring the app window to the front.
@@ -23,13 +23,13 @@ $status = Join-Path $Work "nvda-status.txt"
 function Running { (Start-Process $exe -ArgumentList "-k" -Wait -PassThru).ExitCode -eq 0 }
 
 if ($Action -eq "start") {
-    Add-Type -Namespace Common -Name Idle -MemberDefinition @'
+    Add-Type -Namespace UCompute -Name Idle -MemberDefinition @'
 [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
 [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 '@
-    $i = New-Object Common.Idle+LASTINPUTINFO
+    $i = New-Object UCompute.Idle+LASTINPUTINFO
     $i.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($i)
-    [void][Common.Idle]::GetLastInputInfo([ref]$i)
+    [void][UCompute.Idle]::GetLastInputInfo([ref]$i)
     $idle = [math]::Round(([Environment]::TickCount - $i.dwTime) / 1000)
     if ($idle -lt $MinIdle) { "REFUSED idle_s=$idle (someone is using this computer)" | Set-Content $status; exit 3 }
     if (Running) { "REFUSED an NVDA is already running in this session" | Set-Content $status; exit 3 }

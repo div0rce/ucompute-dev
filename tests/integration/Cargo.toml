@@ -1,5 +1,5 @@
 [package]
-name = "common-integration-tests"
+name = "ucompute-integration-tests"
 description = "End-to-end tests that run the real pinned engine on real GGUF fixtures"
 version.workspace = true
 edition.workspace = true
@@ -10,12 +10,12 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-common-core = { workspace = true }
-common-hardware = { workspace = true }
-common-models = { workspace = true }
-common-artifacts = { workspace = true }
-common-runtime = { workspace = true }
-common-api = { workspace = true }
+ucompute-core = { workspace = true }
+ucompute-hardware = { workspace = true }
+ucompute-models = { workspace = true }
+ucompute-artifacts = { workspace = true }
+ucompute-runtime = { workspace = true }
+ucompute-api = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }

@@ -24,8 +24,8 @@ EOF
 done
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/ssh"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/curl"
-printf '#!/bin/sh\necho $$ >>"$LOG.pids"\nwhile :; do sleep 1; done\n' > "$tmp/bin/fake-common"  # runs until stopped
-chmod +x "$tmp/bin/ssh" "$tmp/bin/curl" "$tmp/bin/fake-common"
+printf '#!/bin/sh\necho $$ >>"$LOG.pids"\nwhile :; do sleep 1; done\n' > "$tmp/bin/fake-ucompute"  # runs until stopped
+chmod +x "$tmp/bin/ssh" "$tmp/bin/curl" "$tmp/bin/fake-ucompute"
 run() {  # env assignments...: run the runner, print its exit code
   ( cd "$tmp" && env PATH="$tmp/bin:$PATH" LOG="$tmp/log" WIN_HOST=x OUT="$tmp/out" TMPDIR="$tmp" "$@" \
       bash r/tests/distributed/two_machine/run_mac_windows.sh >"$tmp/console" 2>&1 && echo 0 || echo $? )
@@ -57,9 +57,9 @@ sleep 5  # a driver left running would log "done" by now
 grep -q '^state restore' "$tmp/log" || fail "SIGTERM must still restore"
 
 : > "$tmp/log"
-[ "$(run CROSS_HOLD=1 BIN="$tmp/bin/fake-common")" = 0 ] || { cat "$tmp/console"; fail "a CROSS_HOLD run exits 0"; }
+[ "$(run CROSS_HOLD=1 BIN="$tmp/bin/fake-ucompute")" = 0 ] || { cat "$tmp/console"; fail "a CROSS_HOLD run exits 0"; }
 grep -q '^hold .*--c http://127.0.0.1:18331 --d http://127.0.0.1:18332' "$tmp/log" || fail "hold must get --c and --d"
 [ "$(wc -l <"$tmp/log.pids")" -eq 2 ] || fail "two throwaway daemons must start"
 for p in $(cat "$tmp/log.pids"); do ! kill -0 "$p" 2>/dev/null || fail "the throwaway daemons must be stopped"; done
-! ls -d "$tmp"/common-xhold.* >/dev/null 2>&1 || fail "the throwaway homes must be deleted"
+! ls -d "$tmp"/ucompute-xhold.* >/dev/null 2>&1 || fail "the throwaway homes must be deleted"
 echo "PASS runner flow"

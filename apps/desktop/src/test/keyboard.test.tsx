@@ -86,6 +86,6 @@ describe("keyboard-only primary flow", () => {
     expect(saved[1].content.length).toBeGreaterThan(0);
     expect(saved[1].content.length).toBeLessThan(200 * 6);
     // History is kept locally only.
-    expect(localStorage.getItem("common.chat")).toContain("Hello there");
+    expect(localStorage.getItem("ucompute.chat")).toContain("Hello there");
   }, 30000);
 });

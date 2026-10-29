@@ -1,6 +1,6 @@
 """Offline checks of the two-machine runner scripts (run_*.sh): they parse, shellcheck finds nothing, and each one
 stops on each missing required variable before it reaches any host. ssh, curl and the other tools a runner drives are
-stubs that record a call and fail, so no machine, daemon or network is involved and nothing here is evidence of Common.
+stubs that record a call and fail, so no machine, daemon or network is involved and nothing here is evidence of UCompute.
 Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 """
 import glob

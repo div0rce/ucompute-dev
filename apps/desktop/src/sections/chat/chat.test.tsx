@@ -98,7 +98,7 @@ describe("session controller", () => {
     const seen: { header?: string; registered?: string[] } = {};
     const serve = fake.fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
     fake.fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/v1/chat/completions")) Object.assign(seen, { header: (init?.headers as Record<string, string>)["X-Common-Client-Ref"], registered: Object.keys(ownStreams.get()) });
+      if (String(input).endsWith("/v1/chat/completions")) Object.assign(seen, { header: (init?.headers as Record<string, string>)["X-UCompute-Client-Ref"], registered: Object.keys(ownStreams.get()) });
       return serve(input, init);
     });
     await user.type(await open(fake), "Hi{Enter}");
@@ -121,7 +121,7 @@ describe("session controller", () => {
     fake.loaded = LOADED;
     await user.type(await open(fake), "Hi{Enter}");
     await screen.findByText(/4 tokens/);
-    expect((chatCall(fake)[1] as RequestInit).headers).not.toHaveProperty("X-Common-Client-Ref");
+    expect((chatCall(fake)[1] as RequestInit).headers).not.toHaveProperty("X-UCompute-Client-Ref");
     expect(replies().some((m) => m.client_ref)).toBe(false);
   });
 

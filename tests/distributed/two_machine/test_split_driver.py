@@ -1,7 +1,7 @@
 """Offline checks of split_two_machine.py, the WP-04 P1 driver, against SYNTHETIC fake daemons (fake_mesh.SplitMesh):
 canned completions, timings, counters and shell outputs; no machine, daemon, network or inference is involved, so
-nothing here is evidence of Common. Also checks that its lab-input.json is accepted by the Core Lab's scorer
-(ucompute-core-lab p1-predictions/score_p1.py, read only; skipped when that checkout is absent; set COMMON_CORE_LAB).
+nothing here is evidence of UCompute. Also checks that its lab-input.json is accepted by the Core Lab's scorer
+(ucompute-core-lab p1-predictions/score_p1.py, read only; skipped when that checkout is absent; set UCOMPUTE_CORE_LAB).
 Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 """
 import importlib.util
@@ -16,7 +16,7 @@ from pathlib import Path
 import fake_mesh
 
 HERE = Path(__file__).parent
-LAB = Path(os.environ.get("COMMON_CORE_LAB",
+LAB = Path(os.environ.get("UCOMPUTE_CORE_LAB",
                           "/Users/nasr/repos/ucompute-core-lab/.claude/worktrees/eloquent-williamson-2da66b"))
 SCORER = LAB / "p1-predictions" / "score_p1.py"
 D = fake_mesh.load("split_two_machine.py")
@@ -106,15 +106,15 @@ class SplitDriverSyntheticTests(unittest.TestCase):
         self.assertEqual(len(steps["canary_scan"]["hits"]["h"]), 1)
 
     def test_parsers(self):
-        ss = ('tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("common",pid=1,fd=9))\n'
-              'udp UNCONN 0 0 0.0.0.0:8193 0.0.0.0:* users:(("common",pid=1,fd=10))\n'
+        ss = ('tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("ucompute",pid=1,fd=9))\n'
+              'udp UNCONN 0 0 0.0.0.0:8193 0.0.0.0:* users:(("ucompute",pid=1,fd=10))\n'
               "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
               'tcp LISTEN 0 1 127.0.0.1:40001 0.0.0.0:* users:(("ggml-rpc-server",pid=2,fd=3))\n')
         self.assertEqual(D.listeners_bad(ss), ["tcp 127.0.0.1:40001 ggml-rpc-server"])
         self.assertEqual(D.listeners_bad(ss, rpc_allowed=True), [])
         self.assertEqual(D.rpc_ports(ss), [40001])
-        self.assertEqual(D.listeners_bad('tcp LISTEN 0 1 0.0.0.0:8192 0.0.0.0:* users:(("common",pid=1,fd=9))'),
-                         ["tcp 0.0.0.0:8192 common"])
+        self.assertEqual(D.listeners_bad('tcp LISTEN 0 1 0.0.0.0:8192 0.0.0.0:* users:(("ucompute",pid=1,fd=9))'),
+                         ["tcp 0.0.0.0:8192 ucompute"])
         self.assertEqual(D.listeners_bad('tcp LISTEN 0 1 0.0.0.0:41 0.0.0.0:* users:(("ggml-rpc-server",pid=2,fd=3))',
                                          rpc_allowed=True), ["tcp 0.0.0.0:41 ggml-rpc-server"])
         self.assertEqual(D.who_others("me pts/0 x (10.0.0.1)\nssh_client=10.0.0.1\n"), [])
@@ -136,7 +136,7 @@ class SplitDriverSyntheticTests(unittest.TestCase):
         runs = [t.run("R1a", p, n, 14150, 3592, 1.0, 36.0, 230.0) for p, n in ((1, 44), (2, 50), (3, 47))]
         runs += [t.run("R1b", 1, 44, 21830, 6152, 1.0, 54.0, 350.0)]
         for r in runs:
-            del r["ids"]  # Common's /v1/completions returns no token ids
+            del r["ids"]  # UCompute's /v1/completions returns no token ids
             self.assertEqual(D.per_token(r["counters"]), s.per_token(r["counters"]))
         rc, out, err = score(json.dumps(D.lab_input(runs, "wifi")))
         self.assertEqual(rc, 0, err)

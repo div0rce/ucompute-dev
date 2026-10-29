@@ -1,13 +1,13 @@
 [package]
-name = "common-desktop"
+name = "ucompute-desktop"
 version = "0.1.0"
-description = "Common desktop application (Tauri shell around the Common daemon)"
+description = "UCompute desktop application (Tauri shell around the UCompute daemon)"
 license = "Apache-2.0"
 edition = "2021"
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin name (matters on Windows).
-name = "common_desktop_lib"
+name = "ucompute_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

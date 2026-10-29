@@ -10,7 +10,7 @@ export interface Settings {
   /** Name other devices see when pairing with this one; empty means the daemon's (this computer's own name). */
   device_name: string;
 }
-export const settings = createStore<Settings>({ device: "auto", n_ctx: null, device_name: "" }, "common.settings");
+export const settings = createStore<Settings>({ device: "auto", n_ctx: null, device_name: "" }, "ucompute.settings");
 // "This Mac" was the hard-coded default before the daemon reported a name, persisted by any settings change, and
 // a Windows laptop paired under it. Nobody chose it, so it means "not set".
 if (settings.get().device_name === "This Mac") settings.set({ ...settings.get(), device_name: "" });
@@ -50,7 +50,7 @@ export interface StoredMessage {
   target?: Target;
   /** Display name of the device for a peer target, captured at send time. */
   ran_on?: string;
-  /** The `X-Common-Client-Ref` this app sent with the request (matches `Job.client_ref`). */
+  /** The `X-UCompute-Client-Ref` this app sent with the request (matches `Job.client_ref`). */
   client_ref?: string;
   /** The response id (`chatcmpl-…`), which is the E3 job id. */
   job_id?: string;
@@ -58,7 +58,7 @@ export interface StoredMessage {
   device_actual?: string | null;
   finish_reason?: string | null;
 }
-export const chatHistory = createStore<{ messages: StoredMessage[] }>({ messages: [] }, "common.chat");
+export const chatHistory = createStore<{ messages: StoredMessage[] }>({ messages: [] }, "ucompute.chat");
 
 export const lastError = createStore<MappedError | null>(null);
 

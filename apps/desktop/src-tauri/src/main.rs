@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    common_desktop_lib::run()
+    ucompute_desktop_lib::run()
 }

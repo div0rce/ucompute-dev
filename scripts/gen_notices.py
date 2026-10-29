@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Write THIRD_PARTY_NOTICES for what a build ships, and refuse a licence outside deny.toml's allow list.
 
-  python3 scripts/gen_notices.py --out THIRD_PARTY_NOTICES.txt [--target <triple>] [--crate common-cli ...] [--js]
+  python3 scripts/gen_notices.py --out THIRD_PARTY_NOTICES.txt [--target <triple>] [--crate ucompute-cli ...] [--js]
 
-Rust: every crate reached from the named workspace crates (default: common-cli) through normal dependencies on the
+Rust: every crate reached from the named workspace crates (default: ucompute-cli) through normal dependencies on the
 target (default: this host), with its licence expression and the licence/notice files its package ships. --js adds
 the desktop app's production npm packages (pnpm) and the vendored Lucide icons. Identical licence texts are written
 once. Exit 1 when an expression is not satisfied by deny.toml's `allow` (ADR-0001: no GPL family).
@@ -123,7 +123,7 @@ def main():
     ap.add_argument("--crate", action="append", dest="crates")
     ap.add_argument("--js", action="store_true")
     a = ap.parse_args()
-    entries = rust(a.crates or ["common-cli"], a.target) + (js() if a.js else [])
+    entries = rust(a.crates or ["ucompute-cli"], a.target) + (js() if a.js else [])
     allow = allowed()
     bad = [(n, v, lic) for n, v, lic, _, _ in entries if not lic or not satisfied(lic, allow)]
     if bad:

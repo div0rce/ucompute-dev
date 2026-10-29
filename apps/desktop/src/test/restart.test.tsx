@@ -17,7 +17,7 @@ import { installFakeDaemon } from "./mocks";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const LOG = "/Users/someone/Library/Logs/org.commoncompute.desktop/daemon.log";
+const LOG = "/Users/someone/Library/Logs/org.ucompute.desktop/daemon.log";
 /** What the shell's `daemon_info` answers. */
 let shell: Record<string, unknown>;
 const w = window as unknown as Record<string, unknown>;

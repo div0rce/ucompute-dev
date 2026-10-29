@@ -21,11 +21,11 @@ describe("sseData", () => {
 
 describe("api errors", () => {
   it("turns an error body into ApiError with the stable code", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => apiError("model_not_found", "no such model", 404, "common models list")));
+    vi.stubGlobal("fetch", vi.fn(async () => apiError("model_not_found", "no such model", 404, "ucompute models list")));
     const err = await api.status().catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err.code).toBe("model_not_found");
-    expect(err.hint).toBe("common models list");
+    expect(err.hint).toBe("ucompute models list");
     expect(err.status).toBe(404);
   });
   it("reports an unreachable daemon when fetch itself fails", async () => {
@@ -86,10 +86,10 @@ describe("api.chat target", () => {
 describe("api.chat stream errors", () => {
   it("an error object inside the stream rejects with its typed code instead of an empty reply", async () => {
     // What openai.rs `stream_events` sends when the peer refuses after the stream opened.
-    vi.stubGlobal("fetch", vi.fn(async () => sse([{ error: { message: "model x is not downloaded", type: "invalid_request_error", code: "model_not_downloaded", param: null, hint: "common pull x" } }])));
+    vi.stubGlobal("fetch", vi.fn(async () => sse([{ error: { message: "model x is not downloaded", type: "invalid_request_error", code: "model_not_downloaded", param: null, hint: "ucompute pull x" } }])));
     const err = await api.chat({ model: "x", messages: [], target: `peer:${"ab".repeat(32)}` }, () => undefined).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
-    expect([err.code, err.message, err.hint]).toEqual(["model_not_downloaded", "model x is not downloaded", "common pull x"]);
+    expect([err.code, err.message, err.hint]).toEqual(["model_not_downloaded", "model x is not downloaded", "ucompute pull x"]);
   });
 });
 
@@ -203,14 +203,14 @@ describe("new routes and fields (E1–E5)", () => {
     fake.loading = { model_id: "m", since: Date.now() };
     expect(await api.ready()).toEqual({ status: "not_ready", reason: "a model is loading" });
   });
-  it("chat sends X-Common-Client-Ref only when given and captures the response id", async () => {
+  it("chat sends X-UCompute-Client-Ref only when given and captures the response id", async () => {
     const fake = installFakeDaemon();
     fake.loaded = LOADED;
     const r1 = await api.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }, () => undefined, undefined, { clientRef: "ref-1" });
     const r2 = await api.chat({ model: "m", messages: [{ role: "user", content: "hi" }] }, () => undefined);
     const [h1, h2] = fake.fetchMock.mock.calls.map(([, init]) => (init as RequestInit).headers as Record<string, string>);
-    expect(h1["X-Common-Client-Ref"]).toBe("ref-1");
-    expect(h2["X-Common-Client-Ref"]).toBeUndefined();
+    expect(h1["X-UCompute-Client-Ref"]).toBe("ref-1");
+    expect(h2["X-UCompute-Client-Ref"]).toBeUndefined();
     expect(r1.id).toMatch(/^chatcmpl-/);
     expect(r2.id).not.toBe(r1.id);
     // The fake registry recorded the ref on the job, as E3 does (recent rows newest first).

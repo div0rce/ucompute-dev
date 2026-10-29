@@ -2,6 +2,8 @@
 
 Working plan produced by an engineering-session workflow on 2026-10-23 (read-only audit and synthesis; not a decision record). Decisions live in docs/DECISIONS.md and docs/decisions/; status lives in docs/REQUIREMENTS.csv and docs/VERIFICATION.md.
 
+**Names (D-028, 2026-10-29).** This plan keeps the names it was written with. Read `crates/common-*` as `crates/ucompute-*`, `common` (binary and `-p` package) as `ucompute`, `COMMON_*` as `UCOMPUTE_*`, `.common` and `.common-split` as `.ucompute` and `.ucompute-split`, `~/src/common` as `~/src/ucompute` and `proto/common/v1` as `proto/ucompute/v1`. ADR-0005 §9 records the code as built.
+
 # WP-04 synthesis: split inference over the authenticated transport
 
 This is a read-only synthesis. Nothing was edited, built, run or committed. Code facts were re-checked at HEAD `177f7ed`. The working tree also holds uncommitted fix-round changes in `common-runtime`, `common-network`, `common-api` and `common-cli`, so line numbers will move. The plan starts only after that in-flight round is committed.

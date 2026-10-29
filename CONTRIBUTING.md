@@ -1,4 +1,4 @@
-# Contributing to Common
+# Contributing to UCompute
 
 Thanks for helping build the VLC of AI compute. This project is Apache-2.0 licensed; by contributing you agree your contribution is licensed the same way.
 
@@ -14,8 +14,8 @@ Thanks for helping build the VLC of AI compute. This project is Apache-2.0 licen
 ```sh
 cargo build
 cargo test                     # unit tests
-scripts/fetch-fixtures.sh      # pinned engine + tiny fixtures into ./.common
-COMMON_HOME=$PWD/.common cargo test   # also runs real-inference tests
+scripts/fetch-fixtures.sh      # pinned engine + tiny fixtures into ./.ucompute
+UCOMPUTE_HOME=$PWD/.ucompute cargo test # also runs real-inference tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```

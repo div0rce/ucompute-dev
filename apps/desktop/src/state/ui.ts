@@ -23,8 +23,8 @@ export interface UiPrefs {
   inspectors: Record<string, InspectorLayout>;
 }
 
-/** Per-viewer conveniences in localStorage `common.ui` (reads and writes in try/catch, in `createStore`). */
-export const ui = createStore<UiPrefs>({ theme: "system", tables: {}, inspectors: {} }, "common.ui");
+/** Per-viewer conveniences in localStorage `ucompute.ui` (reads and writes in try/catch, in `createStore`). */
+export const ui = createStore<UiPrefs>({ theme: "system", tables: {}, inspectors: {} }, "ucompute.ui");
 
 export function setTable(id: string, patch: Partial<TableLayout>): void {
   ui.set((u) => ({ ...u, tables: { ...u.tables, [id]: { ...u.tables[id], ...patch } } }));

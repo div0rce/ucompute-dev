@@ -12,7 +12,7 @@
       "health": "connected",
       "last_error": null,
       "capabilities": {
-        "common_version": "0.1.0",
+        "ucompute_version": "0.1.0",
         "protocol_minor": 1,
         "engines": ["llama.cpp b11609 macos-arm64"],
         "issued_at_utc": "2026-10-22T10:30:00Z",
@@ -73,7 +73,7 @@
       "addrs": ["192.168.1.77:8193", "10.0.0.9:8193"],
       "pairing": false,
       "pair_port": null,
-      "proto": "common/1",
+      "proto": "ucompute/1",
       "trusted": true,
       "seen_utc": "2026-10-22T10:30:05Z"
     },
@@ -83,7 +83,7 @@
       "addrs": ["192.168.1.80:8193"],
       "pairing": true,
       "pair_port": 51234,
-      "proto": "common/1",
+      "proto": "ucompute/1",
       "trusted": false,
       "seen_utc": "2026-10-22T10:30:04Z"
     }

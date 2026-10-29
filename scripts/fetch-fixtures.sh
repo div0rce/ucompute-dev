@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Fetch and verify this platform's pinned llama.cpp archive (read from catalog/backends.json: macos-arm64,
-# linux-x64) and the test models (catalog/models.json tags "fixture", plus "test-suite" under COMMON_REQUIRE_FIXTURES=1)
-# into the COMMON_HOME layout that crates/common-artifacts expects:
+# linux-x64) and the test models (catalog/models.json tags "fixture", plus "test-suite" under UCOMPUTE_REQUIRE_FIXTURES=1)
+# into the UCOMPUTE_HOME layout that crates/ucompute-artifacts expects:
 #   backends/llama.cpp/<archive>, backends/llama.cpp/<release>/, models/blobs/sha256-<hex>, models/manifests/<id>.json
 # Idempotent: existing files are re-hashed and kept; a hash mismatch deletes the file and exits 1.
-# Windows pins are .zip releases this script does not extract: there, run `common setup --fixtures`.
+# Windows pins are .zip releases this script does not extract: there, run `ucompute setup --fixtures`.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-COMMON_HOME="${COMMON_HOME:-$REPO/.common}"
+UCOMPUTE_HOME="${UCOMPUTE_HOME:-$REPO/.ucompute}"
 
-# This platform as crates/common-artifacts' current_platform() names it.
+# This platform as crates/ucompute-artifacts' current_platform() names it.
 case "$(uname -s)" in
   Darwin) os=macos ;;
   Linux) os=linux ;;
@@ -41,7 +41,7 @@ EOF
 case "$ARCHIVE_NAME" in
   *.tar.gz) ;;
   *)
-    echo "$PLATFORM pins $ARCHIVE_NAME, which this script does not extract: run \`common setup --fixtures\` instead" >&2
+    echo "$PLATFORM pins $ARCHIVE_NAME, which this script does not extract: run \`ucompute setup --fixtures\` instead" >&2
     exit 1
     ;;
 esac
@@ -68,9 +68,9 @@ fetch() {
   echo "verified $(basename "$dest")"
 }
 
-# manifest ID — write models/manifests/<id>.json from its catalog entry if missing, as `common models pull` does.
+# manifest ID — write models/manifests/<id>.json from its catalog entry if missing, as `ucompute models pull` does.
 manifest() {
-  local out="$COMMON_HOME/models/manifests/$1.json"
+  local out="$UCOMPUTE_HOME/models/manifests/$1.json"
   [ -f "$out" ] && return 0
   mkdir -p "$(dirname "$out")"
   python3 -I -c '
@@ -87,19 +87,19 @@ print(json.dumps({"schema_version": 1, "id": m["id"], "name": m["name"], "file_n
 }
 
 # --- backend archive + extraction ---
-fetch "$ARCHIVE_URL" "$ARCHIVE_SHA" "$COMMON_HOME/backends/llama.cpp/$ARCHIVE_NAME"
-if [ ! -d "$COMMON_HOME/backends/llama.cpp/$RELEASE" ]; then
-  tmp="$(mktemp -d "$COMMON_HOME/backends/llama.cpp/.extract-XXXXXX")"
-  tar -xzf "$COMMON_HOME/backends/llama.cpp/$ARCHIVE_NAME" -C "$tmp"
-  mv "$tmp/$ARCHIVE_DIR" "$COMMON_HOME/backends/llama.cpp/$RELEASE"
+fetch "$ARCHIVE_URL" "$ARCHIVE_SHA" "$UCOMPUTE_HOME/backends/llama.cpp/$ARCHIVE_NAME"
+if [ ! -d "$UCOMPUTE_HOME/backends/llama.cpp/$RELEASE" ]; then
+  tmp="$(mktemp -d "$UCOMPUTE_HOME/backends/llama.cpp/.extract-XXXXXX")"
+  tar -xzf "$UCOMPUTE_HOME/backends/llama.cpp/$ARCHIVE_NAME" -C "$tmp"
+  mv "$tmp/$ARCHIVE_DIR" "$UCOMPUTE_HOME/backends/llama.cpp/$RELEASE"
   rmdir "$tmp"
   echo "extracted backends/llama.cpp/$RELEASE"
 fi
 
 # --- model fixtures: catalog/models.json entries tagged "fixture" (the two TinyStories models) and, under
-# COMMON_REQUIRE_FIXTURES=1, also those tagged "test-suite" (about 3 GB), which the strict test suite loads ---
+# UCOMPUTE_REQUIRE_FIXTURES=1, also those tagged "test-suite" (about 3 GB), which the strict test suite loads ---
 tags=fixture
-if [ "${COMMON_REQUIRE_FIXTURES:-}" = 1 ]; then tags="fixture test-suite"; fi
+if [ "${UCOMPUTE_REQUIRE_FIXTURES:-}" = 1 ]; then tags="fixture test-suite"; fi
 models="$(python3 -I -c '
 import json, sys
 want = set(sys.argv[2].split())
@@ -112,10 +112,10 @@ if [ -z "$models" ]; then
   exit 1
 fi
 while read -r id sha url; do
-  fetch "$url" "$sha" "$COMMON_HOME/models/blobs/sha256-$sha"
+  fetch "$url" "$sha" "$UCOMPUTE_HOME/models/blobs/sha256-$sha"
   manifest "$id"
 done <<EOF
 $models
 EOF
 
-echo "fixtures ready in $COMMON_HOME"
+echo "fixtures ready in $UCOMPUTE_HOME"

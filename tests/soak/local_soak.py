@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Local soak of one daemon (platform readiness plan M5 step 1; F-08-08). Standard library only, loopback API only.
 
-It starts nothing. Point it at a daemon started with its own COMMON_HOME and port and no LAN listener:
+It starts nothing. Point it at a daemon started with its own UCOMPUTE_HOME and port and no LAN listener:
 
-  COMMON_HOME=~/.common-soak common serve --port 18500 >~/.common-soak.log 2>&1 &
-  python3 -I tests/soak/local_soak.py --api http://127.0.0.1:18500 --pid $! --home ~/.common-soak \
-    --log ~/.common-soak.log --hours 24 --out soak.jsonl
+  UCOMPUTE_HOME=~/.ucompute-soak ucompute serve --port 18500 >~/.ucompute-soak.log 2>&1 &
+  python3 -I tests/soak/local_soak.py --api http://127.0.0.1:18500 --pid $! --home ~/.ucompute-soak \
+    --log ~/.ucompute-soak.log --hours 24 --out soak.jsonl
 
 Each cycle runs, in an order drawn from --seed: a golden completion (JSON), a golden stream, a stream cancelled by
 closing the socket, a chat completion, a pull that must hit the cache, an overload burst, and every --kill-every
@@ -262,7 +262,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--api", default="http://127.0.0.1:18500")
     ap.add_argument("--pid", type=int, required=True, help="the daemon's pid")
-    ap.add_argument("--home", required=True, help="the daemon's COMMON_HOME")
+    ap.add_argument("--home", required=True, help="the daemon's UCOMPUTE_HOME")
     ap.add_argument("--log", help="the daemon's log file, for its size")
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--out", required=True)

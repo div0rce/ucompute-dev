@@ -7,7 +7,7 @@
 //! domain), where that rule does not apply. Other systems report `supported: false`.
 
 /// The one rule this app manages for its own program, replaced on every allow.
-pub const RULE_NAME: &str = "Common (paired devices)";
+pub const RULE_NAME: &str = "UCompute (paired devices)";
 
 /// Why status and Allow are not offered for a service the app did not start.
 pub const NOT_OURS: &str =
@@ -28,7 +28,7 @@ pub struct Status {
     /// there either, and the user cannot switch them to Private; their administrator decides.
     pub domain_networks: Vec<String>,
     /// The app adopted a service it did not start (already serving when it opened, or serving after
-    /// the app's own daemon exited). It may be another program than the bundled `common.exe`, so its
+    /// the app's own daemon exited). It may be another program than the bundled `ucompute.exe`, so its
     /// rule is neither checked nor added.
     pub adopted: bool,
 }
@@ -125,7 +125,7 @@ pub fn parse(output: &str, program: &str) -> Option<Status> {
     Some(status)
 }
 
-/// The app checks and adds the rule for the bundled `common.exe` only. A service it adopted may be
+/// The app checks and adds the rule for the bundled `ucompute.exe` only. A service it adopted may be
 /// another program, so for it nothing is checked (`adopted`) and Allow refuses.
 pub fn status_for(ours: bool) -> Result<Status, String> {
     if !ours {
@@ -156,12 +156,12 @@ pub fn allow() -> Result<(), String> {
     Err("Windows Firewall rules apply only on Windows".into())
 }
 
-/// `common.exe` next to the app: where Tauri puts the `binaries/common` sidecar.
+/// `ucompute.exe` next to the app: where Tauri puts the `binaries/ucompute` sidecar.
 #[cfg(windows)]
 fn daemon_program() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate the app: {e}"))?;
     let dir = exe.parent().ok_or("cannot locate the app's folder")?;
-    Ok(dir.join("common.exe").to_string_lossy().into_owned())
+    Ok(dir.join("ucompute.exe").to_string_lossy().into_owned())
 }
 
 /// `C:\Windows\System32`: cmd and netsh are never looked up on PATH or in the app's folder.
@@ -261,7 +261,7 @@ pub fn allow() -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const PROGRAM: &str = r"C:\Users\Nasr\AppData\Local\Common\common.exe";
+    const PROGRAM: &str = r"C:\Users\Nasr\AppData\Local\UCompute\ucompute.exe";
 
     /// One `rule` line as the script prints it.
     fn rule(enabled: &str, dir: &str, action: &str, profiles: &str, protocol: &str, program: &str) -> String {
@@ -276,21 +276,21 @@ mod tests {
 
     #[test]
     fn allow_params_scope_the_rule_to_the_daemon_inbound_udp_private() {
-        let p = allow_params(r"C:\Program Files\Common (beta)\common.exe").unwrap();
+        let p = allow_params(r"C:\Program Files\UCompute (beta)\ucompute.exe").unwrap();
         // The delete names this program too: another Windows account's rule of the same name stays.
         assert_eq!(
             p,
-            "/d /v:off /c netsh advfirewall firewall delete rule name=\"Common (paired devices)\" \
-             program=\"C:\\Program Files\\Common (beta)\\common.exe\" & \
-             netsh advfirewall firewall add rule name=\"Common (paired devices)\" dir=in action=allow \
-             program=\"C:\\Program Files\\Common (beta)\\common.exe\" protocol=UDP profile=private enable=yes"
+            "/d /v:off /c netsh advfirewall firewall delete rule name=\"UCompute (paired devices)\" \
+             program=\"C:\\Program Files\\UCompute (beta)\\ucompute.exe\" & \
+             netsh advfirewall firewall add rule name=\"UCompute (paired devices)\" dir=in action=allow \
+             program=\"C:\\Program Files\\UCompute (beta)\\ucompute.exe\" protocol=UDP profile=private enable=yes"
         );
         assert!(!p.contains("public") && !p.contains("domain") && !p.contains("profile=any"));
         for bad in [
             "",
-            r"C:\100%\common.exe",
-            "C:\\a\"b\\common.exe",
-            "C:\\a\r\nnetsh\\common.exe",
+            r"C:\100%\ucompute.exe",
+            "C:\\a\"b\\ucompute.exe",
+            "C:\\a\r\nnetsh\\ucompute.exe",
         ] {
             assert!(allow_params(bad).is_err(), "{bad:?}");
         }
@@ -302,7 +302,7 @@ mod tests {
     fn the_script_reads_the_rule_by_name_without_double_quotes() {
         let s = script();
         assert!(
-            s.contains("Get-NetFirewallRule -DisplayName 'Common (paired devices)'"),
+            s.contains("Get-NetFirewallRule -DisplayName 'UCompute (paired devices)'"),
             "{s}"
         );
         assert!(s.contains("[Text.Encoding]::UTF8") && s.ends_with("'end'"), "{s}");
@@ -355,7 +355,7 @@ mod tests {
             (rule("True", "Inbound", "Allow", "Private", "TCP", PROGRAM), "tcp"),
             (rule("True", "Inbound", "Block", "Private", "UDP", PROGRAM), "block"),
             (
-                rule("True", "Inbound", "Allow", "Private", "UDP", r"C:\Old\common.exe"),
+                rule("True", "Inbound", "Allow", "Private", "UDP", r"C:\Old\ucompute.exe"),
                 "another install",
             ),
         ] {
@@ -367,9 +367,9 @@ mod tests {
             "Allow",
             "Private",
             "UDP",
-            r"C:\Old\common.exe",
+            r"C:\Old\ucompute.exe",
         ));
-        assert_eq!(moved.rule_program.as_deref(), Some(r"C:\Old\common.exe"));
+        assert_eq!(moved.rule_program.as_deref(), Some(r"C:\Old\ucompute.exe"));
         // Two rules of that name: the matching one decides.
         assert!(read(&(rule("True", "Outbound", "Allow", "Private", "UDP", PROGRAM) + &ok())).allowed);
         // No rule of that name.
@@ -386,7 +386,7 @@ mod tests {
     /// Windows or under a non-ASCII user name. The script's values are enum names and UTF-8.
     #[test]
     fn a_non_ascii_path_and_a_byte_order_mark_still_match() {
-        let jose = "C:\\Users\\José\\AppData\\Local\\Common\\common.exe";
+        let jose = "C:\\Users\\José\\AppData\\Local\\UCompute\\ucompute.exe";
         let out = format!(
             "\u{feff}net\tPrivate\tZuhause\r\n{}end\r\n",
             rule("True", "Inbound", "Allow", "Private", "UDP", jose)

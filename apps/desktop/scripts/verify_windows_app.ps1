@@ -1,12 +1,12 @@
-# Verify the Windows build of the Common desktop app on the exact installer, end to end.
+# Verify the Windows build of the UCompute desktop app on the exact installer, end to end.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\verify_windows_app.ps1 `
-#       -Installer <...\nsis\Common_0.1.0_x64-setup.exe> -Work <empty folder>
+#       -Installer <...\nsis\UCompute_0.1.0_x64-setup.exe> -Work <empty folder>
 #
 # 1. Silent per-user install into <Work>\app (NSIS /S /D=...), never over an existing install; THIRD_PARTY_NOTICES.txt
 #    next to the exe names rustls and react.
 # 2. First launch with a fresh data folder (LOCALAPPDATA=<Work>\localappdata): the app's daemon becomes healthy on
-#    127.0.0.1:8192, is the bundled common.exe started by the app with src-tauri\daemon-args.txt, and downloads
+#    127.0.0.1:8192, is the bundled ucompute.exe started by the app with src-tauri\daemon-args.txt, and downloads
 #    the pinned engine into the fresh folder.
 # 3. Real inference through the app's daemon: pull the stories15M fixture, load it, check the golden completion.
 # 4. Quit (close the main window when it has one), restart, crash (Stop-Process -Force on the app): the daemon and
@@ -43,7 +43,7 @@ function Alive($id) { [bool](Get-Process -Id $id -ErrorAction SilentlyContinue) 
 
 if ((Test-Path $Work) -and (Get-ChildItem $Work -Force | Select-Object -First 1)) { throw "-Work must be empty: $Work" }
 New-Item -ItemType Directory -Force $Work | Out-Null
-if (PortOpen) { throw "port 8192 is in use; stop any running Common daemon first (the app would adopt it)" }
+if (PortOpen) { throw "port 8192 is in use; stop any running UCompute daemon first (the app would adopt it)" }
 
 # 1. install
 $appDir = Join-Path $Work "app"
@@ -51,8 +51,8 @@ $data = Join-Path $Work "localappdata"
 New-Item -ItemType Directory -Force $data | Out-Null
 $hash = (Get-FileHash $Installer -Algorithm SHA256).Hash.ToLower()
 $p = Start-Process -FilePath $Installer -ArgumentList "/S", "/D=$appDir" -PassThru -Wait
-$exe = Get-Item (Join-Path $appDir "common-desktop.exe") -ErrorAction SilentlyContinue  # the cargo binary name, as on macOS
-$daemonExe = Join-Path $appDir "common.exe"
+$exe = Get-Item (Join-Path $appDir "ucompute-desktop.exe") -ErrorAction SilentlyContinue  # the cargo binary name, as on macOS
+$daemonExe = Join-Path $appDir "ucompute.exe"
 Step "silent install" ($p.ExitCode -eq 0 -and $exe -and (Test-Path $daemonExe)) @{ installer_sha256 = $hash; app = "$($exe.Name)"; files = @(Get-ChildItem $appDir -Name) }
 # Written at build time by scripts/gen_notices.py (build-sidecar.mjs): one entry line per package, `<name> <version> ...`.
 $notices = Join-Path $appDir "THIRD_PARTY_NOTICES.txt"
@@ -73,10 +73,10 @@ function Launch {
 $app = Launch
 $t = WaitFor { Healthy } 180
 # @(): on Windows PowerShell 5.1 a single CimInstance has no .Count, so one correct daemon read as "not one"
-$daemons = @(Procs "common.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe })
+$daemons = @(Procs "ucompute.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe })
 $argsOk = $daemons.Count -eq 1 -and $daemons[0].ParentProcessId -eq $app.Id -and ($daemons[0].CommandLine -replace '^"[^"]+"\s*|^\S+\s*', '') -eq ($DaemonArgs -join " ")
 Step "first launch: daemon healthy, started by the app with its exact arguments" ($t -ne $null -and $argsOk) @{ healthy_after_s = $t; daemon = @($daemons | ForEach-Object { "$($_.ProcessId) parent $($_.ParentProcessId): $($_.CommandLine)" }) }
-$engineDir = Join-Path $data "Common\backends\llama.cpp"
+$engineDir = Join-Path $data "UCompute\backends\llama.cpp"
 Step "fresh install provisioned the pinned engine in the fresh data folder" (Test-Path (Join-Path $engineDir "b11609\llama-server.exe")) @{ dir = $engineDir }
 
 # 3. real inference
@@ -93,7 +93,7 @@ function Infer($tag) {
 Infer "first launch"
 
 function Ends($why) {
-    $d = @(Procs "common.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe } | ForEach-Object { $_.ProcessId })
+    $d = @(Procs "ucompute.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe } | ForEach-Object { $_.ProcessId })
     $e = @(Procs "llama-server.exe" | Where-Object { $_.ExecutablePath -like "$data*" } | ForEach-Object { $_.ProcessId })
     return @{ daemons = $d; engines = $e }
 }
@@ -128,7 +128,7 @@ Step "restart after the crash" ($t -ne $null) @{ healthy_after_s = $t }
 $before = Ends
 Stop-Process -Id $app.Id -Force
 $tGone = WaitFor { -not ($before.daemons + $before.engines | Where-Object { Alive $_ }) } 10
-$left = @(Procs "common.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe }) + @(Procs "llama-server.exe" | Where-Object { $_.ExecutablePath -like "$data*" })
+$left = @(Procs "ucompute.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe }) + @(Procs "llama-server.exe" | Where-Object { $_.ExecutablePath -like "$data*" })
 Step "final: nothing from the install is running, port free" ($tGone -ne $null -and $left.Count -eq 0 -and -not (PortOpen)) @{ leftovers = @($left | ForEach-Object { $_.ProcessId }) }
 Finish
 Write-Output "ALL PASS"

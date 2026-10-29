@@ -1,6 +1,6 @@
 """Offline checks of mesh_two_machine.py, hold_two_machine.py and state.py against SYNTHETIC fake daemons
 (fake_mesh.py) and a fake clock: no network, machine, daemon or inference is involved (the completion text is
-canned), so nothing here is evidence of Common.
+canned), so nothing here is evidence of UCompute.
 Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 """
 import contextlib

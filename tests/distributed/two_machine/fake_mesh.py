@@ -2,7 +2,7 @@
 API routes the drivers call, with the behaviour they rely on (connect returns an open connection as is and ends a
 hold, a failed dial is audited once per address, a held device reads peer_held and still exchanges revocations,
 pairing, groups, privacy, Sharing restarts). The completion text is canned. No network, machine, daemon or
-inference is involved, so nothing produced with these fakes is evidence of Common.
+inference is involved, so nothing produced with these fakes is evidence of UCompute.
 
 `bad` turns one behaviour off or wrong, so a test can show that the step claiming it FAILs (or is N/A)."""
 import contextlib
@@ -387,7 +387,7 @@ class SplitMesh(Mesh):
     the start like a fresh head home. A split request passes the gates in the order openai::run and rpc.rs check
     them; each request adds the lab's registered per-token traffic for its model (R1a 14,150 B up, 3,592 B down,
     one turn per token) plus a prefill, so the lab's scorer accepts the run. The texts, timings, `ss`, `who` and
-    the other shell outputs are canned. Nothing here is P1 or evidence of Common.
+    the other shell outputs are canned. Nothing here is P1 or evidence of UCompute.
 
     `bad`: dirty, busy_r, other_user, r_engine_left, low_memory (preflight); stage_spawns_on_refusal,
     stage_refusal_untyped (P1.1); wrong_placement, public_rpc, rpc_reachable, rdma_banner (the session);
@@ -493,8 +493,8 @@ class SplitMesh(Mesh):
         return ok({"stages": self.loaded_split, "session": self.session["id"]})
 
     def ss(self, rpc):
-        lines = ['tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("common",pid=100,fd=9))',
-                 'udp UNCONN 0 0 0.0.0.0:8193 0.0.0.0:* users:(("common",pid=100,fd=10))',
+        lines = ['tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("ucompute",pid=100,fd=9))',
+                 'udp UNCONN 0 0 0.0.0.0:8193 0.0.0.0:* users:(("ucompute",pid=100,fd=10))',
                  "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"]  # sshd: another user's socket, no process shown
         if rpc:
             host = "0.0.0.0" if "public_rpc" in self.bad else "127.0.0.1"
@@ -515,7 +515,7 @@ class SplitMesh(Mesh):
                 "top": "%CPU PID COMMAND\n 1.0 1 systemd\n",
                 "banner": "transport : "
                 + ("RDMA" if "rdma_banner" in bad else "TCP (RDMA auto-negotiate enabled)") + "\n",
-                "scan": "/home/x/.common-acceptance/logs/engine-1.log\n" if "leaks_prompt" in bad else "",
+                "scan": "/home/x/.ucompute-acceptance/logs/engine-1.log\n" if "leaks_prompt" in bad else "",
             }[key]
         return {
             "git": "abc123\n" + (" M crates/x.rs\n" if "dirty" in bad else ""),
