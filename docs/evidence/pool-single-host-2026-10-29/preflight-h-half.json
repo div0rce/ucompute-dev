@@ -1,0 +1,49 @@
+{
+ "same_commit_h_half_ok": true,
+ "head": "b97527e18488ab157b0e110242ca99292d98e7d7",
+ "uncommitted_tracked": [],
+ "h_build_commit": "b97527e18488ab157b0e110242ca99292d98e7d7",
+ "health": {
+  "commit": "b97527e18488ab157b0e110242ca99292d98e7d7",
+  "status": "ok",
+  "version": "0.1.0"
+ },
+ "ls_tree_files": 467,
+ "dirty_tree_negative_control_health": {
+  "commit": "b97527e18488ab157b0e110242ca99292d98e7d7-dirty",
+  "status": "ok",
+  "version": "0.1.0"
+ },
+ "raw": [
+  {
+   "t": "2026-10-29T21:46:33Z",
+   "shell": "h",
+   "cmd": "git rev-parse HEAD && git status --porcelain --untracked-files=no",
+   "out": "b97527e18488ab157b0e110242ca99292d98e7d7\n",
+   "rc": 0,
+   "stderr": ""
+  },
+  {
+   "t": "2026-10-29T21:46:33Z",
+   "shell": "h",
+   "cmd": "git -c core.quotePath=false ls-tree -r HEAD",
+   "out": "467 lines (git ls-tree -r HEAD), omitted",
+   "rc": 0,
+   "stderr": ""
+  },
+  {
+   "t": "2026-10-29T21:46:33Z",
+   "base": "http://127.0.0.1:64627",
+   "method": "GET",
+   "path": "/health",
+   "body": null,
+   "status": 200,
+   "ms": 31.5,
+   "response": {
+    "commit": "b97527e18488ab157b0e110242ca99292d98e7d7",
+    "status": "ok",
+    "version": "0.1.0"
+   }
+  }
+ ]
+}

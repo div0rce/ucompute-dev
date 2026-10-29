@@ -8,7 +8,8 @@
 //! stage and lifts the licence gate for stories15M (unknown licence, B-011), and only because the
 //! peer is on loopback. qwen2.5-0.5b (Apache-2.0) is used where a generation must last seconds.
 //! On this Mac R's rpc-server runs on Metal, so `same_backend` here is a CPU head with a Metal
-//! stage, not ggml-cpu on both stages.
+//! stage, not ggml-cpu on both stages; the ignored S1-M measurement
+//! (`config_c_cpu_both_stages_r1a_prereg_single_host`) holds R's rpc-server to its CPU as well.
 
 mod support;
 
@@ -745,4 +746,177 @@ async fn local_request_never_uses_the_split_engine_single_host() {
     })
     .await;
     p.stop().await;
+}
+
+/// One greedy generation on `m` with its token ids (the API's completions carry no ids).
+async fn greedy_ids(
+    m: &std::sync::Arc<dyn ucompute_runtime::LoadedModel>,
+    text: &str,
+    max_tokens: u32,
+) -> (String, Vec<u32>, ucompute_runtime::Usage, ucompute_runtime::Timings) {
+    let req = ucompute_runtime::GenerateRequest {
+        input: ucompute_runtime::PromptInput::Raw(text.into()),
+        max_tokens,
+        temperature: 0.0,
+        seed: Some(42),
+        return_token_ids: true,
+        ..Default::default()
+    };
+    let s = m
+        .generate(req, tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    let (text, ids, usage, timings, _) = ucompute_runtime::collect(s).await.unwrap();
+    (text, ids, usage, timings)
+}
+
+/// H's split counters and its QUIC connection to R's UDP payload bytes, 0.2 s after a generation
+/// (the lab's checkpoint, SCORING-INPUT.md).
+async fn s1m_checkpoint(p: &Pool) -> Value {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let s = get(&p.h, "/api/status").await["split"].clone();
+    let peers = get(&p.h, "/api/peers").await;
+    let conn = peers["peers"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["id"] == p.idr.to_hex()))
+        .map_or(Value::Null, |x| x["connection"].clone());
+    json!({ "session": s["session"], "to_r": s["to_r"], "to_h": s["to_h"], "switches": s["switches"],
+            "udp_tx": conn["tx_bytes"], "udp_rx": conn["rx_bytes"], "conn_id": conn["id"] })
+}
+
+/// S1-M (plan "Stage order" item 2), SINGLE-HOST, run on demand: configuration C with ggml-cpu
+/// arm64 on BOTH stages through the real QUIC tunnel (R's rpc-server held to its CPU by
+/// `UCOMPUTE_TEST_STAGE_CPU`; H's CPU [0,12), R [12,24) and the output), R1a (qwen2.5-0.5b q8_0)
+/// on the pre-registered P1 prompts, 65 greedy tokens, against this device's CPU-only run of the
+/// whole model (`--device none`), token id by token id. Prints one `S1M {json}` line per prompt:
+/// counters at the lab's three checkpoints (loaded, after max_tokens 1, after max_tokens 65), the
+/// first taken after a warm-up max_tokens 1 request on the same prompt (see the loop).
+/// The tokens are asserted only after every prompt has been printed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "S1-M measurement: cargo test -p ucompute-api --test split_single_host config_c_cpu -- --ignored --nocapture"]
+async fn config_c_cpu_both_stages_r1a_prereg_single_host() {
+    const R1A: &str = "qwen2.5-0.5b-instruct-q8_0";
+    struct CpuStage;
+    impl Drop for CpuStage {
+        fn drop(&mut self) {
+            std::env::remove_var(ucompute_runtime::llamacpp::rpc_server::TEST_STAGE_CPU_ENV);
+        }
+    }
+    let Some(p) = pool().await else { return };
+    if !has_model(&ucompute_home(), R1A) {
+        return eprintln!("SKIP: {R1A} not downloaded");
+    }
+    std::env::set_var(ucompute_runtime::llamacpp::rpc_server::TEST_STAGE_CPU_ENV, "1");
+    let cpu_stage = CpuStage;
+    let prereg: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/distributed/two_machine/split_prereg.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let prompts: Vec<&str> = prereg["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["text"].as_str().unwrap())
+        .collect();
+
+    // the local reference: the whole model on this device's CPU (`-ngl 0 --device none`)
+    let opts = ucompute_runtime::manager::LoadOptions {
+        device: Some(ucompute_runtime::DevicePreference::Cpu),
+        ..p.h.state.load_options()
+    };
+    let local = p.h.state.manager.ensure_loaded(R1A, opts).await.unwrap();
+    eprintln!("S1M local device_actual={:?}", local.info().device_actual);
+    let mut refs = vec![];
+    for text in &prompts {
+        refs.push(greedy_ids(&local, text, 65).await);
+    }
+    drop(local);
+
+    // the split session, opened through the API with the pre-registered load request
+    let (status, v) = call(
+        &p.h,
+        reqwest::Method::POST,
+        "/v1/completions",
+        p.body(R1A, "Hello", 1, 12, "same_backend"),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let stages = &v["placement"]["stages"];
+    let got: Vec<_> = (0..2)
+        .map(|i| {
+            (
+                stages[i]["device"].as_str().unwrap().to_string(),
+                stages[i]["first_block"].as_u64().unwrap(),
+                stages[i]["end_block"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, [("CPU".to_string(), 0, 12), ("RPC0".to_string(), 12, 24)], "{v}");
+    let split = get(&p.h, "/api/status").await["split"].clone();
+    eprintln!(
+        "S1M placement={} stage_device={}",
+        v["placement"], split["stage_device"]
+    );
+    assert!(
+        split["stage_device"].as_str().unwrap().starts_with("CPU "),
+        "R's rpc-server is on its CPU: {split}"
+    );
+    let params = ucompute_api::split::SplitParams {
+        split_at: Some(12),
+        split_mode: Some(ucompute_api::split::SplitMode::SameBackend),
+        acknowledged: true,
+    };
+    let (model, _session, hold) = ucompute_api::split::ensure(&p.h.state, R1A, p.idr, &params)
+        .await
+        .unwrap();
+
+    let mut equal = vec![];
+    for (i, (text, reference)) in prompts.iter().zip(&refs).enumerate() {
+        // The first request on a new prompt also uploads that prompt's graphs (and, before engines
+        // ran with --cache-ram 0, saved the previous prompt by reading R's KV back to H): a warm-up
+        // request on this prompt takes that before `loaded`, so the lab's subtraction sees prefill
+        // and decode only (the P1 driver does the same)
+        let pre = s1m_checkpoint(&p).await;
+        greedy_ids(&model, text, 1).await;
+        let c0 = s1m_checkpoint(&p).await;
+        let n1 = greedy_ids(&model, text, 1).await;
+        let c1 = s1m_checkpoint(&p).await;
+        let n65 = greedy_ids(&model, text, 65).await;
+        let c2 = s1m_checkpoint(&p).await;
+        let first_diff = reference
+            .1
+            .iter()
+            .zip(&n65.1)
+            .position(|(a, b)| a != b)
+            .or((reference.1.len() != n65.1.len()).then(|| reference.1.len().min(n65.1.len())));
+        let d = |k: &str| {
+            let [a, b, c] = [&c0, &c1, &c2].map(|x| x[k].as_f64().unwrap());
+            let w = pre[k].as_f64().unwrap();
+            json!({ "prefill": b - a, "decode_per_token": ((c - b) - (b - a)) / 64.0,
+                    "save_of_previous_prompt": (a - w) - (b - a) })
+        };
+        eprintln!(
+            "S1M {}",
+            json!({ "prompt": i + 1, "prompt_tokens": n65.2.prompt_tokens, "completion_tokens": n65.2.completion_tokens,
+                    "checkpoints": [pre, c0, c1, c2],
+                    "to_r": d("to_r"), "to_h": d("to_h"), "switches": d("switches"), "udp_tx": d("udp_tx"), "udp_rx": d("udp_rx"),
+                    "n1_id": n1.1, "split_ids": n65.1, "local_ids": reference.1, "first_diff": first_diff,
+                    "text_equal": n65.0 == reference.0, "split_text": n65.0, "local_text": reference.0,
+                    "split_timings": n65.3, "local_timings": reference.3 })
+        );
+        assert_eq!(c0["session"], c2["session"], "one session per prompt");
+        assert_eq!(c0["conn_id"], c2["conn_id"], "one QUIC connection per prompt");
+        equal.push(first_diff.is_none() && n65.1.len() == 65);
+    }
+    drop((model, hold));
+    p.stop().await;
+    drop(cpu_stage);
+    assert!(
+        equal.iter().all(|e| *e),
+        "split ids equal the local CPU run per prompt: {equal:?}"
+    );
 }

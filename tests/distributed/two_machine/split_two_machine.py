@@ -463,6 +463,9 @@ def run_model(a, b, rid, m, prereg, lab_runs, rows):
         return
     # P1.6: per prompt, three checkpoints in one session with nothing in between
     for p in prereg["prompts"]:
+        # The first request on a new prompt also uploads that prompt's graphs (S1-M: about 191 kB and 8 switches
+        # to R on R1a); a same-prompt warm-up before `loaded` keeps that out of the lab's decode-only subtraction.
+        warm = sse(a, body(p["text"], 1))
         c0 = checkpoint(a, rid, "loaded")
         r1 = sse(a, body(p["text"], 1))
         c1 = checkpoint(a, rid, "after_n1")
@@ -476,7 +479,8 @@ def run_model(a, b, rid, m, prereg, lab_runs, rows):
         complete = all(v is not None for c in cps.values() for v in c.values())
         if complete:
             tok = per_token(cps)
-        ok = (r1["status"] == r65["status"] == 200 and not r1["error"] and not r65["error"]
+        ok = (warm["status"] == r1["status"] == r65["status"] == 200 and not warm["error"] and not r1["error"]
+              and not r65["error"]
               and len(sessions) == 1 and None not in sessions and complete and tok["to_r"] > 0 and tok["turns"] > 0
               and usage.get("completion_tokens") == 65 and tpot is not None)
         rows.append({"model": label, "prompt": p["id"], "session": next(iter(sessions)), "checkpoints": [c0, c1, c2],

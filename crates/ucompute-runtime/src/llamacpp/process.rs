@@ -30,6 +30,9 @@ const RESERVED_FLAGS: &[&str] = &[
     "--api-key",
     "--api-key-file",
     "--log-file",
+    // prompt cache: off (see build_args)
+    "-cram",
+    "--cache-ram",
     // model sources
     "-m",
     "--model",
@@ -180,6 +183,10 @@ pub fn build_args(req: &LoadRequest, port: u16, api_key_file: &Path, gpu: bool) 
         // UCompute plans n_ctx itself; never let the engine silently resize it (no silent substitution).
         "--fit".into(),
         "off".into(),
+        // Every request sends cache_prompt false, so a saved prompt is never reused: the idle-slot save only held
+        // host RAM (8 GiB by default) and, on a split, read R's KV cache back over the network (S1-M, 2026-10-29).
+        "--cache-ram".into(),
+        "0".into(),
     ];
     if let Some(s) = &req.split {
         a.extend(split::launch_args(s).map_err(|e| UComputeError::invalid(format!("split plan: {e}")))?);
@@ -495,6 +502,7 @@ mod tests {
         assert!(has(&a, &["-t", "4"]), "threads default to 4");
         assert!(has(&a, &["-np", "2"]));
         assert!(has(&a, &["-ctk", "q8_0", "-ctv", "q8_0"]));
+        assert!(has(&a, &["--cache-ram", "0"]), "no idle-slot prompt cache");
         assert!(has(
             &a,
             &["-ngl", "0", "--device", "none", "--no-kv-offload", "--no-op-offload"]

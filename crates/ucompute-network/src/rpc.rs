@@ -63,7 +63,7 @@ pub const RPC_RESET: u32 = 0x5250;
 pub const MAX_TUNNELS: usize = 8;
 /// `UCOMPUTE_TEST_SINGLE_HOST_POOL=1` lets a non-Linux device host a stage, and only for a peer whose
 /// address is loopback ([`single_host_pool_test`]).
-pub const TEST_POOL_ENV: &str = "UCOMPUTE_TEST_SINGLE_HOST_POOL";
+pub const TEST_POOL_ENV: &str = rpc_server::TEST_POOL_ENV;
 const ACCEPT_WAIT: Duration = Duration::from_secs(30);
 /// R's writes on a session stream (the accept, the closing reason): a head that grants no
 /// flow-control credit is a lost head, and cannot hold rpc-server or the slot.
