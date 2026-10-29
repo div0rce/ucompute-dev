@@ -20,6 +20,7 @@ __pycache__/
 
 # Local data dir when COMMON_HOME points into the repo
 /.common/
+/.common-split/
 
 # Node
 node_modules/
