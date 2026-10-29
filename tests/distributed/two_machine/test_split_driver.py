@@ -193,8 +193,8 @@ class SplitDriverSyntheticTests(unittest.TestCase):
         """SYNTHETIC counters from the lab's own test helpers (test_score_p1.counters/run), written by this driver's
         lab_input(): the lab's scorer accepts them, and this driver's per-token method equals the lab's."""
         t, s = lab_module("test_score_p1"), lab_module("score_p1")
-        runs = [t.run("R1a", p, n, 14150, 3592, 1.0, 36.0, 230.0) for p, n in ((1, 44), (2, 50), (3, 47))]
-        runs += [t.run("R1b", 1, 44, 21830, 6152, 1.0, 54.0, 350.0)]
+        runs = [t.run("R1a", p, n, 16921, 3592, 1.0, 36.0, 230.0) for p, n in ((1, 44), (2, 50), (3, 47))]
+        runs += [t.run("R1b", 1, 44, 25058, 6152, 1.0, 54.0, 350.0)]
         for r in runs:
             del r["ids"]  # UCompute's /v1/completions returns no token ids
             self.assertEqual(D.per_token(r["counters"]), s.per_token(r["counters"]))

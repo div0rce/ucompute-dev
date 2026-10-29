@@ -396,7 +396,8 @@ class SplitMesh(Mesh):
     audit_full_page."""
     HEAD = "abc123"
     BLOBS = {"Cargo.toml": "1" * 40, "crates/ucompute-api/src/lib.rs": "2" * 40, "scripts/mac-host.sh": "3" * 40}
-    PER = {"R1a": (14150, 3592), "R1b": (21830, 6152)}
+    # The lab's amended predictions (02ec3f5): steady state plus one decode-graph upload over 64 steps.
+    PER = {"R1a": (16921, 3592), "R1b": (25058, 6152)}
     TIMES = {"R1a": (230.0, 36.0), "R1b": (350.0, 54.0)}  # TTFT and TPOT (ms) inside the lab's Wi-Fi bands
 
     def __init__(self, bad=()):

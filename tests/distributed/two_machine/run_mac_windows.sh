@@ -50,7 +50,7 @@ WIFI="$H run 'schtasks /run /tn UComputeTestWifi'"  # disconnects B's Wi-Fi and 
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
-# shellcheck disable=SC2329  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {  # on every exit: stop a driver still running (SIGTERM reaches bash only), then put both sides back
   rc=$?
   set +e

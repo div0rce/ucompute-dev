@@ -54,7 +54,7 @@ if [ "${SPLIT:-}" = 1 ]; then
   test -x target/release/ucompute || { echo "H is not built: cargo build --release -p ucompute-cli"; exit 1; }
   mkdir -p "$OUT/h" "$HOME_H"
   (cd .ucompute && pax -rwlk models backends "$HOME_H")  # hardlinks (B-010: the disk is tight)
-  # shellcheck disable=SC2329  # run by the EXIT trap
+  # shellcheck disable=SC2317,SC2329  # run by the EXIT trap
   split_cleanup() {
     rc=$?
     set +e
@@ -98,7 +98,7 @@ PROCS="pgrep -f 'MacOS/ucompute serve --host 127.0.0.1 --port 8192|Application S
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
-# shellcheck disable=SC2329  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {
   rc=$?
   set +e
