@@ -18,6 +18,7 @@ logs, sentinel's file times and the soak's one-minute rows.
 | 16:56:50–17:04:27 | A rename workflow superseded by D-028 (`wf_891f06f6-84e`, believed stopped, still running) built and ran the daemon crates' tests (`cargo test -j 8`, with test engines) in `~/src/ucompute-rename-step1`; the D-028 run killed it at 17:04:27. The superseded run was stopped at about 17:16 |
 | 17:06:49–17:13:39 | The D-028 rename run's step-1 Linux tests (`cargo test -j 6`, with test engines) in the same folder; at nice 19 and idle I/O from 17:12:00 |
 | 17:12– (until the soak ends) | `~/soak/interference-watch.sh`: every 5 s it puts any `ucompute-rename`/`ucompute-fix` process tree at nice 19 and idle I/O and logs `/proc/loadavg` and the count of such processes to `~/soak/interference.log`, so later windows are measured |
+| 17:12:23–17:14:35, 17:20:57–17:34:49, 17:58:36–18:05:15, 18:13:03 (measured by the watcher, up to 24 processes, all at nice 19 and idle I/O) | The rename run's Linux test reruns and its final check's Linux build and tests in fresh `~/src/ucompute-rename-*` folders. Nothing else ran on sentinel after 18:13 (watcher log, checked at 23:08) |
 | Whole run | A desktop session with Firefox, present since before the soak started (constant baseline) |
 
 What the soak's own rows show (569 rows, 07:42–17:14): before 16:58, golden p95 median 16.3 ms and every kill
