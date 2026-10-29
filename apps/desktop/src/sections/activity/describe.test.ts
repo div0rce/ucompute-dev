@@ -46,7 +46,7 @@ group("describe: one row per audit kind", () => {
     const [done, sent, failed] = JOBS.recent;
     expect(describeJob(done, names)).toEqual({ category: "Execution", severity: "Info", sentence: "Qwen on this computer: done, 160 tokens in 4 s" });
     expect(describeJob(sent, names).sentence).toBe("Qwen on Studio Mac: done, 120 tokens in 4.6 s");
-    expect(describeJob(failed, names)).toEqual({ category: "Execution", severity: "Error", sentence: "Qwen on this computer: failed: Common is busy with other requests, tokens unknown in 0 s" });
+    expect(describeJob(failed, names)).toEqual({ category: "Execution", severity: "Error", sentence: "Qwen on this computer: failed: UCompute is busy with other requests, tokens unknown in 0 s" });
     expect(describeJob({ ...done, state: "cancelled" }, names).severity).toBe("Warning");
     // The registry puts client_gone in error_code (JobHandle::fail); finish_reason stays null.
     expect(describeJob({ ...done, state: "cancelled", finish_reason: null, error_code: "client_gone" }, names).sentence).toMatch(/: requester disconnected, /);

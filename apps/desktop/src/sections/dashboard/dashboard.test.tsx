@@ -171,9 +171,9 @@ describe("Needs attention", () => {
     const user = userEvent.setup();
     const fake = await open();
     // Open on the service too, or the Pair dialog's poller ends the session.
-    fake.pairing.session = { code: "482913", port: 51234, pair_addr: "192.168.1.10:51234", qr_payload: "common-pair:v1:x", expires_at: Math.floor(Date.now() / 1000) + 90 };
+    fake.pairing.session = { code: "482913", port: 51234, pair_addr: "192.168.1.10:51234", qr_payload: "ucompute-pair:v1:x", expires_at: Math.floor(Date.now() / 1000) + 90 };
     act(() => {
-      pairing.set({ code: "482913", addr: null, payload: "common-pair:v1:x", expiresAt: Date.now() + 90_000 });
+      pairing.set({ code: "482913", addr: null, payload: "ucompute-pair:v1:x", expiresAt: Date.now() + 90_000 });
       pushAttention({ id: "pull:m", tone: "danger", text: "Download failed: m" });
       lastError.set({ code: "insufficient_memory", title: "Needs more memory.", next_step: "Choose a smaller model.", detail: "need 9 GiB", hint: null });
     });

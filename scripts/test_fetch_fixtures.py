@@ -31,7 +31,7 @@ def fetch(uname_s, uname_m):
             with open(os.path.join(bin_, name), "w") as f:
                 f.write(f"#!/bin/sh\n{body}\n")
             os.chmod(os.path.join(bin_, name), 0o755)
-        env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", COMMON_HOME=os.path.join(d, "home"))
+        env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", UCOMPUTE_HOME=os.path.join(d, "home"))
         p = subprocess.run(["bash", SCRIPT], env=env, capture_output=True, text=True, timeout=60)
         if not os.path.exists(log):
             return p.returncode, p.stderr, []
@@ -59,7 +59,7 @@ class FetchFixturesPlatformTests(unittest.TestCase):
         code, err, calls = fetch("MINGW64_NT-10.0-26100", "x86_64")
         self.assertNotEqual(code, 0)
         self.assertEqual(calls, [])
-        self.assertIn("common setup --fixtures", err)
+        self.assertIn("ucompute setup --fixtures", err)
 
     def test_an_unpinned_platform_is_refused_before_any_download(self):
         code, err, calls = fetch("Linux", "aarch64")
@@ -72,7 +72,7 @@ def synthetic_run(d, models, require=None, corrupt=False):
     """Run a copy of the script in a synthetic repo under `d` on Linux x86_64: catalog/backends.json pins a tiny tar.gz
     and catalog/models.json lists `models` (id, tags), each a few SYNTHETIC bytes (not a model). The curl stub serves
     every pinned URL and logs it; with `corrupt`, it serves other bytes for the engine archive than the pin hashes.
-    Returns (completed process, COMMON_HOME, pin, {id: catalog entry}, served URLs)."""
+    Returns (completed process, UCOMPUTE_HOME, pin, {id: catalog entry}, served URLs)."""
     repo, bin_, serve = os.path.join(d, "repo"), os.path.join(d, "bin"), os.path.join(d, "serve")
     for path in (os.path.join(repo, "scripts"), os.path.join(repo, "catalog"), bin_, serve):
         os.makedirs(path)
@@ -116,10 +116,10 @@ def synthetic_run(d, models, require=None, corrupt=False):
             f.write(f"#!/bin/sh\n{body}\n")
         os.chmod(os.path.join(bin_, name), 0o755)
     home = os.path.join(d, "home")
-    env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", COMMON_HOME=home)
-    env.pop("COMMON_REQUIRE_FIXTURES", None)
+    env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", UCOMPUTE_HOME=home)
+    env.pop("UCOMPUTE_REQUIRE_FIXTURES", None)
     if require is not None:
-        env["COMMON_REQUIRE_FIXTURES"] = require
+        env["UCOMPUTE_REQUIRE_FIXTURES"] = require
     p = subprocess.run(["bash", os.path.join(repo, "scripts", "fetch-fixtures.sh")], env=env,
                        capture_output=True, text=True, timeout=60)
     served = []
@@ -162,7 +162,7 @@ class FetchFixturesModelTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), entry["sha256"])
         with open(os.path.join(home, "models", "manifests", f"{entry['id']}.json")) as f:
             m = json.load(f)
-        # The fields `common models pull` writes (crates/common-artifacts download.rs manifest_from).
+        # The fields `ucompute models pull` writes (crates/ucompute-artifacts download.rs manifest_from).
         for key, want in {"id": entry["id"], "name": entry["name"], "file_name": entry["file_name"],
                           "sha256": entry["sha256"], "bytes": entry["bytes"], "license": entry["license"],
                           "license_url": entry["license_url"], "source_url": entry["url"],

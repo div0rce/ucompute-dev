@@ -1,10 +1,11 @@
 #!/bin/sh
-# D-028: main changes only through pull requests; no force-push; nothing is pushed to the public repository.
+# D-028: main changes only through pull requests; no force-push; only the private repository is pushed to
+# (publishing anywhere else needs its own owner decision).
 # Enabled per clone with: git config core.hooksPath scripts/git-hooks
 url="$2"
 case "$url" in
-  *div0rce/ucompute.git|*div0rce/ucompute|*div0rce/common.git|*div0rce/common)
-    echo "pre-push: $url is the public repository; publishing there needs its own owner decision" >&2; exit 1 ;;
+  */div0rce/ucompute-dev.git|*/div0rce/ucompute-dev|*:div0rce/ucompute-dev.git|*:div0rce/ucompute-dev) ;;
+  *) echo "pre-push: $url is not the private repository div0rce/ucompute-dev; publishing elsewhere needs its own owner decision" >&2; exit 1 ;;
 esac
 zero=0000000000000000000000000000000000000000
 while read -r _local_ref local_sha remote_ref remote_sha; do

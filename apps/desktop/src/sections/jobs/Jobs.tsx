@@ -192,8 +192,8 @@ function SlotStrip() {
   const q = daemon.use().status?.queue;
   const slots = network.use().data?.peer_slots;
   const m = metrics.use().data;
-  const full = m?.['common_requests_rejected_total{reason="queue_full"}'];
-  const timedOut = m?.['common_requests_rejected_total{reason="queue_timeout"}'];
+  const full = m?.['ucompute_requests_rejected_total{reason="queue_full"}'];
+  const timedOut = m?.['ucompute_requests_rejected_total{reason="queue_timeout"}'];
   const rejected = full == null || timedOut == null ? "rejected since service start: not reported" : `rejected since service start: ${num(full + timedOut)} (queue full ${num(full)}, timed out ${num(timedOut)})`;
   return (
     <p className="jobs-strip">

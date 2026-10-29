@@ -201,7 +201,7 @@ describe("frameState and SectionFrame", () => {
       </SectionFrame>,
     );
     expect(screen.getByRole("heading", { level: 1, name: "Models" })).toBeTruthy();
-    expect(screen.getByText(/^Not updated since 10:32:05: Common's background service is running but did not answer in time\.$/)).toBeTruthy();
+    expect(screen.getByText(/^Not updated since 10:32:05: UCompute's background service is running but did not answer in time\.$/)).toBeTruthy();
     const row = screen.getAllByRole("row")[1];
     expect(row.className).toContain("stale");
     expect(within(row).getAllByRole("gridcell")[1].textContent).toBe("Unknown (not refreshed)");

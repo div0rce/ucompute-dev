@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Verify a packaged macOS Common.app and its .dmg end to end, on the exact shipped binaries.
+"""Verify a packaged macOS UCompute.app and its .dmg end to end, on the exact shipped binaries.
 
-    python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/Common_0.1.0_aarch64.dmg \
+    python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg \
         --work <empty scratch dir> [--out evidence.json]
 
 What it checks (stdlib only, no repo build artefacts are used at run time):
  1. Binaries: the .app inside the .dmg is arm64, ad-hoc signed and valid, links only system libraries, and its
-    bundled `common` accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt). The app ships
+    bundled `ucompute` accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt). The app ships
     Contents/Resources/THIRD_PARTY_NOTICES.txt (scripts/gen_notices.py at build time) naming rustls and react.
  2. Fresh install: the app is copied out of the mounted .dmg into <work>/Applications and started with an empty
-    HOME, a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no COMMON_HOME, so nothing from the development
+    HOME, a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no UCOMPUTE_HOME, so nothing from the development
     environment is visible. Its daemon must become healthy on 127.0.0.1:8192, be the bundled binary with the
     expected arguments, and download the pinned engine into the fresh HOME.
  3. Real inference through the app's daemon: pull the stories15M fixture, load it, check the golden completion.
@@ -142,7 +142,7 @@ def wait(cond, within, what):
 class Install:
     def __init__(self, work, app_src):
         self.work = work
-        self.app = work / "Applications" / "Common.app"
+        self.app = work / "Applications" / "UCompute.app"
         self.home = work / "home"
         (work / "Applications").mkdir(parents=True)
         self.home.mkdir()
@@ -157,13 +157,13 @@ class Install:
     def launch(self):
         self.runs += 1
         log = open(self.work / f"app-run{self.runs}.log", "w")
-        self.proc = subprocess.Popen([str(self.app / "Contents/MacOS/common-desktop")], env=self.env,
+        self.proc = subprocess.Popen([str(self.app / "Contents/MacOS/ucompute-desktop")], env=self.env,
                                      cwd=str(self.work), stdout=log, stderr=subprocess.STDOUT,
                                      start_new_session=True)
         return self.proc.pid
 
     def sidecars(self):
-        exe = str(self.app / "Contents/MacOS/common") + " "
+        exe = str(self.app / "Contents/MacOS/ucompute") + " "
         return [(p, pp, a) for p, pp, a in procs() if a.startswith(exe)]
 
     def engines(self):
@@ -183,9 +183,9 @@ def log_holds_both_runs(text, killed, restarted):
     restarted daemon's start note and listening line. The log persists across launches (earlier stages wrote to it
     too), so a plain count of listening lines would pass without the restarted daemon's output."""
     listen = f"listening on http://127.0.0.1:{PORT}"
-    a = text.find(f"common-desktop: started the daemon, pid {killed}\n")
-    b = text.find("common-desktop: restarting the daemon in", a) if a >= 0 else -1
-    c = text.find(f"common-desktop: started the daemon, pid {restarted}\n", b) if b >= 0 else -1
+    a = text.find(f"ucompute-desktop: started the daemon, pid {killed}\n")
+    b = text.find("ucompute-desktop: restarting the daemon in", a) if a >= 0 else -1
+    c = text.find(f"ucompute-desktop: started the daemon, pid {restarted}\n", b) if b >= 0 else -1
     return a >= 0 and listen in text[a:b] and c > b and listen in text[c:]
 
 
@@ -203,14 +203,14 @@ def gatekeeper_rejected(returncode, output):
 def gatekeeper_on_download(work, dmg):
     """Read-only: a copy of the DMG marked as downloaded (com.apple.quarantine), its app copied out still quarantined,
     and Gatekeeper's assessment of it. Approving the app (Open Anyway) changes a security setting and stays manual."""
-    dl, qmnt, app = work / "downloaded.dmg", work / "qmnt", work / "downloaded" / "Common.app"
+    dl, qmnt, app = work / "downloaded.dmg", work / "qmnt", work / "downloaded" / "UCompute.app"
     shutil.copy(dmg, dl)
     sh("xattr", "-w", "com.apple.quarantine", f"0081;{int(time.time()):x};Safari;", str(dl))
     qmnt.mkdir()
     sh("hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(qmnt), str(dl))
     try:
         app.parent.mkdir()
-        sh("ditto", str(qmnt / "Common.app"), str(app))
+        sh("ditto", str(qmnt / "UCompute.app"), str(app))
     finally:
         sh("hdiutil", "detach", str(qmnt), check=False)
     quarantined = "com.apple.quarantine" in sh("xattr", str(app)).stdout
@@ -257,7 +257,7 @@ def main():
         raise SystemExit(f"--work must be empty: {work}")
     work.mkdir(parents=True, exist_ok=True)
     if port_open():
-        raise SystemExit(f"port {PORT} is in use; quit any running Common daemon first (the app would adopt it)")
+        raise SystemExit(f"port {PORT} is in use; quit any running UCompute daemon first (the app would adopt it)")
 
     EVIDENCE["dmg"] = {"path": str(a.dmg), "sha256": sha256(a.dmg), "bytes": a.dmg.stat().st_size}
     mnt = work / "mnt"
@@ -265,11 +265,11 @@ def main():
     sh("hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mnt), str(a.dmg))
     inst = None
     try:
-        app_src = mnt / "Common.app"
+        app_src = mnt / "UCompute.app"
         macos = app_src / "Contents/MacOS"
         bins = {n: {"sha256": sha256(macos / n), "archs": sh("lipo", "-archs", str(macos / n)).stdout.strip(),
                     "libs": [l.split()[0] for l in sh("otool", "-L", str(macos / n)).stdout.splitlines()[1:]]}
-                for n in ("common", "common-desktop")}
+                for n in ("ucompute", "ucompute-desktop")}
         EVIDENCE["binaries_in_dmg"] = bins
         system_only = all(l.startswith(("/usr/lib/", "/System/Library/")) for b in bins.values() for l in b["libs"])
         step("binaries are arm64 and link only system libraries",
@@ -278,7 +278,7 @@ def main():
         if a.built:
             # Tauri re-signs bundled executables (hardened runtime), so compare with signatures removed.
             same = {}
-            for n in ("common", "common-desktop"):
+            for n in ("ucompute", "ucompute-desktop"):
                 x, y = work / f"unsigned-packaged-{n}", work / f"unsigned-built-{n}"
                 shutil.copy(macos / n, x)
                 shutil.copy(a.built / n, y)
@@ -300,10 +300,10 @@ def main():
         gk = gatekeeper_on_download(work, a.dmg)
         step("Gatekeeper refuses a downloaded copy on first open, as the install notes say (ad-hoc signed; read-only "
              "spctl assessment, the Open Anyway approval stays manual)", gk["rejected"], **gk)
-        r = sh(str(macos / "common"), *DAEMON_ARGS, "--help", check=False)
+        r = sh(str(macos / "ucompute"), *DAEMON_ARGS, "--help", check=False)
         step("bundled daemon accepts the app's exact arguments", r.returncode == 0,
              args=DAEMON_ARGS, exit=r.returncode, stderr=r.stderr.strip()[:300])
-        EVIDENCE["daemon_version"] = sh(str(macos / "common"), "--version").stdout.strip()
+        EVIDENCE["daemon_version"] = sh(str(macos / "ucompute"), "--version").stdout.strip()
 
         inst = Install(work, app_src)
         sh("hdiutil", "detach", str(mnt))
@@ -316,7 +316,7 @@ def main():
         ok = len(sc) == 1 and sc[0][1] == app_pid and sc[0][2].split()[1:] == DAEMON_ARGS
         step("first launch: daemon healthy, started by the app with its exact arguments", ok, healthy_after_s=t,
              sidecar=sc)
-        data = inst.home / "Library/Application Support/Common"
+        data = inst.home / "Library/Application Support/UCompute"
         engine_dir = data / "backends/llama.cpp"
         step("fresh install provisioned the pinned engine inside the new HOME", engine_dir.is_dir()
              and any(engine_dir.iterdir()), data_dir=str(data), engine=[p.name for p in engine_dir.iterdir()])
@@ -367,7 +367,7 @@ def main():
         t = round(time.monotonic() - killed, 3)
         sc = inst.sidecars()
         wait(lambda: not any(alive(e) for e in engines2), 10, "daemon killed: its engine is stopped")
-        log = inst.home / "Library/Logs/org.commoncompute.desktop/daemon.log"
+        log = inst.home / "Library/Logs/org.ucompute.desktop/daemon.log"
         text = log.read_text(errors="replace") if log.is_file() else ""
         step("daemon killed (SIGKILL daemon only): the app restarts one daemon, /health within 10 s, its log holds both runs",
              daemon_restarted(sc[0][1], app_pid, t, text, daemon2, sc[0][0]), restarted_after_s=t, sidecar=sc,

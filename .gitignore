@@ -18,9 +18,9 @@ __pycache__/
 # Rust
 /target/
 
-# Local data dir when COMMON_HOME points into the repo
-/.common/
-/.common-split/
+# Local data dir when UCOMPUTE_HOME points into the repo
+/.ucompute/
+/.ucompute-split/
 
 # Node
 node_modules/

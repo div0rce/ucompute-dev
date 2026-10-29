@@ -377,7 +377,7 @@ describe("Devices: outcomes, waiting actions, pairing reads and focus", () => {
     const d = await screen.findByRole("dialog", { name: "Pair a device" });
     fake.routes["GET /api/pair/status"] = () => apiError("internal", "status unreadable", 500);
     await user.click(await within(d).findByRole("button", { name: "Pair this device" }));
-    expect(await within(d).findByText(/^Status not read at \d\d:\d\d:\d\d: Something went wrong inside Common\. Trying again\.$/)).toBeTruthy();
+    expect(await within(d).findByText(/^Status not read at \d\d:\d\d:\d\d: Something went wrong inside UCompute\. Trying again\.$/)).toBeTruthy();
     await tick();
     expect(within(within(d).getByRole("group", { name: "Pairing code" })).getByText("482 913")).toBeTruthy();
     delete fake.routes["GET /api/pair/status"];
@@ -388,7 +388,7 @@ describe("Devices: outcomes, waiting actions, pairing reads and focus", () => {
     fake.routes["GET /api/pair/status"] = () => apiError("internal", "status unreadable", 500);
     act(() => pairing.set({ code: "111222", addr: null, payload: QR_PAYLOAD, expiresAt: Date.now() - 1 }));
     await waitFor(() => expect(pairing.get()).toBeNull());
-    expect(within(d).getByRole("alert").textContent).toContain("Something went wrong inside Common.");
+    expect(within(d).getByRole("alert").textContent).toContain("Something went wrong inside UCompute.");
   });
 
   it("the Pair dialog never reads a network state not read yet as off, and nothing PUTs a guess", async () => {
@@ -443,7 +443,7 @@ describe("Devices: outcomes, waiting actions, pairing reads and focus", () => {
     await waitFor(async () => expect(await value()).toBe("Not applicable on this system"));
     act(() => firewall.set({ supported: true, allowed: false, rule_program: null }));
     expect(await value()).toBe("No rule for the service found");
-    act(() => firewall.set({ supported: true, allowed: true, rule_program: "common" }));
+    act(() => firewall.set({ supported: true, allowed: true, rule_program: "ucompute" }));
     expect(await value()).toBe("Rule for the service found");
   });
 

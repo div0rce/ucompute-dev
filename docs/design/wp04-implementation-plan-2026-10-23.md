@@ -2,20 +2,22 @@
 
 Working plan produced by an engineering-session workflow on 2026-10-23 (read-only audit and synthesis; not a decision record). Decisions live in docs/DECISIONS.md and docs/decisions/; status lives in docs/REQUIREMENTS.csv and docs/VERIFICATION.md.
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier). ADR-0005 §9 records the code as built.
+
 # WP-04 synthesis: split inference over the authenticated transport
 
-This is a read-only synthesis. Nothing was edited, built, run or committed. Code facts were re-checked at HEAD `177f7ed`. The working tree also holds uncommitted fix-round changes in `common-runtime`, `common-network`, `common-api` and `common-cli`, so line numbers will move. The plan starts only after that in-flight round is committed.
+This is a read-only synthesis. Nothing was edited, built, run or committed. Code facts were re-checked at HEAD `177f7ed`. The working tree also holds uncommitted fix-round changes in `ucompute-runtime`, `ucompute-network`, `ucompute-api` and `ucompute-cli`, so line numbers will move. The plan starts only after that in-flight round is committed.
 
 ## 0. Decisions taken across the three designs and two judges
 
 | Question | Chosen | Source | Why |
 |---|---|---|---|
-| Where the bridge lives | `crates/common-network/src/rpc.rs`, admitted through `tests/invariants.rs` `ALLOWED_MODULES` (empty today). The ledger names `crates/common-distributed`; ADR-0005 records the deviation. | D2 | `common-network` already depends on `common-runtime` (`ModelManager`) and `common-policy` (see `serve_peer_with`, `remote.rs:687`). No new crate and no injection hook are needed. |
+| Where the bridge lives | `crates/ucompute-network/src/rpc.rs`, admitted through `tests/invariants.rs` `ALLOWED_MODULES` (empty today). The ledger names `crates/ucompute-distributed`; ADR-0005 records the deviation. | D2 | `ucompute-network` already depends on `ucompute-runtime` (`ModelManager`) and `ucompute-policy` (see `serve_peer_with`, `remote.rs:687`). No new crate and no injection hook are needed. |
 | Split engine | A typed `LoadRequest.split` inside the existing `ModelManager` slot. There is no parallel `PoolSession`. | D2 | I-05 still holds: a `local` or `local_only` request has different load options, so the manager reloads locally and the split session closes. A test pins this. |
 | Flag hole | Add `--rpc`, `--device/-dev`, `--tensor-split/-ts`, `--split-mode/-sm`, `-mg/--main-gpu`, `-ngl/--n-gpu-layers`, `--fit`, `--list-devices` and `-lm/--load-mode` (b11609's mmap switch) to `RESERVED_FLAGS` (`process.rs:22`, 7 entries today). Rewrite the test at `process.rs:433`, which relies on `--rpc` passing through `extra_args`. | D1 + D2 | `validate_extra_args` accepts the two tokens `"--rpc" "1.2.3.4:1"`. In-tree code never reaches it, but it is a latent route to raw RPC on a LAN address. |
 | RDMA | Set `GGML_RPC_NO_RDMA=1` on both engines. Fail the load unless the log says `transport: TCP`. | D2 (strings confirmed by both judges) | `clean_environment` removes `GGML_*` but sets nothing, and libggml-rpc says "RDMA auto-negotiate enabled". |
 | Weights on disk on R | No `-c`, and `LLAMA_CACHE` is removed from the environment. | D2 | X-08: a cached copy would be a redistribution event. |
-| H-side owner check | Required. The bridge gives a QUIC stream only to TCP connections owned by the supervised `llama-server` pid. | D1 | Without it, any local user on H reaches R's unauthenticated rpc-server through Common. |
+| H-side owner check | Required. The bridge gives a QUIC stream only to TCP connections owned by the supervised `llama-server` pid. | D1 | Without it, any local user on H reaches R's unauthenticated rpc-server through UCompute. |
 | R-side owner check | Required. The `127.0.0.1:pR` listener must belong to the child pid before the first byte. At each tunnel open and on the 1 s tick, every established client of pR must be one of the daemon's own sockets. | D1 | `free_port` (`process.rs:134`) binds and drops its socket, so a local process can squat pR. A connect-probe readiness check would then send weights and prompt-invertible activations to the squatter. |
 | Mid-session policy | A 1 s tick on both sides re-runs `evaluate` / `may_serve` and the held check. Any Deny tears the session down within 5 s. | D1 | `groups_put` (`mesh.rs:1733`) closes no connection, so turning `allow_pooled_inference` off mid-session would otherwise never take effect. `// ponytail:` polling; switch to events if 1 s is too coarse. |
 | Memory cap on R | Linux `RLIMIT_AS`, `MALLOC_ARENA_MAX=2`, `PR_SET_PDEATHSIG(SIGKILL)` and nice 10. Spawn from a tokio worker task, never inside `spawn_blocking`, because PDEATHSIG fires when the parent *thread* exits. After `prctl`, `getppid()` is re-checked. | D1 + judge 2 | A hostile head can send `ALLOC_BUFFER` with no bytes. PDEATHSIG is tied to the thread, which none of the three designs caught. |
@@ -23,7 +25,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 | Failure semantics | Do not depend on llama.cpp aborting. On session loss H calls `manager.unload()` and maps in-flight requests to `peer_lost`, or to `peer_revoked` / `peer_held` / `policy_denied` when the local reason is known. There is no automatic local fallback, which amends ADR-0003 D6. | D2 | It avoids silent substitution. The ⚠️ abort behaviour does not matter. |
 | Hung stage | A silence watchdog: a request is in flight on H and no R→H byte arrives for `T_rpc`, so the tunnel is reset. `T_rpc` is pre-registered from R0/S1. | D3 | QUIC keep-alive cannot see a hung `GRAPH_COMPUTE`. |
 | Licence | Cross-device split loads need the catalog licence in {Apache-2.0, MIT}. Unknown-licence fixtures (stories15M, stories260K; B-011) are refused. | D1 | RPC uploads R's layer weights (X-08). |
-| Test escape hatch | One flag, `COMMON_TEST_SINGLE_HOST_POOL=1`. It lifts the licence gate and the Linux-only R rule **only when the peer's remote address is loopback**. | new | SINGLE-HOST tests can use stories15M and a Mac R, and the flag cannot weaken a real two-machine run. |
+| Test escape hatch | One flag, `UCOMPUTE_TEST_SINGLE_HOST_POOL=1`. It lifts the licence gate and the Linux-only R rule **only when the peer's remote address is loopback**. | new | SINGLE-HOST tests can use stories15M and a Mac R, and the flag cannot weaken a real two-machine run. |
 | Consent | The split request must carry `"acknowledged": true` against the disclosure text, as `privacy_put` does. Without it: 403 plus the text. Consent on `groups_put` loosening is deferred to Gate E (OD-9). | D1, trimmed | WP-04 needs an explicit disclosure. The group-loosening prompt is a desktop and Gate E concern. |
 | Memory evidence | In split mode, drop `--no-kv-offload --no-op-offload` (CPU branch, `process.rs:98`). Run the split head and its local reference both with `-lm none`. Measure the Mac with `footprint`. | D3 | F-03-02 needs memory figures that compare like with like. |
 | Correctness configurations | **P** (performance and memory): `--device RPC0,MTL0`; R holds blocks [0,k), the head holds [k,n) plus output. **C** (same backend): ggml-cpu on both stages, `--device RPC0 -ngl (n+1-k)`. R then holds [k,n) plus output, so a logits row crosses per token. | D2 + D3 | The F-03-04 wording requires the same backend. Arm64 against x86 CPU kernels is reported as measured and never relabelled (OD-3). |
@@ -40,10 +42,10 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 - At each commit: `cargo test`, `python3 scripts/validate_registry.py`, and a `docs/VERIFICATION.md` entry.
 - Never push.
 
-### C0. Run R0 first (lab-owned, no Common code)
+### C0. Run R0 first (lab-owned, no UCompute code)
 - **What:** run `ucompute-core-lab/rpc-dataflow/PREREGISTRATION.md` as written, with Amendment 1 (`footprint`). It is plaintext on loopback, SINGLE-HOST, with stories15M and configurations L, A, B and C.
-- **Additions needed by Common (record only, no pass rule):**
-  - (a) the `-lv 4` log text for `layer N assigned to device X` and the handshake `transport:` line, saved as `crates/common-runtime/tests/fixtures/b11609-rpc-split.log`;
+- **Additions needed by UCompute (record only, no pass rule):**
+  - (a) the `-lv 4` log text for `layer N assigned to device X` and the handshake `transport:` line, saved as `crates/ucompute-runtime/tests/fixtures/b11609-rpc-split.log`;
   - (b) the RPC device names from `--list-devices` with `--rpc` set (design 2 saw `RPC0`; confirm here);
   - (c) TCP connections per endpoint and whether they are long-lived;
   - (d) the longest silence on the socket during a request, which seeds `T_rpc`;
@@ -53,7 +55,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 - **Does not claim:** anything two-machine, or the QUIC bridge's overhead.
 
 ### C1. `runtime: reserve the split flags` (security fix, lands alone) — done in 5ef22fd (every b11609 spelling of the split, RPC, placement, model-source and verbosity flags)
-- **Files:** `crates/common-runtime/src/llamacpp/process.rs` (`RESERVED_FLAGS` grows to 18 entries; the test at :433 is rewritten to use a harmless flag).
+- **Files:** `crates/ucompute-runtime/src/llamacpp/process.rs` (`RESERVED_FLAGS` grows to 18 entries; the test at :433 is rewritten to use a harmless flag).
 - **Tests:**
   - `extra_args_cannot_set_split_flags`: both the two-token and the `--flag=value` forms of every flag above are refused with `invalid_request`.
   - The existing extra-args test still passes, using a non-reserved flag.
@@ -65,10 +67,10 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 - **Placement-log parser candidate (lab 7a35bfd or later, `src/placement_log.rs`, Apache-2.0, std only, no regex):** `parse(log)` reads `load_tensors: layer N assigned to device X`, `[negotiate_hello] handshake ok: … transport: T` and `using device RPCk (endpoint)`; `check(proof, stages, n_layer)` requires every layer 0..=n_layer exactly once on the planned device (the output layer with the last stage) and every handshake TCP, with actionable errors ("start the engine with -lv 5", "set GGML_RPC_DEBUG=1", "expected TCP (set GGML_RPC_NO_RDMA=1)", wrong/duplicate/missing layer). 5 tests on real b11609 lines, one over the committed R0 fixture. Its stage tuples match `rpc_split_args`. Port it with the mapping in C2 after review; it fails every load without -lv 5 and GGML_RPC_DEBUG=1, by design.
 - **Source to port (lab, 2026-10-23):** the `--device` / `--tensor-split` mapping comes from ucompute-core-lab `src/llamacpp.rs` at 1914372 or later, not the earlier 4-test version: it formats split weights with Rust's shortest round-trip decimal (`{w}`; `{:.9}` did not round-trip f32 values below about 0.0156: `split_text_round_trips_small_weights`) and refuses all-zero weights instead of treating them as an even split (b11609 then splits by free memory, `llama-model.cpp:1619`: `all_zero_weights_are_not_an_even_split`); 7 unit tests including the 20,000-partition round trip; Apache-2.0 like this repository. The engine's own `-lv 5` per-layer log confirmed the mapping on real runs (lab rpc-dataflow run 4).
 - **Files:**
-  - `crates/common-runtime/src/types.rs`:
+  - `crates/ucompute-runtime/src/types.rs`:
     - `LoadRequest.split: Option<Split { rpc_ports: Vec<u16>, devices: Vec<String>, tensor_split: Vec<f32>, n_gpu_layers: u32, no_mmap: bool }>`;
     - `LoadedModelInfo.split` (stages as placed);
-  - new `crates/common-runtime/src/llamacpp/split.rs`: port `llama_assign`, `tensor_split`, `tensor_split_arg` and `rpc_split_args` with their 4 tests from `ucompute-core-lab/src/llamacpp.rs` (lab-owned Apache-2.0 code from the same project);
+  - new `crates/ucompute-runtime/src/llamacpp/split.rs`: port `llama_assign`, `tensor_split`, `tensor_split_arg` and `rpc_split_args` with their 4 tests from `ucompute-core-lab/src/llamacpp.rs` (lab-owned Apache-2.0 code from the same project);
   - `process.rs` `build_args`, split branch:
     - `--rpc` rendered only as `127.0.0.1:<port>`;
     - `--device … --tensor-split … --split-mode layer -ngl <n> --fit off [-lm none]` (b11609 has no `--no-mmap`: it answers "error: invalid argument: --no-mmap"; `-lm/--load-mode none` disables mmap; checked 2026-10-24 with the pinned binary);
@@ -90,20 +92,20 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 
 ### C3. `runtime/cli: supervised ggml-rpc-server and socket-owner checks`
 - **Files:**
-  - new `crates/common-runtime/src/llamacpp/rpc_server.rs`. `start(engine_dir, logs, threads, mem_cap) -> RpcServer { child, port, device }` with:
+  - new `crates/ucompute-runtime/src/llamacpp/rpc_server.rs`. `start(engine_dir, logs, threads, mem_cap) -> RpcServer { child, port, device }` with:
     - args `-H 127.0.0.1 -p <free_port> -t <physical cores − 2>`, and never `-c` or `-d`;
     - `env_clear` + `clean_environment` − `LLAMA_CACHE` + `GGML_RPC_NO_RDMA=1` + `MALLOC_ARENA_MAX=2`;
     - `kill_on_drop`;
     - Linux `pre_exec`: `PR_SET_PDEATHSIG(SIGKILL)`, `getppid` re-check, `setrlimit(RLIMIT_AS, mem_cap)`, `setpriority(10)`;
     - spawned from an async task, with a doc comment explaining why;
     - readiness requires `listener_owned_by(child_pid, port)` before anything connects. If a squatter holds the port, retry once on a new port, then fail with `backend_failed`;
-  - new `crates/common-runtime/src/llamacpp/sockets.rs`:
+  - new `crates/ucompute-runtime/src/llamacpp/sockets.rs`:
     - `listener_owned_by(pid, port)` and `conn_peer_owned_by(pid, local_port, remote_port)`;
     - `established_clients(port) -> Vec<(port, owned_by_self)>`;
     - Linux implementation: `/proc/<pid>/fd` socket inodes against `/proc/net/tcp`;
     - macOS implementation: `/usr/sbin/lsof -nP -a -p <pid> -iTCP -Fn`;
     - no new crate (`libc` is already a dependency);
-  - `crates/common-cli/src/main.rs:221` `reap_orphaned_engines`: also reaps `ggml-rpc-server`.
+  - `crates/ucompute-cli/src/main.rs:221` `reap_orphaned_engines`: also reaps `ggml-rpc-server`.
 - **Tests:**
   - `rpc_server_binds_loopback_only` (and a connect to the host's LAN address is refused);
   - `rpc_server_args_are_fixed`;
@@ -121,7 +123,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 
 ### C4. `proto: minor 2, RPC session and tunnel messages`
 - **Files:**
-  - `proto/common/v1/control.proto` and `crates/common-network/src/proto.rs`, new `ControlMessage` oneof bodies:
+  - `proto/ucompute/v1/control.proto` and `crates/ucompute-network/src/proto.rs`, new `ControlMessage` oneof bodies:
     - `RpcSessionOpen = 10 {session_id(16 B), model_sha256, engine_release, layer_start, layer_end, n_layer, est_bytes, ttl_s}`;
     - `RpcSessionAccept = 11 {session_id, granted_bytes, threads, device}`;
     - `RpcTunnelOpen = 12 {session_id}`;
@@ -137,7 +139,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 
 ### C5. `network: RPC carriage (bridge and stage)`
 - **Files:**
-  - New `crates/common-network/src/rpc.rs`, H side, `SplitSession::open(conn, spec)`:
+  - New `crates/ucompute-network/src/rpc.rs`, H side, `SplitSession::open(conn, spec)`:
     - requires `negotiated_minor ≥ 2`, otherwise `protocol_incompatible` with an update hint;
     - opens the session stream, sends Open and waits up to 30 s for Accept;
     - binds `127.0.0.1:0` and keeps the listener;
@@ -166,7 +168,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
     - RPC frames have their own budget: 1 session stream plus 8 tunnels.
   - `tests/invariants.rs`: `ALLOWED_MODULES = ["rpc.rs"]`, plus a grep that every bind or connect in `rpc.rs` uses `Ipv4Addr::LOCALHOST`.
   - Audit events `session_open`, `session_close`, `rpc_tunnel_open`, `rpc_tunnel_close`: ids, counts, bytes and durations only, never content.
-  - Prometheus metric `common_rpc_tunnel_bytes_total{dir}`.
+  - Prometheus metric `ucompute_rpc_tunnel_bytes_total{dir}`.
 - **Tests** (two Nodes, one process, loopback QUIC):
   - `rpc_session_refused_without_pooled_policy_single_host` (a remote-only group; nothing spawned);
   - `pooled_needs_policy_on_both_ends_single_host` (a matrix over `allow_pooled` on H and R, `serve_peers`, held, revoked, networking off);
@@ -192,10 +194,10 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 
 ### C6. `models/api/cli: split target`
 - **Files:**
-  - `crates/common-models/src/gguf.rs`: `layer_bytes()` plus input and output bytes, using the gap rule of `feasibility::tensor_bytes`;
+  - `crates/ucompute-models/src/gguf.rs`: `layer_bytes()` plus input and output bytes, using the gap rule of `feasibility::tensor_bytes`;
   - `feasibility.rs`: `estimate_stage`;
   - `manager.rs`: `LoadOptions.split`; the plan uses the stage estimate; split load timeout = 300 s + R bytes ÷ 5 MB/s (`// ponytail:` tune from P1);
-  - `crates/common-api/src/openai.rs`:
+  - `crates/ucompute-api/src/openai.rs`:
     - `parse_target` accepts `split:<peer>`, a required `split_at`, optional `split_mode: pooled|same_backend` and a required `acknowledged`;
     - order inside `run()`: `evaluate(privacy, Peer, PooledInference)` → licence gate → resolve the hash → stage estimate → open or reuse `AppState.split` → `ensure_loaded`;
     - the envelope carries `placement` parsed from the log, not the plan;
@@ -205,7 +207,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
     - Mode B requests get `overloaded` while a split is loaded;
     - `/api/status` gains `loaded.info.split`;
   - `openapi.json`;
-  - `crates/common-cli`: `common run --split <peer> --split-at k [--same-backend]`, with an interactive disclosure prompt.
+  - `crates/ucompute-cli`: `ucompute run --split <peer> --split-at k [--same-backend]`, with an interactive disclosure prompt.
 - **Tests:**
   - `layer_bytes_sum_to_tensor_data` (stories15M and qwen0.5b);
   - `stage_estimate_below_full_model`;
@@ -245,7 +247,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
     - new **R11**: "other local users on loopback during a pooled session, polled owner checks". R10 is already spake2;
     - SD-07 note;
   - `docs/REQUIREMENTS.csv`:
-    - F-03-01, F-03-02 and F-03-04 move to `IMPLEMENTED_UNVERIFIED`, and their code paths become `crates/common-network/src/rpc.rs; crates/common-runtime/src/llamacpp/{split,rpc_server,sockets}.rs`;
+    - F-03-01, F-03-02 and F-03-04 move to `IMPLEMENTED_UNVERIFIED`, and their code paths become `crates/ucompute-network/src/rpc.rs; crates/ucompute-runtime/src/llamacpp/{split,rpc_server,sockets}.rs`;
     - F-03-03 is untouched;
     - F-03-10 moves to `IMPLEMENTED_UNVERIFIED` with its cap noted;
   - `docs/VERIFICATION.md`, `docs/PROGRESS.md`.
@@ -269,7 +271,7 @@ This is a read-only synthesis. Nothing was edited, built, run or committed. Code
 
 ## 1. Context
 
-WP-04 asks for static physical pooling: one model's transformer blocks split between two physical hosts, with traffic only over Common's authenticated, encrypted transport. Two-host Mode B (whole requests) is not pooling. llama.cpp's RPC layer offload is the only real stage executor available now (Appendix F). Its server is unauthenticated plaintext TCP with no memory cap, and its README says never to expose it (D-007). ADR-0003 D6 fixed the topology: loopback-only engines at both ends, one QUIC stream per TCP connection. This ADR fixes what D6 left open: who may open a session, how both loopback ends are bound to the right processes, limits, failure semantics, the disclosure, and code placement. It decides head-mode (star) dataflow only. Every byte goes between the origin and one peer, so the existing per-peer `PooledInference` policy is sufficient (lab Addendum 1).
+WP-04 asks for static physical pooling: one model's transformer blocks split between two physical hosts, with traffic only over UCompute's authenticated, encrypted transport. Two-host Mode B (whole requests) is not pooling. llama.cpp's RPC layer offload is the only real stage executor available now (Appendix F). Its server is unauthenticated plaintext TCP with no memory cap, and its README says never to expose it (D-007). ADR-0003 D6 fixed the topology: loopback-only engines at both ends, one QUIC stream per TCP connection. This ADR fixes what D6 left open: who may open a session, how both loopback ends are bound to the right processes, limits, failure semantics, the disclosure, and code placement. It decides head-mode (star) dataflow only. Every byte goes between the origin and one peer, so the existing per-peer `PooledInference` policy is sufficient (lab Addendum 1).
 
 ## 2. Verified facts (2026-10-23)
 
@@ -281,7 +283,7 @@ WP-04 asks for static physical pooling: one model's transformer blocks split bet
 | libggml-rpc prints `TCP (RDMA auto-negotiate enabled)`, contains `GGML_RPC_NO_RDMA`, logs `handshake ok: … transport: %s`, and refuses on `RPC server version mismatch` | ✅ (strings) |
 | Protocol v8.0.0; the server takes one client at a time; `--list-devices` opened two sequential connections | ⚠️ (one session, `--list-devices` only) |
 | An endpoint appears as device `RPC0`, in `--rpc` order | ⚠️ (one session); re-confirmed in R0 |
-| `--tensor-split` follows `--device` order; Common passes `--fit off -ngl 999` | ✅ (lab Addendum 5) |
+| `--tensor-split` follows `--device` order; UCompute passes `--fit off -ngl 999` | ✅ (lab Addendum 5) |
 | The input embedding stays on the head CPU; the output layer goes with layer `n_layer` | ⚠️ (llama.cpp source via Context7, lab) |
 | `validate_extra_args` accepts `--rpc <addr>` as two tokens; `RESERVED_FLAGS` has 7 entries | ✅ (`process.rs:22,37`) |
 | `groups_put` writes `group_updated` and closes no connection | ✅ (`mesh.rs:1733`) |
@@ -320,12 +322,12 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 - `engine_release` must equal R's pinned release. The platform may differ, and ggml's HELLO version check is the second gate.
 
 ### D4 Carriage
-- Protocol minor 2 adds `ControlMessage` bodies `RpcSessionOpen` (10), `RpcSessionAccept` (11) and `RpcTunnelOpen` (12). Each is the first frame of a new bidirectional stream on the existing pinned, mutually authenticated connection (ALPN `common/1`, unchanged).
+- Protocol minor 2 adds `ControlMessage` bodies `RpcSessionOpen` (10), `RpcSessionAccept` (11) and `RpcTunnelOpen` (12). Each is the first frame of a new bidirectional stream on the existing pinned, mutually authenticated connection (ALPN `ucompute/1`, unchanged).
 - A minor-1 peer refuses with `expected RemoteRequest`, so the feature fails closed. H refuses first with `protocol_incompatible`.
 - The session stream stays open for the session's life. Its FIN or reset, or the connection's loss, ends the session.
 - Each TCP connection on H's bridge becomes one tunnel stream carrying raw ggml RPC bytes after the first frame. TCP FIN maps to stream FIN, and TCP RST to stream reset.
 - H's bridge binds `127.0.0.1:0`, keeps the listener, and gives a stream only to connections owned by its supervised `llama-server` pid. On macOS the check uses `lsof`; on Linux, `/proc`.
-- `rpc.rs` is the only `common-network` module allowed to touch TCP. A test asserts every bind and connect in it is loopback.
+- `rpc.rs` is the only `ucompute-network` module allowed to touch TCP. A test asserts every bind and connect in it is loopback.
 
 ### D5 Authorization and consent
 **On H, before any socket or process:**
@@ -338,7 +340,7 @@ Mode C, one workload partitioned, between the origin H and exactly one peer R:
 
 **During the session:** both sides re-run their checks every second. Any Deny ends the session within 5 s.
 
-**Test flag:** `COMMON_TEST_SINGLE_HOST_POOL=1` lifts the licence gate and the Linux-only rule, and only for loopback peers.
+**Test flag:** `UCOMPUTE_TEST_SINGLE_HOST_POOL=1` lifts the licence gate and the Linux-only rule, and only for loopback peers.
 
 ### D6 Limits
 
@@ -372,11 +374,11 @@ Disclosure text, shown before the first session:
 > Pooling splits one model between this device and <R>. <R> receives the model weights for its part and, for every token, intermediate data from which your prompt and the reply can be reconstructed. The connection is encrypted; the other device is not. Pooling does not make a request more private than running it on <R>, and it is usually slower than running a model that fits here.
 
 ### D9 Code placement
-- `crates/common-network/src/rpc.rs` (carriage);
-- `crates/common-runtime/src/llamacpp/{split,rpc_server,sockets}.rs` (engines);
-- `crates/common-api` (target and consent).
+- `crates/ucompute-network/src/rpc.rs` (carriage);
+- `crates/ucompute-runtime/src/llamacpp/{split,rpc_server,sockets}.rs` (engines);
+- `crates/ucompute-api` (target and consent).
 
-This deviates from the ledger's `crates/common-distributed`. `common-network` already depends on `common-runtime` and `common-policy`, so a new crate would add a crate and an indirection and nothing else. Revisit when native frames (F-03-03) or a second stage executor arrive.
+This deviates from the ledger's `crates/ucompute-distributed`. `ucompute-network` already depends on `ucompute-runtime` and `ucompute-policy`, so a new crate would add a crate and an indirection and nothing else. Revisit when native frames (F-03-03) or a second stage executor arrive.
 
 ### D10 Evidence and claims
 - Two daemons on one host are SINGLE-HOST and never satisfy F-03-01, F-03-02 or Gate D.
@@ -389,11 +391,11 @@ This deviates from the ledger's `crates/common-distributed`. `common-network` al
 
 | Alternative | Decision |
 |---|---|
-| New `common-distributed` crate | Rejected for now (D9) |
+| New `ucompute-distributed` crate | Rejected for now (D9) |
 | Separate pooled engine outside `ModelManager` | Rejected. The single slot plus reload-on-different-options already keeps local work local, and a test pins it. |
 | Readiness by connect probe on R | Rejected. A squatter answers it (D3). |
 | Expose rpc-server on the LAN behind a firewall | Rejected (D-007, hard rule) |
-| SSH `-L` port-forward for an early cross-architecture check | Rejected. Cross-machine traffic goes only through Common's transport. |
+| SSH `-L` port-forward for an early cross-architecture check | Rejected. Cross-machine traffic goes only through UCompute's transport. |
 | One multiplexed QUIC stream for all TCP connections | Rejected. It needs extra framing and adds head-of-line blocking. |
 | `-c` tensor cache on R | Deferred (X-08 redistribution; owner decision) |
 | Event-driven policy teardown | Deferred. The 1 s tick covers every source, including `peers.json` written by another process. |
@@ -434,7 +436,7 @@ Empty until C1–C8, R0, S1 and P1 exist.
 
 Both are on the owner's home Wi-Fi. Both run a daemon API from the same commit; no app UI is driven.
 
-**Models:** catalog, Apache-2.0, already in this Mac's `.common`:
+**Models:** catalog, Apache-2.0, already in this Mac's `.ucompute`:
 - R1a: `qwen2.5-0.5b-instruct-q8_0`, 24 blocks, hidden 896, so 3,584 B per f32 activation; `split_at=12`.
 - R1b, acceptance: `qwen2.5-1.5b-instruct-q4_k_m`, 28 blocks, hidden 1536, so 6,144 B; `split_at=14`.
 
@@ -443,8 +445,8 @@ R needs no model copy for the split. The local CPU references on sentinel need O
 ### Stage order
 
 1. **R0 (lab, SINGLE-HOST, plaintext loopback):** C0. It produces the log fixture, `T_rpc` seed, footprint baseline and weight-pattern positive control.
-2. **S1-M (SINGLE-HOST, this Mac):** H = dev daemon, R = a second daemon under `COMMON_TEST_SINGLE_HOST_POOL=1`. Run the full C5 and C6 suites. Also run configuration C with ggml-cpu arm64 on both stages through the real tunnel: the same-backend carriage-exactness candidate for F-03-04 (OD-3). Compare bytes per token with R0 to isolate the QUIC and AEAD cost.
-3. **S1-L (SINGLE-HOST, sentinel):** `scripts/mac-host.sh run 'cd ~/src/common && cargo test -p common-runtime -p common-network -- --include-ignored'` for the Linux-only tests (RLIMIT_AS, PDEATHSIG and thread survival, `/proc` owner checks, squatting). Record the idle rpc-server `VmPeak` as the RLIMIT baseline.
+2. **S1-M (SINGLE-HOST, this Mac):** H = dev daemon, R = a second daemon under `UCOMPUTE_TEST_SINGLE_HOST_POOL=1`. Run the full C5 and C6 suites. Also run configuration C with ggml-cpu arm64 on both stages through the real tunnel: the same-backend carriage-exactness candidate for F-03-04 (OD-3). Compare bytes per token with R0 to isolate the QUIC and AEAD cost.
+3. **S1-L (SINGLE-HOST, sentinel):** `scripts/mac-host.sh run 'cd ~/src/ucompute && cargo test -p ucompute-runtime -p ucompute-network -- --include-ignored'` for the Linux-only tests (RLIMIT_AS, PDEATHSIG and thread survival, `/proc` owner checks, squatting). Record the idle rpc-server `VmPeak` as the RLIMIT baseline.
 4. **P1 (physical), as below.**
 
 ### P1 procedure
@@ -453,10 +455,10 @@ Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/
 
 **P1.0 Preflight**
 - Same commit on both hosts:
-  - sentinel: `scripts/mac-host.sh sync`, then `cargo build --release -p common-cli`;
-  - Mac: `cargo build --release -p common-cli`.
+  - sentinel: `scripts/mac-host.sh sync`, then `cargo build --release -p ucompute-cli`;
+  - Mac: `cargo build --release -p ucompute-cli`.
 - Quit the installed app; `state.py` saves its state.
-- Start the H dev daemon with `COMMON_HOME=$PWD/.common-split`. Fill that home with **hardlinks** (`cp -al`) of `.common/models` and `backends`: no extra disk, since this Mac has about 4.2 GB free (B-010).
+- Start the H dev daemon with `UCOMPUTE_HOME=$PWD/.ucompute-split`. Fill that home with **hardlinks** (`cp -al`) of `.ucompute/models` and `backends`: no extra disk, since this Mac has about 4.2 GB free (B-010).
 - `caffeinate -dimsu` for the run (a sleeping Mac invalidated an earlier run).
 - Record both host manifests, the engine archive hashes and the model sha256.
 - Confirm:
@@ -533,7 +535,7 @@ Pass for each case:
 
 **P1.10 Audit join and leak scan**
 - `session_open` and `session_close` on both sides share `session_id`.
-- Scan the audit logs, daemon logs, engine logs and `common diagnostics` bundles for the canaries and the weight pattern: none may appear.
+- Scan the audit logs, daemon logs, engine logs and `ucompute diagnostics` bundles for the canaries and the weight pattern: none may appear.
 
 **P1.11 Teardown**
 - No rpc-server or listener left.
@@ -581,7 +583,7 @@ Gate D is not declared. Updates also go to ADR-0005 §8 and §9, ADR-0003 §9.7,
 | OD-1 | Accept ADR-0005 (Proposed → Accepted) | Nothing; ADR-0003 was built while Proposed | Build under Proposed |
 | OD-2 | Approve logprobs/top_logprobs passthrough (C7) as a labelled proxy for raw logits (D-005) | Only the per-position logit half of F-03-04 | Skip C7; F-03-04 stays IMPLEMENTED_UNVERIFIED |
 | OD-3 | F-03-04 acceptance: does a SINGLE-HOST same-backend run through the real tunnel satisfy the row (Gate D still needs its two-machine numerical check)? Is the cross-ISA CPU configuration C reported only? Is a matched Mac-to-Mac pair wanted (needs the macOS R role and the M2 Pro host)? | F-03-04 status only | Report everything as measured; row not promoted |
-| OD-4 | Pull `qwen2.5-0.5b-q8_0` and `qwen2.5-1.5b-q4_k_m` (about 1.8 GB, Apache-2.0, catalog-verified) into sentinel's `~/.common-acceptance` for local CPU references. It is within the host's recorded engineering use, but the standing authorization names only the Mac and the HP laptop. | F-03-02 on the R side, cross-ISA comparison | Do not pull; F-03-02 R side stays open |
+| OD-4 | Pull `qwen2.5-0.5b-q8_0` and `qwen2.5-1.5b-q4_k_m` (about 1.8 GB, Apache-2.0, catalog-verified) into sentinel's `~/.ucompute-acceptance` for local CPU references. It is within the host's recorded engineering use, but the standing authorization names only the Mac and the HP laptop. | F-03-02 on the R side, cross-ISA comparison | Do not pull; F-03-02 R side stays open |
 | OD-5 | Accept the in-process UDP relay on the real path as the capture method, or run `sudo tcpdump` on the Mac yourself (sentinel has no sudo) | Nothing | Relay |
 | OD-6 | Licence allowlist for pooled weight upload {Apache-2.0, MIT}; unknown-licence fixtures refused across devices (B-011, X-08) | Nothing | As proposed |
 | OD-7 | R2 capacity run: Qwen2.5-7B Q4_K_M (about 4.7 GB) does not fit on this Mac's disk (4.2 GB free). It needs sentinel as H and a Mac R role (not built) | R2 only | Deferred |

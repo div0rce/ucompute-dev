@@ -43,7 +43,7 @@ describe("Devices: pairing and trust", () => {
     renderDevices();
     const sw = await screen.findByRole("switch", { name: "Networking" });
     expect(sw).toHaveProperty("checked", false);
-    expect(screen.getByText(/Off by default\. When on, Common listens/)).toBeTruthy();
+    expect(screen.getByText(/Off by default\. When on, UCompute listens/)).toBeTruthy();
     // This computer is preselected: its identity is in the inspector.
     await waitFor(() => expect(within(inspector()).getByText(NETWORK.short_label)).toBeTruthy());
     expect(within(inspector()).getByText(grouped(SELF_ID))).toBeTruthy();

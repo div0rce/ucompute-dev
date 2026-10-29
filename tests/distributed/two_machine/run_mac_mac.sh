@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../../.."
 : "${OUT:?set OUT}"
 HOST="${MAC_HOST:-192.168.1.115}"
 USER_="${MAC_USER:-kylehebron}"
-KEY="${MAC_KEY:-$HOME/.ssh/common_kyle_ed25519}"
+KEY="${MAC_KEY:-$HOME/.ssh/ucompute_kyle_ed25519}"
 H=scripts/mac-host.sh
 mkdir -p "$OUT"
 
@@ -27,10 +27,10 @@ curl -s -m 5 127.0.0.1:18303/health >/dev/null || { echo "B's API is not answeri
 # Keep B awake for the whole run (ends when this script's ssh session ends).
 ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -f "$USER_@$HOST" "caffeinate -i -t 7200 >/dev/null 2>&1 &"
 
-QUIT="$H run 'pkill -TERM -x common-desktop'"
-CRASH="$H run 'pkill -KILL -x common-desktop'"
-START="$H run 'open -a /Applications/Common.app'"
-PROCS="$H run 'pgrep -f \"Common.app/Contents/MacOS/common serve|llama-server\" | wc -l | tr -d \" \"'"
+QUIT="$H run 'pkill -TERM -x ucompute-desktop'"
+CRASH="$H run 'pkill -KILL -x ucompute-desktop'"
+START="$H run 'open -a /Applications/UCompute.app'"
+PROCS="$H run 'pgrep -f \"UCompute.app/Contents/MacOS/ucompute serve|llama-server\" | wc -l | tr -d \" \"'"
 MDNS_FLAG=""
 [ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 

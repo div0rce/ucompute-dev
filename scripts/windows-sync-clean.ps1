@@ -1,8 +1,8 @@
 # Delete files under -Root that HEAD does not track (the list in .sync-manifest, written by
-# scripts/windows-host.sh sync), keeping build outputs: target/, .common/, node_modules/, the staged
+# scripts/windows-host.sh sync), keeping build outputs: target/, .ucompute/, node_modules/, the staged
 # sidecar, gen/ and dist/. Refuses to delete anything when the result looks implausible, so a path bug
 # can never wipe the tree (2026-10-22: an escaping bug once computed every relative path wrongly).
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-sync-clean.ps1 -Root C:\Users\<user>\src\common [-DryRun]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-sync-clean.ps1 -Root C:\Users\<user>\src\ucompute [-DryRun]
 param(
     [Parameter(Mandatory = $true)][string]$Root,
     [int]$Max = 200,
@@ -15,7 +15,7 @@ $root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\')
 $keep = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 Get-Content -Encoding UTF8 -LiteralPath (Join-Path $root '.sync-manifest') | ForEach-Object { [void]$keep.Add($_) }
 if ($keep.Count -lt 50) { throw "the manifest lists only $($keep.Count) files; refusing to clean" }
-$skip = '^(target|\.common)/|(^|/)node_modules/|^apps/desktop/src-tauri/(binaries|gen|target)/|^apps/desktop/dist/'
+$skip = '^(target|\.ucompute)/|(^|/)node_modules/|^apps/desktop/src-tauri/(binaries|gen|target)/|^apps/desktop/dist/'
 $present = 0
 $stale = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {
         $rel = $_.FullName.Substring($root.Length + 1).Replace('\', '/')

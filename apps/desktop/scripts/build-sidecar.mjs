@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Writes THIRD_PARTY_NOTICES for what the bundle ships (src-tauri/gen/THIRD_PARTY_NOTICES.txt, bundled through
-// tauri.conf.json bundle.resources), then builds the Common daemon from THIS checkout, stages it as the Tauri
+// tauri.conf.json bundle.resources), then builds the UCompute daemon from THIS checkout, stages it as the Tauri
 // sidecar, and checks that it accepts the exact arguments the app starts it with (src-tauri/daemon-args.txt).
 //
 // `pnpm tauri build` runs this first (tauri.conf.json > build.beforeBuildCommand), so a bundle can never
@@ -42,7 +42,7 @@ const python = [["python3"], ["python"], ["py", "-3"]].find(([cmd, ...pre]) => {
 if (!python) fail("THIRD_PARTY_NOTICES needs Python 3 (scripts/gen_notices.py); none of python3, python, py -3 runs");
 mkdirSync(dirname(notices), { recursive: true });
 try {
-  const gen = ["scripts/gen_notices.py", "--out", notices, "--crate", "common-cli", "--crate", "common-desktop", "--js"];
+  const gen = ["scripts/gen_notices.py", "--out", notices, "--crate", "ucompute-cli", "--crate", "ucompute-desktop", "--js"];
   execFileSync(python[0], [...python.slice(1), ...gen, "--target", triple], {
     cwd: root,
     stdio: "inherit",
@@ -52,12 +52,12 @@ try {
   fail("scripts/gen_notices.py failed (see above: a licence deny.toml does not allow, or it could not run)");
 }
 
-const cargo = ["build", "--release", "--locked", "-p", "common-cli", "--manifest-path", join(root, "Cargo.toml")];
+const cargo = ["build", "--release", "--locked", "-p", "ucompute-cli", "--manifest-path", join(root, "Cargo.toml")];
 if (triple !== host) cargo.push("--target", triple);
 execFileSync("cargo", cargo, { stdio: "inherit" });
 
-const built = join(root, "target", ...(triple === host ? [] : [triple]), "release", `common${exe}`);
-const staged = join(desktop, "src-tauri", "binaries", `common-${triple}${exe}`);
+const built = join(root, "target", ...(triple === host ? [] : [triple]), "release", `ucompute${exe}`);
+const staged = join(desktop, "src-tauri", "binaries", `ucompute-${triple}${exe}`);
 mkdirSync(dirname(staged), { recursive: true });
 copyFileSync(built, staged);
 if (!exe) chmodSync(staged, 0o755);

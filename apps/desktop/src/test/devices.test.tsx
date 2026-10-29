@@ -59,7 +59,7 @@ describe("E1: no macOS wording on other systems", () => {
       ["Kitchen PC", "Kitchen PC"],
     ]) {
       vi.resetModules();
-      localStorage.setItem("common.settings", JSON.stringify({ device: "gpu", n_ctx: 4096, device_name: stored }));
+      localStorage.setItem("ucompute.settings", JSON.stringify({ device: "gpu", n_ctx: 4096, device_name: stored }));
       const fresh = await import("../state/stores");
       expect(fresh.settings.get()).toEqual({ device: "gpu", n_ctx: 4096, device_name: expected });
     }
@@ -124,7 +124,7 @@ describe("Devices: discovery and connection state", () => {
     expect((await within(panel).findByRole("alert")).textContent).toContain("The connection to the other device was lost.");
     expect(within(panel).getByRole("alert").textContent).toContain("firewall may block UDP port 8193");
 
-    // 2. Another Common device answers at the typed address: refused, nothing changes.
+    // 2. Another UCompute device answers at the typed address: refused, nothing changes.
     await user.type(addr, "10.12.0.45:8193{Enter}");
     // Never "not authorized, pair it": the address proved nothing, and the device itself may be fine.
     await waitFor(() =>

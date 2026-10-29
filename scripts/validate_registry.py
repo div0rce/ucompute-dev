@@ -45,10 +45,11 @@ def main() -> int:
     original = [r for r in rows if not r["id"].startswith("U-")]
     if len(original) != 148:
         errs.append(f"CSV has {len(original)} original rows, expected 148")
-    # Freeze original scope at ddc39f6 (ADR-0004 decision 4, amended 2026-10-19); ledger progress remains mutable.
+    # Freeze original scope at ddc39f6 (ADR-0004 decision 4, amended 2026-10-19), with the product's names amended by
+    # D-030 (six acceptance criteria name the `ucompute` commands); ledger progress remains mutable.
     protected = [{k: r[k] for k in ("id", "priority", "milestone", "dependencies", "description", "acceptance_criteria")} for r in original]
     digest = hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    if digest != "c22f992989e5fa50be35af7967cf48d38f3eed943ca1b071c2d3fb01f42259ce":
+    if digest != "64f43bf23880ee39a173561dc16027a598c3e9185e06334fadf9fd2cfab49142":
         errs.append("original IDs, priorities, milestones, dependencies, descriptions or acceptance criteria changed from ddc39f6")
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:

@@ -50,8 +50,8 @@ class NoticesStep(unittest.TestCase):
         self.assertEqual(Path(cwd).resolve(), ROOT)
         self.assertEqual(utf8, "1")
         out = str(ROOT / "apps/desktop/src-tauri/gen/THIRD_PARTY_NOTICES.txt")
-        self.assertEqual(argv, ["scripts/gen_notices.py", "--out", out, "--crate", "common-cli", "--crate",
-                                "common-desktop", "--js", "--target", TRIPLE], json.dumps(argv))
+        self.assertEqual(argv, ["scripts/gen_notices.py", "--out", out, "--crate", "ucompute-cli", "--crate",
+                                "ucompute-desktop", "--js", "--target", TRIPLE], json.dumps(argv))
 
     def test_notices_written_then_the_daemon_is_built(self):
         self.python_stub(0)

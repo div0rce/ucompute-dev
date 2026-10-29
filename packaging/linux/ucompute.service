@@ -1,0 +1,13 @@
+# systemd user unit for the UCompute daemon.
+# Install and remove: packaging/linux/README.md. Data: $XDG_DATA_HOME/ucompute or ~/.local/share/ucompute.
+[Unit]
+Description=UCompute daemon (ucompute serve, API on 127.0.0.1:8192)
+
+[Service]
+ExecStart=%h/.local/bin/ucompute serve --host 127.0.0.1 --port 8192
+Restart=on-failure
+RestartSec=2
+# KillMode=control-group (the default) stops the engine (llama-server) together with the daemon.
+
+[Install]
+WantedBy=default.target

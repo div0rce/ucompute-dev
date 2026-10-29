@@ -321,8 +321,8 @@ describe("attention and the announcer", () => {
     daemon.set({ reachable: true, responding: true, version: "0.1.0", status: STATUS, spawned: false });
     // The window is open on the (fake) service too: the Pair dialog's poller ends the session when the service says so.
     const fake = installFakeDaemon();
-    fake.pairing.session = { code: "482913", port: 51234, pair_addr: "192.168.1.10:51234", qr_payload: "common-pair:v1:x", expires_at: Math.floor(Date.now() / 1000) + 102 };
-    pairing.set({ code: "482913", addr: "192.168.1.10:51234", payload: "common-pair:v1:x", expiresAt: Date.now() + 102_000 });
+    fake.pairing.session = { code: "482913", port: 51234, pair_addr: "192.168.1.10:51234", qr_payload: "ucompute-pair:v1:x", expires_at: Math.floor(Date.now() / 1000) + 102 };
+    pairing.set({ code: "482913", addr: "192.168.1.10:51234", payload: "ucompute-pair:v1:x", expiresAt: Date.now() + 102_000 });
     render(<StatusBar />);
     // The countdown is visible but not part of the button's name, which would otherwise change every second.
     const btn = within(bar()).getByRole("button", { name: "Pairing open" });

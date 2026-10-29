@@ -1,17 +1,19 @@
 # Mesh fixes on two physical Macs, packaged app on Kyle's MacBook Pro (2026-10-21)
 
-**Two-machine evidence, partial.** Two installed desktop apps built from 6ab9f8b on two different Macs on one home Wi-Fi network (192.168.1.0/24). Driver: `tests/distributed/two_machine/discovery_two_machine.py` (A = this Mac's daemon API, B = Kyle's daemon API through an SSH tunnel to its loopback port; peer traffic is Common's own QUIC transport). Raw API logs and results are in `mesh-physical-2026-10-21/`. Kyle's MacBook went to sleep twice during the runs (SSH timed out, pings answered only by its sleep proxy); every check that ran while it was asleep is marked **invalid** below and must be repeated. The Windows laptop was not on this network, so nothing here covers Windows.
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
+**Two-machine evidence, partial.** Two installed desktop apps built from 6ab9f8b on two different Macs on one home Wi-Fi network (192.168.1.0/24). Driver: `tests/distributed/two_machine/discovery_two_machine.py` (A = this Mac's daemon API, B = Kyle's daemon API through an SSH tunnel to its loopback port; peer traffic is UCompute's own QUIC transport). Raw API logs and results are in `mesh-physical-2026-10-21/`. Kyle's MacBook went to sleep twice during the runs (SSH timed out, pings answered only by its sleep proxy); every check that ran while it was asleep is marked **invalid** below and must be repeated. The Windows laptop was not on this network, so nothing here covers Windows.
 
 | | A: owner's Mac ("mous") | B: Kyle's MacBook Pro |
 |---|---|---|
 | Machine | MacBook Air, Apple M2, 8 GB, macOS 26.2, 192.168.1.176 | MacBook Pro, Apple M2 Pro, 16 GB, macOS 15.7.9, 192.168.1.115 |
-| App | `/Applications/Common.app` from 6ab9f8b (daemon sha256 `0e87970e…`, shell `47eca2cf…`), same bundle as B | built on B from 6ab9f8b (`pnpm tauri build`), installed per-user |
+| App | `/Applications/UCompute.app` from 6ab9f8b (daemon sha256 `0e87970e…`, shell `47eca2cf…`), same bundle as B | built on B from 6ab9f8b (`pnpm tauri build`), installed per-user |
 
 ## Packaged app (on B)
 
-`python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/Common_0.1.0_aarch64.dmg --built target/release --work <empty>` on Kyle's Mac: **ALL PASS** (15 checks, `packaged-app-kyle-m2pro.json`). Binaries arm64 and identical to the build; ad-hoc signature verifies (no Developer ID, B-008); the bundled daemon accepts the app's exact arguments; fresh-home install healthy in 1.49 s with the pinned engine downloaded; golden completion on `MTL0 (Apple M2 Pro)` at 551 and 585 tok/s (stories15M fixture: a path check, not performance); quit, restart, crash (daemon gone 0.73 s) and restart leave nothing running.
+`python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg --built target/release --work <empty>` on Kyle's Mac: **ALL PASS** (15 checks, `packaged-app-kyle-m2pro.json`). Binaries arm64 and identical to the build; ad-hoc signature verifies (no Developer ID, B-008); the bundled daemon accepts the app's exact arguments; fresh-home install healthy in 1.49 s with the pinned engine downloaded; golden completion on `MTL0 (Apple M2 Pro)` at 551 and 585 tok/s (stories15M fixture: a path check, not performance); quit, restart, crash (daemon gone 0.73 s) and restart leave nothing running.
 
-The full Rust suite on B (quiet, load 1.1): `COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 COMMON_MDNS=0 cargo test --workspace --no-fail-fast` → **409 passed, 0 failed, 2 ignored**, including `peer_flood_throttled_through_daemon_single_host`, which fails only on the loaded owner's Mac (docs/VERIFICATION.md 2026-10-21).
+The full Rust suite on B (quiet, load 1.1): `UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 UCOMPUTE_MDNS=0 cargo test --workspace --no-fail-fast` → **409 passed, 0 failed, 2 ignored**, including `peer_flood_throttled_through_daemon_single_host`, which fails only on the loaded owner's Mac (docs/VERIFICATION.md 2026-10-21).
 
 ## Results
 

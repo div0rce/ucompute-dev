@@ -42,7 +42,7 @@ describe("Activity", () => {
       "Qwen2.5 1.5B Instruct (Q4_K_M) on this computer: done, 160 tokens in 4 s",
       "Qwen2.5 1.5B Instruct (Q4_K_M) on Studio Mac: done, 120 tokens in 4.6 s",
       "Connected to Laptop (outbound) at 172.20.10.6:8193",
-      "Qwen2.5 1.5B Instruct (Q4_K_M) on this computer: failed: Common is busy with other requests, tokens unknown in 0 s",
+      "Qwen2.5 1.5B Instruct (Q4_K_M) on this computer: failed: UCompute is busy with other requests, tokens unknown in 0 s",
       "Paired with Studio Mac",
       "Pairing window opened for 120 s",
     ]);
@@ -59,7 +59,7 @@ describe("Activity", () => {
     expect(rowNames(grid)).toEqual([
       "Refused Studio Mac: This computer is not authorized to run that on the selected device (192.168.1.77:8193)",
       "Lost connection to Laptop: timed out after 1 min",
-      "Qwen2.5 1.5B Instruct (Q4_K_M) on this computer: failed: Common is busy with other requests, tokens unknown in 0 s",
+      "Qwen2.5 1.5B Instruct (Q4_K_M) on this computer: failed: UCompute is busy with other requests, tokens unknown in 0 s",
     ]);
     await user.click(screen.getByRole("button", { name: /^Execution/ }));
     expect(screen.getByText("Local jobs since the service started; kept in memory (last 256).")).toBeTruthy();

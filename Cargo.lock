@@ -660,239 +660,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "common-artifacts",
- "common-core",
- "common-hardware",
- "common-identity",
- "common-models",
- "common-network",
- "common-observability",
- "common-policy",
- "common-runtime",
- "futures-util",
- "hex",
- "libc",
- "prometheus",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "common-artifacts"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "common-hardware",
- "flate2",
- "hex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "common-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "common-api",
- "common-artifacts",
- "common-core",
- "common-hardware",
- "common-identity",
- "common-models",
- "common-network",
- "common-observability",
- "common-policy",
- "common-runtime",
- "futures-util",
- "hex",
- "libc",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "common-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "common-desktop"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "common-hardware"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "serde",
- "serde_json",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "common-identity"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "hex",
- "ring",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "common-integration-tests"
-version = "0.1.0"
-dependencies = [
- "common-api",
- "common-artifacts",
- "common-core",
- "common-hardware",
- "common-models",
- "common-runtime",
- "futures-util",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "common-models"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "common-network"
-version = "0.1.0"
-dependencies = [
- "common-artifacts",
- "common-core",
- "common-hardware",
- "common-identity",
- "common-observability",
- "common-policy",
- "common-runtime",
- "futures-util",
- "hex",
- "hmac",
- "if-addrs",
- "libc",
- "mdns-sd",
- "prost",
- "quinn",
- "ring",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2",
- "spake2",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "common-observability"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "common-hardware",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "common-policy"
-version = "0.1.0"
-dependencies = [
- "common-core",
- "common-identity",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "common-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "common-artifacts",
- "common-core",
- "common-hardware",
- "common-models",
- "futures-util",
- "libc",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5046,6 +4813,239 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ucompute-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures-util",
+ "hex",
+ "libc",
+ "prometheus",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "ucompute-artifacts",
+ "ucompute-core",
+ "ucompute-hardware",
+ "ucompute-identity",
+ "ucompute-models",
+ "ucompute-network",
+ "ucompute-observability",
+ "ucompute-policy",
+ "ucompute-runtime",
+ "uuid",
+]
+
+[[package]]
+name = "ucompute-artifacts"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "ucompute-core",
+ "ucompute-hardware",
+ "zip",
+]
+
+[[package]]
+name = "ucompute-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "hex",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ucompute-api",
+ "ucompute-artifacts",
+ "ucompute-core",
+ "ucompute-hardware",
+ "ucompute-identity",
+ "ucompute-models",
+ "ucompute-network",
+ "ucompute-observability",
+ "ucompute-policy",
+ "ucompute-runtime",
+]
+
+[[package]]
+name = "ucompute-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ucompute-desktop"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ucompute-hardware"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "ucompute-core",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ucompute-identity"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ucompute-core",
+]
+
+[[package]]
+name = "ucompute-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "ucompute-api",
+ "ucompute-artifacts",
+ "ucompute-core",
+ "ucompute-hardware",
+ "ucompute-models",
+ "ucompute-runtime",
+]
+
+[[package]]
+name = "ucompute-models"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ucompute-core",
+]
+
+[[package]]
+name = "ucompute-network"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hex",
+ "hmac",
+ "if-addrs",
+ "libc",
+ "mdns-sd",
+ "prost",
+ "quinn",
+ "ring",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spake2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ucompute-artifacts",
+ "ucompute-core",
+ "ucompute-hardware",
+ "ucompute-identity",
+ "ucompute-observability",
+ "ucompute-policy",
+ "ucompute-runtime",
+]
+
+[[package]]
+name = "ucompute-observability"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ucompute-core",
+ "ucompute-hardware",
+]
+
+[[package]]
+name = "ucompute-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ucompute-core",
+ "ucompute-identity",
+]
+
+[[package]]
+name = "ucompute-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "ucompute-artifacts",
+ "ucompute-core",
+ "ucompute-hardware",
+ "ucompute-models",
+ "uuid",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "uds_windows"

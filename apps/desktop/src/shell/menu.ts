@@ -2,7 +2,7 @@
 // modern Windows apps; every command is reachable from the rail, toolbars, context menus and keys there). Starts from
 // Tauri's default menu (app, Edit, View, Window, Help: Edit carries ⌘C/⌘V for text fields), then adds Settings… to the
 // app menu, a Go menu and Keyboard Shortcuts to Help. `core:menu:default` (in `core:default`) covers every call.
-// The app menu is named after `productName` ("Common"); the window and rail say "UCompute" (owner decision, D-018).
+// The app menu is named after `productName` ("UCompute"), the same name the window and rail show (D-018, D-028).
 import type { Submenu } from "@tauri-apps/api/menu";
 import { go, SECTIONS } from "../router";
 import { inTauri, isMac } from "../ui/contextMenu";

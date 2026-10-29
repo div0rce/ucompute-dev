@@ -1,6 +1,6 @@
-# UCompute desktop app (formerly Common desktop)
+# UCompute desktop app
 
-The desktop app is a thin shell around the daemon. A Rust daemon (`common serve`) owns models,
+The desktop app is a thin shell around the daemon. A Rust daemon (`ucompute serve`) owns models,
 hardware probing and inference and exposes a local HTTP API on `http://127.0.0.1:8192`. This Tauri 2 +
 React 19 app only renders that API; the Tauri Rust side does four things: it starts the bundled daemon
 when none is running (restarts it if it dies, and stops it on exit), it keeps the daemon's output in a capped log
@@ -9,15 +9,15 @@ user's consent, adds the daemon's firewall rule (`firewall_status`, `allow_throu
 
 All API access lives in `src/api/client.ts`. If the daemon contract changes, that is the one file to edit.
 Plain-language error texts live in `src/api/errors.ts` and are checked against
-`crates/common-core/src/error.rs` by `src/api/errors.test.ts`.
+`crates/ucompute-core/src/error.rs` by `src/api/errors.test.ts`.
 
 ## The app (UI 2.0, 1860196)
 
 A computing-network control center (`docs/design/desktop-ui-2-plan.md`): a rail with seven sections
 (Mod+1 … Mod+7), contextual toolbars, sortable dense tables (APG grid with cell focus and a column chooser), a
 resizable inspector with tabs, and a status bar fed only by real API fields. Window and rail say "UCompute",
-the product's name (D-021; Common is its former name); bundle, installer and data paths stay "Common" for now
-(`Common.app`, `common` data folders), as D-021 keeps code identifiers unchanged. Routes are `#/<section>[/<id>][?params]`; the old
+the product's name, as do the bundle, installers and data folders (`UCompute.app`, `org.ucompute.desktop`, `UCompute`
+data folders; D-028, no compatibility with the former name). Routes are `#/<section>[/<id>][?params]`; the old
 routes stay as aliases: `#/home` → Dashboard, `#/peers` → Devices, `#/hardware` → this device's Hardware tab,
 `#/performance` → Jobs, `#/diagnostics` → Activity, `#/privacy` → Settings › Privacy.
 
@@ -40,14 +40,14 @@ Swarm or Cloud controls exist (D-019).
   `GET/PUT /api/network`) and **Pair a device…**, which opens the Pair dialog: **Show a code** (`POST
   /api/pair/start`: the six-digit code, the `pair_addr` to type on the other device, the QR payload as text and a
   countdown; polls `GET /api/pair/status`) or **Enter a code** (address and code, or the pasted
-  `common-pair:v1:…` text alone; a wrong code shows the `pairing_failed` text, a lockout `pairing_locked`; spaces
+  `ucompute-pair:v1:…` text alone; a wrong code shows the `pairing_failed` text, a lockout `pairing_locked`; spaces
   in the code are ignored). A nearby device's only action is Pair with it, which prefills the address. This
   device's own id is never listed as nearby.
   - Selection actions: **Connect** (paired, networking on, not connected; `POST /api/peers/{id}/connect` `{}`
     or `{addr}`), **Disconnect** (connected; `POST /api/peers/{id}/disconnect`, absent on daemons without
     `held`), Remove (unpair, confirmed). Revoke is in the Overview tab's Danger section (confirmed).
   - Inspector tabs: Overview (state, "Can run there", "Can use this computer", ids, groups, software from the
-    signed capabilities), Hardware (`common hardware --json` here; the device's signed report for a peer),
+    signed capabilities), Hardware (`ucompute hardware --json` here; the device's signed report for a peer),
     Models, Performance, Connection (state, `remote_addr`, direction, open since, RTT, bytes and rates, lost
     packets, known addresses with where each came from, `last_error`, the Connect form, Disconnect, the
     firewall notice), Permissions (group membership), Activity (this device's audit lines).
@@ -63,7 +63,7 @@ Swarm or Cloud controls exist (D-019).
     A refusal reached before the device has proved its key on the control stream reads the same way, because it
     cannot be told from one forged on the path: a device that revoked this computer, or one held by a minor-0
     build (every build before 3df9438), shows `peer_unauthorized` on a new dial, not `peer_revoked` or
-    "Disconnected by <device>". So does a claimed protocol mismatch before that proof, with "update Common on
+    "Disconnected by <device>". So does a claimed protocol mismatch before that proof, with "update UCompute on
     both devices" in its hint (780c2b9).
     Unpaired devices never get this action. With nothing nearby the view says why: networking off, discovery off
     on this computer, or a network that stops devices finding each other (many campus and office Wi-Fi
@@ -82,7 +82,7 @@ Swarm or Cloud controls exist (D-019).
   for another device is sent to it (`contextFor` in `src/sections/chat/session.ts`); this computer gets the
   whole stored conversation. The chat says so ("{device} gets only the messages exchanged with it since you
   last used another destination; earlier messages are not sent with this prompt."), and that hint is the
-  composer's accessible description. The conversation is stored only in this app (`localStorage` `common.chat`).
+  composer's accessible description. The conversation is stored only in this app (`localStorage` `ucompute.chat`).
 - **Activity** (`#/activity[/<key>]`): the audit tail (`GET /api/audit`: ids, sizes, reasons, never
   prompts) and **Copy diagnostics** (the daemon's redacted bundle from `GET /api/diagnostics` when that route
   exists, else status and hardware).
@@ -107,8 +107,8 @@ is set. A stored "This Mac" (the old hard-coded default) counts as unset.
 `allow_through_firewall`, `src-tauri/src/firewall.rs`). Pairing started on Windows listens on a random UDP
 port, which Windows Firewall drops without a rule. With networking on and no matching rule found, Devices, the
 Pair dialog, the Connection tab, Settings › Network and the Dashboard show "Allow on private networks". The
-click runs, through the Windows elevation prompt, `netsh advfirewall firewall delete rule name="Common (paired
-devices)" program=<common.exe next to the app>` and then `… add rule name="Common (paired devices)" dir=in
+click runs, through the Windows elevation prompt, `netsh advfirewall firewall delete rule name="UCompute (paired
+devices)" program=<ucompute.exe next to the app>` and then `… add rule name="UCompute (paired devices)" dir=in
 action=allow program=<that path> protocol=UDP profile=private enable=yes`: only this program's own rule is
 replaced, so other Windows accounts' rules of the same name stay. Nothing is added without that prompt, and
 never for the Public or Domain profile. The status is one read-only PowerShell query (`Get-NetFirewallRule
@@ -129,7 +129,7 @@ code".
 
 The fake daemon in `src/test/mocks.ts` serves every endpoint the app uses with the response shapes of the
 daemon (contract fixtures for the UI 2.0 additions in `src/test/fixtures/api/`, checked against the real
-daemon by `crates/common-api/tests/ui_fixtures.rs`); `/api/peers/{id}/connect` dials hint, discovered and
+daemon by `crates/ucompute-api/tests/ui_fixtures.rs`); `/api/peers/{id}/connect` dials hint, discovered and
 pinned addresses against `answersAt` and `impostors`. The flows are tested end to end in jsdom per section
 (`src/sections/*/*.test.tsx`) and across sections (`src/test/`). Everything here runs on one machine against
 a fake; no test claims two physical devices paired.
@@ -139,7 +139,7 @@ a fake; no test claims two physical devices paired.
 Terminal 1, from the repo root, start the daemon yourself:
 
 ```sh
-cargo run -p common-cli -- serve --host 127.0.0.1 --port 8192
+cargo run -p ucompute-cli -- serve --host 127.0.0.1 --port 8192
 ```
 
 Terminal 2, in `apps/desktop`:
@@ -156,29 +156,29 @@ honestly; nothing is fabricated.
 To run the actual desktop window in development (needs the Rust toolchain and a few minutes for the first
 compile) use `pnpm tauri dev`. With a daemon already serving on 8192 the shell does not spawn a sidecar, so
 the sidecar binary is not needed for `tauri dev`. Every build of the shell (`tauri dev`, `cargo build`, `clippy` or
-`test -p common-desktop`) needs `src-tauri/gen/THIRD_PARTY_NOTICES.txt`, because tauri-build copies the bundle
+`test -p ucompute-desktop`) needs `src-tauri/gen/THIRD_PARTY_NOTICES.txt`, because tauri-build copies the bundle
 resources: `pnpm build-sidecar` writes it, or, without building the daemon, from the repo root
-`python3 scripts/gen_notices.py --out apps/desktop/src-tauri/gen/THIRD_PARTY_NOTICES.txt --crate common-cli --crate
-common-desktop --js`. The file is git-ignored.
+`python3 scripts/gen_notices.py --out apps/desktop/src-tauri/gen/THIRD_PARTY_NOTICES.txt --crate ucompute-cli --crate
+ucompute-desktop --js`. The file is git-ignored.
 
 ## Two daemons on one Mac (SINGLE-HOST UI testing)
 
-Everything here is **SINGLE-HOST**: two Common daemons on one machine. It exercises the UI, pairing and policy
+Everything here is **SINGLE-HOST**: two UCompute daemons on one machine. It exercises the UI, pairing and policy
 flows; it never stands in for two physical devices (`docs/BLOCKERS.md` B-002).
 
-Start two daemons from the repo root, each with its own `COMMON_HOME` (the identity key lives there; two daemons
+Start two daemons from the repo root, each with its own `UCOMPUTE_HOME` (the identity key lives there; two daemons
 sharing one home would be the same device) and its own API and peer ports:
 
 ```sh
-mkdir -p /tmp/common-a /tmp/common-b
-COMMON_HOME=/tmp/common-a cargo run -p common-cli -- serve --port 18301 --listen-port 18401 --listen-addr 127.0.0.1
-COMMON_HOME=/tmp/common-b cargo run -p common-cli -- serve --port 18302 --listen-port 18402 --listen-addr 127.0.0.1
+mkdir -p /tmp/ucompute-a /tmp/ucompute-b
+UCOMPUTE_HOME=/tmp/ucompute-a cargo run -p ucompute-cli -- serve --port 18301 --listen-port 18401 --listen-addr 127.0.0.1
+UCOMPUTE_HOME=/tmp/ucompute-b cargo run -p ucompute-cli -- serve --port 18302 --listen-port 18402 --listen-addr 127.0.0.1
 ```
 
 `--listen-addr 127.0.0.1` keeps the peer endpoint on loopback, so the pairing address shown is `127.0.0.1:<port>`.
 Without it the endpoint binds every interface (the product default) and the address shown is the Mac's LAN IP.
-For remote inference the serving home needs a model; link or copy one from `.common/models` and symlink
-`.common/backends` rather than downloading again.
+For remote inference the serving home needs a model; link or copy one from `.ucompute/models` and symlink
+`.ucompute/backends` rather than downloading again.
 
 Then `pnpm dev` and open two tabs on the dev server, one per daemon:
 
@@ -201,14 +201,14 @@ loading it.
 ```sh
 pnpm test         # vitest: API client, error-table sync with error.rs, axe scan, keyboard-only flows, pairing, privacy, ?daemon=
 pnpm build        # tsc + vite build -> dist/
-cargo check -p common-desktop   # from the repo root; the Tauri shell
+cargo check -p ucompute-desktop   # from the repo root; the Tauri shell
 ```
 
 Screen-reader-level checks of a running app (what a screen reader would read; none of them is a check with
 the screen reader's own announcements except the NVDA run):
 
 ```sh
-swift scripts/macos-ax-dump.swift [process, default common-desktop] [max depth, default 40] [link title] > ax.txt
+swift scripts/macos-ax-dump.swift [process, default ucompute-desktop] [max depth, default 40] [link title] > ax.txt
 ```
 
 Prints the macOS accessibility tree VoiceOver reads (role, subrole, title, label, value, help, role
@@ -223,18 +223,18 @@ script has run on the laptop yet.
 ## Packaging
 
 ```sh
-cd apps/desktop && pnpm tauri build --bundles app,dmg     # macOS: Common.app + Common_<version>_aarch64.dmg
+cd apps/desktop && pnpm tauri build --bundles app,dmg     # macOS: UCompute.app + UCompute_<version>_aarch64.dmg
 ```
 
-`pnpm tauri build` first runs `scripts/build-sidecar.mjs` (`build.beforeBuildCommand`; Node, so it runs on Windows too). It builds `common`
-from this checkout (`cargo build --release --locked -p common-cli`, with `--target` when Tauri builds for
-another triple), copies it to `src-tauri/binaries/common-<triple>`, checks the copy is the binary just built,
+`pnpm tauri build` first runs `scripts/build-sidecar.mjs` (`build.beforeBuildCommand`; Node, so it runs on Windows too). It builds `ucompute`
+from this checkout (`cargo build --release --locked -p ucompute-cli`, with `--target` when Tauri builds for
+another triple), copies it to `src-tauri/binaries/ucompute-<triple>`, checks the copy is the binary just built,
 and checks that it accepts the exact arguments the app starts it with. A bundle can therefore no longer
 carry a daemon from an older commit: that happened once, and the packaged daemon exited with
 "unexpected argument '--exit-with-parent' found" on every launch. `src-tauri/binaries/` is git-ignored.
 
 Before that it writes `src-tauri/gen/THIRD_PARTY_NOTICES.txt` for the same target (`scripts/gen_notices.py --crate
-common-cli --crate common-desktop --js --target <triple>`, run from the repo root with `python3`, else `python` or
+ucompute-cli --crate ucompute-desktop --js --target <triple>`, run from the repo root with `python3`, else `python` or
 `py -3`): every Rust crate the daemon and the app link on that target and the app's production npm packages, with
 their licence texts. A licence that `deny.toml` does not allow, or no Python, fails the build before anything is
 built. `bundle.resources` ships it as `Contents/Resources/THIRD_PARTY_NOTICES.txt` in the macOS app and next to the
@@ -242,12 +242,12 @@ exe in the Windows install. The file is git-ignored and regenerated by every bui
 
 The app's daemon arguments live in one file, `src-tauri/daemon-args.txt`
 (`serve --host 127.0.0.1 --port 8192 --exit-with-parent`). The shell reads it at compile time;
-`crates/common-cli/tests/desktop_sidecar.rs` and `build-sidecar.mjs` read the same file, so a CLI change that
+`crates/ucompute-cli/tests/desktop_sidecar.rs` and `build-sidecar.mjs` read the same file, so a CLI change that
 the app's arguments no longer parse fails a test and the build.
 
 Daemon lifecycle:
 - At launch the shell probes `GET /health` on 127.0.0.1:8192. If nothing answers it spawns the bundled
-  `common` with those arguments through `tauri-plugin-shell`. If the daemon exits before it is healthy, the
+  `ucompute` with those arguments through `tauri-plugin-shell`. If the daemon exits before it is healthy, the
   shell says so at once (exit code 2 means it rejected its command line) instead of waiting 20 s. The daemon
   is the app's own only once that child prints `listening on http://127.0.0.1:8192` (the CLI prints it right
   after the bind; the shell reads stdout and stderr) and until it exits (ffe1a47): a daemon that answers
@@ -278,19 +278,19 @@ Daemon lifecycle:
   announcer says "Service restarted" and a dismissable entry stays in the status bar
   (`daemon_info` reports `restarts`, `restarting`, `gave_up`, `start_failed`).
 - The daemon's stdout and stderr, and the shell's own lines about it (started, exited with which code or
-  signal, restarting), go to `daemon.log` in the app's log folder: `~/Library/Logs/org.commoncompute.desktop/`
-  on macOS, `%LOCALAPPDATA%\org.commoncompute.desktop\logs\` on Windows and
-  `~/.local/share/org.commoncompute.desktop/logs/` on Linux (owner-only on macOS and Linux). Once the next line
+  signal, restarting), go to `daemon.log` in the app's log folder: `~/Library/Logs/org.ucompute.desktop/`
+  on macOS, `%LOCALAPPDATA%\org.ucompute.desktop\logs\` on Windows and
+  `~/.local/share/org.ucompute.desktop/logs/` on Linux (owner-only on macOS and Linux). Once the next line
   would take it past 5 MiB it becomes `daemon.log.1`, replacing the older one, so the log never takes more than
   about 10 MiB. Settings › General shows the path; Copy diagnostics names it after copying, but the copied JSON
   holds only the restart count (the path contains the account name). This file is the app's, separate from
-  `COMMON_HOME/logs/` that the daemon's own diagnostics bundle reads. What uninstall keeps of it is not yet
+  `UCOMPUTE_HOME/logs/` that the daemon's own diagnostics bundle reads. What uninstall keeps of it is not yet
   checked (WP-01 retention table).
 
 Verify a build on the exact packaged binaries (needs network and a free port 8192):
 
 ```sh
-python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/Common_0.1.0_aarch64.dmg \
+python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg \
   --work "$(mktemp -d)" --out verify.json
 ```
 

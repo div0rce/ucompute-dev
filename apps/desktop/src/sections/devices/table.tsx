@@ -178,7 +178,7 @@ export function deviceColumns(c: Ctx): Column<DeviceRow>[] {
     { id: "paired", header: "Paired", hidden: true, width: 110, cell: (r) => (r.peer ? new Date(r.peer.paired_at_utc).toLocaleDateString() : "—"), sort: (r) => (r.peer ? Date.parse(r.peer.paired_at_utc) : null) },
     { id: "id", header: "Device ID", hidden: true, width: 200, cell: (r) => <span className="mono">{r.id || "—"}</span>, text: (r) => r.id, sort: (r) => r.id || null },
     { id: "label", header: "Short label", hidden: true, width: 120, cell: (r) => <span className="mono">{r.shortLabel || "—"}</span>, text: (r) => r.shortLabel, sort: (r) => r.shortLabel || null },
-    { id: "version", header: "Version", hidden: true, width: 80, cell: (r) => r.caps?.common_version ?? "—", sort: (r) => r.caps?.common_version ?? null },
+    { id: "version", header: "Version", hidden: true, width: 80, cell: (r) => r.caps?.ucompute_version ?? "—", sort: (r) => r.caps?.ucompute_version ?? null },
   ];
 }
 
@@ -229,7 +229,7 @@ export function openDevice(id: string | null, params: Record<string, string> = {
 
 /**
  * A refused connect. An address proves nothing, so the daemon reports `peer_unauthorized` both for whatever answered
- * without proving it is the paired device (another device, or an alert sent before any key: common-network
+ * without proving it is the paired device (another device, or an alert sent before any key: ucompute-network
  * transport.rs `unproven`) and for the paired device itself refusing this computer. Name both; never tell the user to
  * re-pair a device that may be fine.
  */

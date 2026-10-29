@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Verify the Linux user-level install from its tarball, on the Linux host (platform readiness plan M6 step 4).
 
-  python3 -I packaging/linux/verify_linux_install.py --tarball <common-*.tar.gz> --out <result.json> [--port 18600]
+  python3 -I packaging/linux/verify_linux_install.py --tarball <ucompute-*.tar.gz> --out <result.json> [--port 18600]
 
 Unpacks the tarball into a scratch folder, installs its binary there and its systemd user unit under a throwaway
-name, with only ExecStart's path and port changed and COMMON_HOME set to a fresh data folder (the shipped unit's
+name, with only ExecStart's path and port changed and UCOMPUTE_HOME set to a fresh data folder (the shipped unit's
 Restart and default KillMode are what is tested). Never touches ~/.local/bin, the real unit name or port 8192.
-Checks: SHA256SUMS; `systemd-analyze verify` of the shipped unit; healthy within 10 s of start; `common setup` provisions the pinned engine and ldd resolves it;
+Checks: SHA256SUMS; `systemd-analyze verify` of the shipped unit; healthy within 10 s of start; `ucompute setup` provisions the pinned engine and ldd resolves it;
 golden CPU completion; a SIGKILL of the daemon restarts it within 10 s with the old engine gone, golden again;
 `systemctl --user stop` frees the port with no engine left; removing the unit and binary keeps the data folder.
 Exit 0 ALL PASS, 3 any FAIL. SINGLE-HOST.
@@ -93,17 +93,17 @@ def run(a, scratch, unit, unit_path):
     check("SHA256SUMS verifies", r.returncode == 0, output=r.stdout.strip())
     bindir, data = os.path.join(scratch, "bin"), os.path.join(scratch, "data")
     os.makedirs(bindir)
-    binary = shutil.copy2(os.path.join(pkg, "common"), bindir)
-    rc, out = sh("systemd-analyze", "--user", "verify", os.path.join(pkg, "common.service"))
-    # Only lines about this unit (it also warns about unrelated installed units); %h/.local/bin/common does not
+    binary = shutil.copy2(os.path.join(pkg, "ucompute"), bindir)
+    rc, out = sh("systemd-analyze", "--user", "verify", os.path.join(pkg, "ucompute.service"))
+    # Only lines about this unit (it also warns about unrelated installed units); %h/.local/bin/ucompute does not
     # exist here, which is expected.
-    lint = [l for l in out.splitlines() if "common.service" in l and ".local/bin/common" not in l]
+    lint = [l for l in out.splitlines() if "ucompute.service" in l and ".local/bin/ucompute" not in l]
     check("systemd-analyze verify finds nothing wrong in the shipped unit", not lint, output=lint)
-    text = open(os.path.join(pkg, "common.service")).read()
-    shipped = "ExecStart=%h/.local/bin/common serve --host 127.0.0.1 --port 8192"
+    text = open(os.path.join(pkg, "ucompute.service")).read()
+    shipped = "ExecStart=%h/.local/bin/ucompute serve --host 127.0.0.1 --port 8192"
     if not check("the shipped unit has the documented ExecStart", shipped in text):
         return
-    text = text.replace(shipped, f"Environment=COMMON_HOME={data}\nExecStart={binary} serve --host 127.0.0.1 --port {a.port}")
+    text = text.replace(shipped, f"Environment=UCOMPUTE_HOME={data}\nExecStart={binary} serve --host 127.0.0.1 --port {a.port}")
     os.makedirs(os.path.dirname(unit_path), exist_ok=True)
     with open(unit_path, "w") as f:
         f.write(text)
@@ -112,9 +112,9 @@ def run(a, scratch, unit, unit_path):
     check("unit starts", rc == 0, output=out.strip())
     check("healthy within 10 s of start", healthy_within(a.port, 10) is not None)
 
-    env = {**os.environ, "COMMON_HOME": data}
+    env = {**os.environ, "UCOMPUTE_HOME": data}
     rc, out = sh(binary, "setup", env=env)
-    check("common setup provisions the pinned engine", rc == 0, output=out.strip()[-400:])
+    check("ucompute setup provisions the pinned engine", rc == 0, output=out.strip()[-400:])
     servers = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(data, "backends")) for f in fs if f == "llama-server"]
     rc, out = sh("ldd", servers[0]) if servers else (1, "no llama-server under backends/")
     check("ldd resolves the engine", rc == 0 and "not found" not in out, missing=[l for l in out.splitlines() if "not found" in l])
@@ -158,8 +158,8 @@ def main():
     a = ap.parse_args()
     if a.port == 8192:
         sys.exit("not port 8192: that is the real install's")
-    scratch = tempfile.mkdtemp(prefix="common-verify-")
-    unit = f"common-verify-{os.getpid()}.service"
+    scratch = tempfile.mkdtemp(prefix="ucompute-verify-")
+    unit = f"ucompute-verify-{os.getpid()}.service"
     unit_path = os.path.expanduser(f"~/.config/systemd/user/{unit}")
     try:
         run(a, scratch, unit, unit_path)

@@ -1,6 +1,6 @@
 {
  "label": "SINGLE-HOST",
- "tarball": "common-0.1.0-linux-x86_64.tar.gz",
+ "tarball": "ucompute-0.1.0-linux-x86_64.tar.gz",
  "os": "Ubuntu 26.04 LTS",
  "kernel": "Linux 7.0.0-38-generic x86_64",
  "result": "ALL PASS",
@@ -8,7 +8,7 @@
   {
    "check": "SHA256SUMS verifies",
    "result": "PASS",
-   "output": "common: OK\nLICENSE: OK\ncommon.service: OK\nREADME.md: OK"
+   "output": "ucompute: OK\nLICENSE: OK\nucompute.service: OK\nREADME.md: OK"
   },
   {
    "check": "the shipped unit has the documented ExecStart",
@@ -24,9 +24,9 @@
    "result": "PASS"
   },
   {
-   "check": "common setup provisions the pinned engine",
+   "check": "ucompute setup provisions the pinned engine",
    "result": "PASS",
-   "output": "engine   llama.cpp b11609 verified at /tmp/common-verify-nboev208/data/backends/llama.cpp/b11609"
+   "output": "engine   llama.cpp b11609 verified at /tmp/ucompute-verify-nboev208/data/backends/llama.cpp/b11609"
   },
   {
    "check": "ldd resolves the engine",

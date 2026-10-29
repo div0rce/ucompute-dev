@@ -87,7 +87,7 @@
       "b_new_audit": []
     },
     {
-      "step": "manual: a hint with no Common device falls through to a known address and is not saved",
+      "step": "manual: a hint with no UCompute device falls through to a known address and is not saved",
       "ok": false,
       "t": "2026-10-23T18:40:31Z",
       "status": 403,

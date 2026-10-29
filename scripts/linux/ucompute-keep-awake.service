@@ -1,0 +1,16 @@
+# Install on a Linux test host (user-level, no sudo): copy to ~/.config/systemd/user/, then
+#   loginctl enable-linger "$USER"; systemctl --user daemon-reload; systemctl --user enable --now ucompute-keep-awake
+# Check: systemd-inhibit --list | grep UCompute
+
+[Unit]
+Description=UCompute: keep this host awake while work runs (owner rule, 2026-10-29)
+
+[Service]
+# A block inhibitor on sleep and idle: logind refuses suspend (including the login screen idle suspend) while held.
+# Polkit grants it while the owner has a local session; after a reboot without one it retries every minute.
+ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=UCompute --why="UCompute work must not stop (owner rule)" --mode=block /usr/bin/sleep infinity
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target

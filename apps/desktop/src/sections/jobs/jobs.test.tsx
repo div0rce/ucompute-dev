@@ -54,7 +54,7 @@ describe("jobState", () => {
     expect(jobState({ ...QUEUED, state: "paused" as Job["state"] }).word).toBe("State not known to this app: paused");
     expect(jobState({ ...QUEUED, state: "loading" }).word).toBe("Loading model");
     expect(jobState(RUNNING).word).toBe("Running");
-    expect(jobState(JOBS.recent[2])).toMatchObject({ word: "Failed: Common is busy with other requests.", tone: "danger" });
+    expect(jobState(JOBS.recent[2])).toMatchObject({ word: "Failed: UCompute is busy with other requests.", tone: "danger" });
     expect(jobState({ ...SENT, state: "cancelled", error_code: "client_gone" }).word).toBe("Requester disconnected");
     expect(jobState({ ...SENT, state: "cancelled", error_code: "cancelled" }).word).toBe("Stopped");
     expect(jobState(SENT)).toMatchObject({ word: "Done", tone: "ok", detail: "Finish reason: stop" });
@@ -81,7 +81,7 @@ describe("Jobs section", () => {
       .map((r) => cell(r, "State"));
     // Active rows by state, then finished rows newest first whatever their outcome: the 10:29 failure is older than
     // both replies, so it comes last (a state sort would lift it above them).
-    expect(states).toEqual(["Running", "Running", "Waiting for a slot", "Connecting to the device", "Done", "Done", "Failed: Common is busy with other requests."]);
+    expect(states).toEqual(["Running", "Running", "Waiting for a slot", "Connecting to the device", "Done", "Done", "Failed: UCompute is busy with other requests."]);
     expect(within(g).getAllByRole("columnheader").some((h) => h.hasAttribute("aria-sort"))).toBe(false);
 
     expect(cell(rowOf(g, RUNNING), "Requested by")).toBe("This app");

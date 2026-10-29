@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Two-machine M3 run: two `common serve --network --serve-peers` daemons on two physical machines.
+"""Two-machine M3 run: two `ucompute serve --network --serve-peers` daemons on two physical machines.
 
     python3 -I mesh_two_machine.py --a http://127.0.0.1:18301 --b http://127.0.0.1:18302 \
         --out <dir> [--kill-b "<cmd>"] [--start-b "<cmd>"] [--no-mdns]
 
 A and B are the daemons' loopback APIs (B usually through an SSH tunnel; the API never leaves loopback).
-The peer traffic between the two machines is Common's own QUIC transport. Steps: A and B are unpaired first
+The peer traffic between the two machines is UCompute's own QUIC transport. Steps: A and B are unpaired first
 (unpinned, not revoked) when they arrive paired, discovery, an unpaired peer gets no work, pairing (wrong
 code, then the right one), group + privacy, remote execution in both directions (JSON and streaming),
 local_only refusal, audit check, revocation and re-pairing, and (with --kill-b/--start-b) loss detection and

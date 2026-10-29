@@ -24,7 +24,7 @@ export function useFirewallMissing(): boolean {
 /**
  * Windows only (src-tauri `firewall.rs`). The check cannot prove a block (a broader rule, a disabled or third-party
  * firewall all read "not allowed"), so it says what was not found, in warn tone, and offers one consent step: a rule
- * for Common's background service only, inbound UDP on Private networks, through Windows' own confirmation. A read that
+ * for UCompute's background service only, inbound UDP on Private networks, through Windows' own confirmation. A read that
  * failed shows nothing, and a service this app did not start is not checked. Never in the status bar; no error is
  * ever relabelled as a firewall problem.
  */
@@ -57,7 +57,7 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
   const domainNote = domain.length > 0 && (
     <p className="small">
       Windows treats {domain.join(", ")} as a domain network, where this rule does not apply either, so other devices may be unable to reach this computer there. Ask
-      your administrator to allow Common's background service on it.
+      your administrator to allow UCompute's background service on it.
     </p>
   );
 
@@ -78,7 +78,7 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
         text:
           String(e) === "cancelled"
             ? "Nothing changed: the Windows confirmation was cancelled. Other devices may still be unable to connect."
-            : `Windows did not add the rule (${String(e)}). Nothing else changed; try again, or allow Common's background service in Windows Defender Firewall.`,
+            : `Windows did not add the rule (${String(e)}). Nothing else changed; try again, or allow UCompute's background service in Windows Defender Firewall.`,
       });
     } finally {
       setBusy(false);
@@ -105,7 +105,7 @@ export function FirewallNotice({ compact = false }: { compact?: boolean }) {
   return (
     <div className="notice tone-warn">
       <p className="notice-title">No Windows Firewall rule for the service was found; other devices may be unable to connect.</p>
-      {!compact && <p className="small">Adds a rule for Common's background service only, on networks Windows treats as Private. Windows will ask you to confirm.</p>}
+      {!compact && <p className="small">Adds a rule for UCompute's background service only, on networks Windows treats as Private. Windows will ask you to confirm.</p>}
       {publicNote}
       {domainNote}
       <div className="notice-actions">

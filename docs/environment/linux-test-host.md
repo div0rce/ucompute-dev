@@ -16,20 +16,20 @@ website session. It is the project's first Linux machine (B-004: Linux stays EXP
 ## Driving it from this Mac
 
 `scripts/mac-host.sh` drives it unchanged with `MAC_HOST=192.168.1.167 MAC_USER=div0rce MAC_KEY=~/.ssh/id_ed25519`:
-`run '<command>'`, `put`, `get`, and `sync` (HEAD's tracked files into `~/src/common`; stale tracked-file leftovers are
-removed with the same guards as the Windows sync). Build: `scripts/mac-host.sh run 'cd ~/src/common && cargo build
---release -p common-cli'` (about 1.5 min).
+`run '<command>'`, `put`, `get`, and `sync` (HEAD's tracked files into `~/src/ucompute`; stale tracked-file leftovers are
+removed with the same guards as the Windows sync). Build: `scripts/mac-host.sh run 'cd ~/src/ucompute && cargo build
+--release -p ucompute-cli'` (about 1.5 min).
 
 Two-machine runs: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce OUT=<dir> [CROSS_HOLD=1]
-tests/distributed/two_machine/run_mac_linux.sh`. The Linux daemon is A (`COMMON_HOME=~/.common-acceptance`, its own
+tests/distributed/two_machine/run_mac_linux.sh`. The Linux daemon is A (`UCOMPUTE_HOME=~/.ucompute-acceptance`, its own
 identity, started by the runner and stopped at the end); this Mac's installed app is B. A daemon API run, not an app
 UI run. Both sides are saved before and restored after (`tests/distributed/two_machine/state.py`).
 
 ## Rules
 
-- Engineering uses `~/src/common`, `~/.common-acceptance`, `~/.common-acceptance.log`, `~/common-build.log` and the
+- Engineering uses `~/src/ucompute`, `~/.ucompute-acceptance`, `~/.ucompute-acceptance.log`, `~/ucompute-build.log` and the
   daemon's ports (127.0.0.1:8192 API, UDP 8193 peer) during runs. The owner's own `~/repos` and other files are not
   touched. Other sessions use their own folders and ports.
-- Nothing listens beyond loopback except Common's authenticated peer transport (UDP 8193) while a run is going; the
+- Nothing listens beyond loopback except UCompute's authenticated peer transport (UDP 8193) while a run is going; the
   runner stops the daemon at the end.
 - No firewall, sudo or system-setting changes; those stay with the owner.

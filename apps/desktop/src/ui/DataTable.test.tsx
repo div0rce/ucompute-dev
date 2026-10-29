@@ -55,7 +55,7 @@ describe("DataTable", () => {
     ]);
     expect(header("Memory").getAttribute("aria-sort")).toBe("ascending");
     expect(header("State").hasAttribute("aria-sort")).toBe(false);
-    expect(JSON.parse(localStorage.getItem("common.ui")!).tables.t.sort[0]).toEqual({ id: "mem", desc: false });
+    expect(JSON.parse(localStorage.getItem("ucompute.ui")!).tables.t.sort[0]).toEqual({ id: "mem", desc: false });
   });
 
   it("is one Tab stop; ↑↓ select keeping the column, ←→ move cells, ↑ from the first row reaches the header", async () => {

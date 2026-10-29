@@ -28,7 +28,7 @@ const fake = vi.hoisted(() => {
   }
   const state = { menu: null as null | { subs: Sub[]; setAsAppMenu: ReturnType<typeof vi.fn> }, defaults: 0 };
   class Menu {
-    subs = ["Common", "Edit", "View", "Window", "Help"].map((t) => new Sub(t, t === "Common" ? [{ text: "About Common" }, { item: "Separator" }, { text: "Quit Common" }] : []));
+    subs = ["UCompute", "Edit", "View", "Window", "Help"].map((t) => new Sub(t, t === "UCompute" ? [{ text: "About UCompute" }, { item: "Separator" }, { text: "Quit UCompute" }] : []));
     setAsAppMenu = vi.fn(async () => null);
     static async default() {
       state.defaults++;
@@ -80,9 +80,9 @@ describe("macOS menu", () => {
     expect(await installMenu()).toBe(true);
     expect(fake.state.defaults).toBe(1);
     const m = fake.state.menu!;
-    expect(m.subs.map((s) => s.title)).toEqual(["Common", "Edit", "View", "Go", "Window", "Help"]);
-    expect(items("Common").map((i) => i.text ?? i.item)).toEqual(["About Common", "Separator", "Settings…", "Separator", "Quit Common"]);
-    expect(items("Common")[2].accelerator).toBe("CmdOrCtrl+,");
+    expect(m.subs.map((s) => s.title)).toEqual(["UCompute", "Edit", "View", "Go", "Window", "Help"]);
+    expect(items("UCompute").map((i) => i.text ?? i.item)).toEqual(["About UCompute", "Separator", "Settings…", "Separator", "Quit UCompute"]);
+    expect(items("UCompute")[2].accelerator).toBe("CmdOrCtrl+,");
     expect(items("Go").map((i) => [i.text ?? i.item, i.accelerator])).toEqual([
       ["Dashboard", "CmdOrCtrl+1"],
       ["Devices", "CmdOrCtrl+2"],
@@ -105,7 +105,7 @@ describe("macOS menu", () => {
     window.location.hash = "#/dashboard";
     act(() => items("Go")[1].action!());
     expect(window.location.hash).toBe("#/devices");
-    act(() => items("Common")[2].action!());
+    act(() => items("UCompute")[2].action!());
     expect(window.location.hash).toBe("#/settings");
     const opened = vi.fn();
     window.addEventListener(SHORTCUTS_EVENT, opened);

@@ -64,7 +64,7 @@
         {
           "error": {
             "code": "pairing_failed",
-            "hint": "a firewall on the other device may block its pairing port (UDP 61578); on Windows, allow Common under Peers on that device",
+            "hint": "a firewall on the other device may block its pairing port (UDP 61578); on Windows, allow UCompute under Peers on that device",
             "message": "nothing answered at 192.168.1.115:61578",
             "param": null,
             "type": "authentication_error"

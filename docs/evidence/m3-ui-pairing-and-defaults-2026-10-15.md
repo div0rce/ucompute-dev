@@ -1,5 +1,7 @@
 # M3 desktop pairing through the UI, and a default-settings daemon rerun (2026-10-15)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Everything here is SINGLE-HOST:** two daemons on the owner's one Mac (Apple M2, 8 GB, macOS 26.2). It is not two-machine evidence (B-002).
 
 ## 1. Two daemons, default settings (commit 2434bde, debug build)
@@ -18,7 +20,7 @@ Driver: `M3_DIR=<dir> python3 -I tests/distributed/single_host/m3_evidence.py st
 
 ## 2. Pairing through the desktop UI alone (commit 68e73f0)
 
-Setup: two `common serve` daemons with networking **off** (`--port 18311 --listen-port 18411` and `--port 18312 --listen-port 18412`, fresh COMMON_HOMEs), the desktop UI from `pnpm dev` (Vite, port 1420) in two tabs of the app's built-in browser, `?daemon=http://127.0.0.1:18311` and `?daemon=http://127.0.0.1:18312` (dev-only parameter, loopback only). Every step below was a click or keystroke in the UI; no API call was made by hand.
+Setup: two `ucompute serve` daemons with networking **off** (`--port 18311 --listen-port 18411` and `--port 18312 --listen-port 18412`, fresh UCOMPUTE_HOMEs), the desktop UI from `pnpm dev` (Vite, port 1420) in two tabs of the app's built-in browser, `?daemon=http://127.0.0.1:18311` and `?daemon=http://127.0.0.1:18312` (dev-only parameter, loopback only). Every step below was a click or keystroke in the UI; no API call was made by hand.
 
 1. Device A: Peers → "Let this Mac talk to paired devices" on, then "Run models for paired devices" on. **Defect found here:** the second switch failed with "Address already in use (os error 48)" and turned networking off. Root cause and fix in 68e73f0 (the endpoint restart raced the old socket's release on the fixed port); regression test `network_settings_change_while_enabled_rebinds_the_fixed_port_single_host`. After the fix both switches stay on and A listens on 0.0.0.0:18411.
 2. Device B: networking on; name "Mac B".

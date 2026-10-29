@@ -1,14 +1,14 @@
-// Dump the macOS accessibility tree of the running Common app (what VoiceOver reads: role, label, value,
+// Dump the macOS accessibility tree of the running UCompute app (what VoiceOver reads: role, label, value,
 // help, focus). A VoiceOver-level check without VoiceOver; it is not a test with VoiceOver itself.
 // The calling process must already be trusted for Accessibility (this never asks).
-//   swift scripts/macos-ax-dump.swift [process name, default common-desktop] [max depth, default 40] [link] > out.txt
+//   swift scripts/macos-ax-dump.swift [process name, default ucompute-desktop] [max depth, default 40] [link] > out.txt
 // With [link], first presses the window's link with that title (e.g. a sidebar section such as "Devices", the
 // same AXPress VoiceOver's VO-Space sends) and waits a second for the view to render.
 import ApplicationServices
 import Foundation
 
 let args = CommandLine.arguments
-let name = args.count > 1 ? args[1] : "common-desktop"
+let name = args.count > 1 ? args[1] : "ucompute-desktop"
 let maxDepth = args.count > 2 ? Int(args[2]) ?? 40 : 40
 let press = args.count > 3 ? args[3] : nil
 guard AXIsProcessTrusted() else { FileHandle.standardError.write("not trusted for Accessibility\n".data(using: .utf8)!); exit(2) }

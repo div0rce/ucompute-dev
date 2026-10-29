@@ -1,19 +1,21 @@
 # Desktop to desktop: macOS app + Windows app on two physical machines (2026-10-19)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Two-machine evidence.** Two installed desktop apps on two different computers, on one iPhone personal hotspot:
 
 | | Mac | Windows laptop |
 |---|---|---|
 | Machine | MacBook Air, Apple M2, 8 GB, macOS 26.2 (172.20.10.2) | HP, Intel Core Ultra 7 258V, 32 GB, Arc 140V, Windows 11 Home 26200 (172.20.10.6) |
-| App | `/Applications/Common.app` from 5f0c580 (daemon `3168e521…`, shell `c66c8c35…`, verified 2026-10-15/17) | `Common_0.1.0_x64-setup.exe` built natively on the laptop from caf1497 (sha256 `df13fe79e80a447d7e495a62cceae1ce6bcbbdbb0768daed6cf44889763a4ce0`, 4.24 MiB, NSIS), installed per-user |
-| Daemon | `common serve --host 127.0.0.1 --port 8192 --exit-with-parent`, child of the app | same command line, `common.exe` child of `common-desktop.exe`, in the signed-in session |
+| App | `/Applications/UCompute.app` from 5f0c580 (daemon `3168e521…`, shell `c66c8c35…`, verified 2026-10-15/17) | `UCompute_0.1.0_x64-setup.exe` built natively on the laptop from caf1497 (sha256 `df13fe79e80a447d7e495a62cceae1ce6bcbbdbb0768daed6cf44889763a4ce0`, 4.24 MiB, NSIS), installed per-user |
+| Daemon | `ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent`, child of the app | same command line, `ucompute.exe` child of `ucompute-desktop.exe`, in the signed-in session |
 
 ## Windows installer and app
 
 | Check | Result |
 |---|---|
 | `pnpm tauri build --bundles nsis` on the laptop (VS 2022 Build Tools 17.14, Rust 1.98.0 MSVC, Node 24, pnpm 10.34.4) | PASS: `build-sidecar: staged daemon accepts: serve --host 127.0.0.1 --port 8192 --exit-with-parent`, then the app and the NSIS installer |
-| Silent install (`/S /D=…`), bundled `common.exe` accepts the app's exact arguments | PASS |
+| Silent install (`/S /D=…`), bundled `ucompute.exe` accepts the app's exact arguments | PASS |
 | App launched by the owner from the desktop | PASS: daemon healthy, started by the app with the exact arguments, session 1 |
 | App force-killed (`Stop-Process -Force`, like a crash or Task Manager) | PASS: its daemon was gone 0.11 s later and port 8192 released (kill-on-close job object) |
 | App launched over SSH (session 0) | Not possible: WebView2 cannot create a window outside a desktop session (`HRESULT 0x80070578`). A harness limit, not an app defect; automated launches use a scheduled task that runs only in the signed-in session |

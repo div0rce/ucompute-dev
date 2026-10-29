@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two-machine discovery and connection-state run against two paired `common serve` daemons (usually the
+"""Two-machine discovery and connection-state run against two paired `ucompute serve` daemons (usually the
 daemons of the two installed desktop apps) on two physical machines.
 
     python3 -I discovery_two_machine.py --a http://127.0.0.1:8192 --b http://127.0.0.1:18302 --out <dir> \
@@ -8,13 +8,13 @@ daemons of the two installed desktop apps) on two physical machines.
         [--watch SECONDS] [--bogus-addr IP:PORT] [--no-mdns]
 
 A and B are the daemons' loopback APIs (B through an SSH tunnel; the API never leaves loopback). Peer
-traffic between the machines is Common's QUIC transport. Every step, pairing included, goes through those APIs:
+traffic between the machines is UCompute's QUIC transport. Every step, pairing included, goes through those APIs:
 this is daemon API evidence, not app UI evidence (no window is driven, no code is typed by hand, the Windows
 firewall consent step is not reached). Steps:
   state    both daemons name themselves (no "This Mac"), discovered entries carry 1-2 routable addresses,
            "last seen" advances while connected.
   manual   connect at an address: an unpaired id is refused before any packet; a wrong hint never replaces
-           the pinned address; the right address connects; with --stranger, a different Common device at
+           the pinned address; the right address connects; with --stranger, a different UCompute device at
            the hinted address pins nothing on either side. Each connect follows a Disconnect, so it dials
            (an open connection is returned as is); the audit trail shows the dial.
   pair     pairing in both directions (A shows the code / B shows the code), wrong code first; the two stay
@@ -251,7 +251,7 @@ def s_manual(A, B, ida, idb, neta, netb, a):
     # With mDNS the fall-through may reach B at the address mDNS shows first and pin that one: only the hint
     # must never be pinned.
     last = (peer(A, idb) or {}).get("last_addr")
-    step("manual: a hint with no Common device falls through to a known address and is not saved",
+    step("manual: a hint with no UCompute device falls through to a known address and is not saved",
          s == 200 and fresh and dialled(new, idb, bogus) and connected(A, idb) and last not in (None, bogus),
          status=s, ms=ms, hint=bogus, pinned_before=pinned, pinned_after=last, new_connection=fresh,
          dialled_hint=dialled(new, idb, bogus), connection=c)
@@ -267,7 +267,7 @@ def s_manual(A, B, ida, idb, neta, netb, a):
         st_before = ids(peers(a.stranger))
         s, v, ms, c, fresh, new = fresh_dial(B, ida, a.stranger_addr, 90)
         b_rec = peer(B, ida) or {}
-        step("manual: another Common device at the hinted address is not trusted (requirement 8)",
+        step("manual: another UCompute device at the hinted address is not trusted (requirement 8)",
              fresh and dialled(new, ida, a.stranger_addr) and ids(peers(a.stranger)) == st_before and peer(B, sid) is None
              and b_rec.get("last_addr") != a.stranger_addr, status=s, ms=ms,
              code=(v.get("error") or {}).get("code") if isinstance(v, dict) else None,
@@ -471,7 +471,7 @@ def main():
     ap.add_argument("--steps", default="state,manual,offline,quit,crash")
     for f in ("quit-b", "crash-b", "start-b", "procs-b", "wifi-cycle-b", "stranger", "stranger-addr", "offline-peer"):
         ap.add_argument("--" + f)
-    ap.add_argument("--bogus-addr", default="172.20.10.1:8193", help="an address with no Common device")
+    ap.add_argument("--bogus-addr", default="172.20.10.1:8193", help="an address with no UCompute device")
     ap.add_argument("--watch", type=int, default=180)
     ap.add_argument("--no-mdns", action="store_true", help="the network drops multicast (e.g. eduroam): nearby checks are N/A")
     a = ap.parse_args()

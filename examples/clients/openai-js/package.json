@@ -1,9 +1,9 @@
 {
-  "name": "common-openai-js-smoke",
+  "name": "ucompute-openai-js-smoke",
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Smoke test: the official OpenAI JS client against a local `common serve` (F-09-01)",
+  "description": "Smoke test: the official OpenAI JS client against a local `ucompute serve` (F-09-01)",
   "scripts": { "smoke": "node smoke.mjs" },
   "dependencies": { "openai": "^6" }
 }

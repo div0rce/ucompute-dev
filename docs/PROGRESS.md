@@ -1,6 +1,24 @@
 # Progress Log
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
+
+## 2026-10-28/29 — Claude Code — candidate 1 published; Windows app verified; soaks; WP-04 round 8; GitHub sync; total rename to UCompute (unit, SINGLE-HOST, one-machine packaged checks)
+
+**Implemented / verified:**
+- Milestone A1: candidate 1 (`UCompute_0.1.0_aarch64.dmg`, SHA-256 a3239588…dd6d) approved (D-025, cohort the owner alone), published as a stage snapshot and received ("Yes, it works"); Access download check passed.
+- Milestone D (part): Windows NSIS app built natively from 77262a5 on the laptop, `verify_windows_app.ps1` ALL PASS 13/13 (b341a74).
+- Milestone C: the 24 h soak of 2026-10-24/25 FAIL on one untyped no-response in about 556k burst requests (cause not determined); a 3 h overload-only rerun PASS (0 in 716k); the second 24 h soak runs until about 07:43 UTC 2026-10-30, with documented interference from the rename runs and its reading rule fixed before the verdict (`docs/evidence/linux-soak-2026-10-29.md`).
+- WP-04 round 8 (C3–C6, C8) committed with 14 review findings open (`docs/design/wp04-round8-open-findings.md`); the lab's P1 prompt check passed (65 tokens, 12/12).
+- Decisions: D-026 (Mode B on CPU engines, user choice, default option B), D-027/D-028 (total rename, no compatibility; GitHub: private `div0rce/ucompute-dev` as origin, PRs with CI, the public `div0rce/ucompute` untouched), D-029 (no automatic data deletion, per-machine acceptance test, frozen protocol identifiers, capability retention); ADR-0006 zero-trust execution (Proposed); ADR-0003 §9.16.
+- The rename itself (this commit): see `docs/VERIFICATION.md` 2026-10-29 D-028.
+
+**Ledger:** NOT_STARTED 103 · IN_PROGRESS 6 · IMPLEMENTED_UNVERIFIED 8 · VERIFIED 36 · BLOCKED 0 · INFEASIBLE 0 (153 rows).
+
+**Limitations:** no device runs a renamed build yet; renamed packages (DMG, NSIS, tarball) not built or verified; Linux suite after the rename not clean (environmental, see VERIFICATION); the Mac flood timing test needs an idle machine.
+
+**Next:** push `rename/ucompute` to the private origin and open the PR; WP-04 fix pass (workflow `wp04-fix-pass`, no sentinel until the soak ends); collect the soak with the 37cd454 copy of `run_soak_linux.sh`; after it, the Linux suites, device migration per `docs/release/migration-to-ucompute.md`, S1, then P1 (end sentinel's desktop session first, owner-approved).
 
 ## 2026-10-23/24 — Claude Code — Linux host onboarded; fixed builds on two machines; WP-04 designed; fix round 6; Linux install path (TWO-MACHINE daemon API, SINGLE-HOST, unit)
 
@@ -19,7 +37,7 @@ Newest first. Every entry: date, agent, what changed, counts, evidence, next com
 **Next commands:**
 ```sh
 # round 7 (reaper, Linux pins, help text, desktop notices, Linux suite run, packaged re-check)
-# WP-04 C1: reserve the split flags (crates/common-runtime/src/llamacpp/process.rs)
+# WP-04 C1: reserve the split flags (crates/ucompute-runtime/src/llamacpp/process.rs)
 scripts/mac-host.sh sync   # with MAC_HOST=192.168.1.167 MAC_USER=div0rce MAC_KEY=~/.ssh/id_ed25519, then the 24 h soak
 ```
 
@@ -28,30 +46,30 @@ scripts/mac-host.sh sync   # with MAC_HOST=192.168.1.167 MAC_USER=div0rce MAC_KE
 - Mesh (780c2b9; verifier 10/10 resolved): a peer-sourced revocation releases the hold on the running Node under the `net` lock; Disconnect checks and holds atomically; a dial cancelled mid held exchange closes its connection at once; the held exchange asks the store once more at its end and at its 10 s bound; the held minor-0 redial is audited once; the transport close codes (0, RE, UA, PV, FT, HD) pinned on the wire (the pairing codes PF and PL are not); the `control.proto` minor-0 comment corrected. Behaviour: a protocol mismatch claimed before the device proves its key reads `peer_unauthorized` with an update hint (426 is now always proven), and so does a frame-size close (`FT`) without the hint; `health::supervise` retries unproven refusals with backoff up to 30 s (only tests call it; the daemon's sync loop keeps its own backoff up to 300 s). 11 mutants killed.
 - Desktop (ffe1a47; verifier 3 resolved, 3 deferred): Allow keeps focus after a cancel or failure and is described by its outcome; Settings › Privacy's Cancel is `aria-disabled` while the service is down; the shell counts the daemon as its own only after its own child prints `listening on http://127.0.0.1:8192`, waits up to 20 s while it starts, and on Windows asks only that daemon to stop. 445 desktop tests, 13 shell tests, 12 mutants killed; SINGLE-HOST CLI contract check.
 - Drivers (ffe1a47; verifier 5 resolved, 5 deferred): the proven-refusal hold step needs real proof; the discovery driver leaves a restore through a dead tunnel to the runner; the revocation steps need A's signed revocation of B and a refusal from B's exact endpoint. 58 offline tests (synthetic), 9 mutants killed; SINGLE-HOST hold and mesh runs ALL PASS (2 N/A each), with a binary of unknown source, so not evidence for the committed crates.
-- Final check (after the fixes, before the verifiers and the commits): fmt and clippy (macOS and windows-gnu) clean; full `cargo test --no-fail-fast` 452 passed, 1 failed, 2 ignored. The failure (`privacy_mode_enforced_end_to_end_single_host`) ran across a Low Power Sleep and hibernate on 1% battery and passed alone. `cargo test -p common-desktop` 13/13 (not in the plain `cargo test`).
+- Final check (after the fixes, before the verifiers and the commits): fmt and clippy (macOS and windows-gnu) clean; full `cargo test --no-fail-fast` 452 passed, 1 failed, 2 ignored. The failure (`privacy_mode_enforced_end_to_end_single_host`) ran across a Low Power Sleep and hibernate on 1% battery and passed alone. `cargo test -p ucompute-desktop` 13/13 (not in the plain `cargo test`).
 - F-06-04 flood tests determined environmental (SINGLE-HOST, this Mac on battery at 61%, both variants alike): `peer_flood_throttled_through_daemon_single_host`, the identical test at 95592b0 (before any crates change of the fix rounds) and at ffe1a47, alternated ABBA over 8 rounds at load average about 4-10: pre-fix median ×1.212, 4 of 8 over the 1.2 bound; fixed median ×1.252, 6 of 8 over; paired differences 4 up, 4 down, Wilcoxon W− = 10 against a critical value of 3: no significant difference. The 1.2 bound sits inside this 8 GB M2's run-to-run spread under load; the failures do not need the fix rounds (the pre-fix tree fails 4 of 8); point estimate +0.08, and 8 pairs cannot exclude a rise of up to about +0.22 (about 18%). `peer_flood_throttled_local_p95_within_20pct_single_host`: 1.39/1.35/1.35/1.24 with round 5 against 1.46/1.24/1.18 on the pre-round-5 tree (7d2cc98; crates unchanged since 3df9438), the same load-sensitive bound, not a regression. Raw data in `docs/VERIFICATION.md` (fix round 5).
-- macOS app from ffe1a47 (SINGLE-HOST, one Mac): `pnpm tauri build` with a clean tree, DMG 6,182,535 bytes, sha256 `695c44d1…13064`; `verify_packaged_app.py` ALL PASS, 15 checks (fresh install healthy in 3.98 s with the pinned engine b11609 downloaded, golden completion on `MTL0 (Apple M2)` at 348 and 294 tok/s, quit, restart, crash in 1.03 s, nothing left running); installed in /Applications (the previous app kept as `Common.app.prev`), the owner's identity (8983-9a1e-e341) and pairings unchanged. Evidence: `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json`.
-- Deferred: needing the laptop, the PowerShell firewall read, NVDA checks, cross-hold on two machines and `CommonTestWifi`; needing the owner's port 8192, the packaged-app race check; needing a crates change, D1; needing any two machines, the physical `state.py` name restore; not run, `tests/distributed/test_runner_flow.sh` (it can kill a real tunnel). LOW residuals: `apply_peer_revocation` still disconnects only on the connection's Node; no CLI test pins the listening line; no driver test pins `revoked_by == A` or the listen-port substitution; the pairing close codes PF and PL are unpinned. The openapi `connect` description now says 426 is proven only (text, uncommitted).
-- Documents: VERIFICATION fix round 5 entry and the round 2 and 3 open lists marked closed or deferred; ADR-0003 §9.3, §9.6, §9.8, §9.9, §9.12, §9.15; THREAT_MODEL M3-03, M3-05, M3-17 and the firewall row; `docs/api/README.md`; the UI 2.0 evidence; `docs/environment/windows-test-host.md`; `apps/desktop/README.md`; `crates/common-api/openapi.json` (the `connect` description); AGENTS. Counts: no ledger status changed (`validate_registry.py`: VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0, NOT_STARTED 106; 153 rows). Nothing from rounds 2-5, and none of the round 1 product fixes, has run on two machines (95592b0's driver fixes ran in the pre-fix physical baseline, `docs/evidence/mesh-physical-2026-10-22-baseline.md`); the only packaged build with them is the ffe1a47 macOS app on this Mac.
+- macOS app from ffe1a47 (SINGLE-HOST, one Mac): `pnpm tauri build` with a clean tree, DMG 6,182,535 bytes, sha256 `695c44d1…13064`; `verify_packaged_app.py` ALL PASS, 15 checks (fresh install healthy in 3.98 s with the pinned engine b11609 downloaded, golden completion on `MTL0 (Apple M2)` at 348 and 294 tok/s, quit, restart, crash in 1.03 s, nothing left running); installed in /Applications (the previous app kept as `UCompute.app.prev`), the owner's identity (8983-9a1e-e341) and pairings unchanged. Evidence: `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json`.
+- Deferred: needing the laptop, the PowerShell firewall read, NVDA checks, cross-hold on two machines and `UComputeTestWifi`; needing the owner's port 8192, the packaged-app race check; needing a crates change, D1; needing any two machines, the physical `state.py` name restore; not run, `tests/distributed/test_runner_flow.sh` (it can kill a real tunnel). LOW residuals: `apply_peer_revocation` still disconnects only on the connection's Node; no CLI test pins the listening line; no driver test pins `revoked_by == A` or the listen-port substitution; the pairing close codes PF and PL are unpinned. The openapi `connect` description now says 426 is proven only (text, uncommitted).
+- Documents: VERIFICATION fix round 5 entry and the round 2 and 3 open lists marked closed or deferred; ADR-0003 §9.3, §9.6, §9.8, §9.9, §9.12, §9.15; THREAT_MODEL M3-03, M3-05, M3-17 and the firewall row; `docs/api/README.md`; the UI 2.0 evidence; `docs/environment/windows-test-host.md`; `apps/desktop/README.md`; `crates/ucompute-api/openapi.json` (the `connect` description); AGENTS. Counts: no ledger status changed (`validate_registry.py`: VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0, NOT_STARTED 106; 153 rows). Nothing from rounds 2-5, and none of the round 1 product fixes, has run on two machines (95592b0's driver fixes ran in the pre-fix physical baseline, `docs/evidence/mesh-physical-2026-10-22-baseline.md`); the only packaged build with them is the ffe1a47 macOS app on this Mac.
 
 Next:
     the Windows laptop (offline now): build the NSIS installer from HEAD natively on it and run apps/desktop/scripts/verify_windows_app.ps1, then WIN_HOST=<laptop> OUT=<dir> [NO_MDNS=1] [CROSS_HOLD=1] tests/distributed/two_machine/run_mac_windows.sh
     on the laptop: the PowerShell firewall read, scripts\windows-uia-dump.ps1 and scripts\windows-nvda-run.ps1 (D-022)
     the owner's always-on device (192.168.1.167): not yet reachable from this Mac
-    caffeinate -i env COMMON_MDNS=0 COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --no-fail-fast; cargo test -p common-desktop   # on mains power, no sleep
+    caffeinate -i env UCOMPUTE_MDNS=0 UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --no-fail-fast; cargo test -p ucompute-desktop   # on mains power, no sleep
     repeat the SINGLE-HOST shakedown with a binary built from HEAD (discovery, hold with --c/--d, mesh)
     rebuild the app on the second Mac from HEAD before run_mac_mac.sh, with both Macs awake
 
 ## 2026-10-22 (night) — Claude Code — fix rounds 2 and 3: desktop, two-machine drivers, mesh security (unit, synthetic, SINGLE-HOST)
 
 - Round 2 (18 desktop and 44 driver findings, all fixed with tests; checkers: desktop 18/18 resolved, drivers 42 resolved and 2 partly): the firewall read throws non-not-found PowerShell errors, an exited own daemon counts as adopted, failed reads retried within 5 s, "Loading…" before a busy service's first read, privacy not known on a failed read, status bar named groups and other accessibility fixes, "not refreshed" live values, Chat copy; drivers that could pass without proving their claim fixed, N/A for unmet preconditions, exit codes 3/1, `state.py` save and restore in every driver, the runner's restore on exit, the cross-hold step and `CROSS_HOLD=1`, no 19222 forward. Results: desktop `pnpm test` 33 files 443 passed, desktop crate 10 passed, clippy (macOS and windows-gnu) clean, 20 mutants killed; driver tests 55 OK (synthetic), runner flow PASS, 58 mutants killed; SINGLE-HOST shakedown run 2 ALL PASS (discovery 5 N/A, hold with cross-hold 1 N/A, mesh 2 N/A).
-- Round 3 (7 security findings, 1 high, all fixed with tests; checkers 7/7 resolved): a refusal is the device's own only after its Hello was read (a forged Initial close can no longer end a dial or read as revoked or held); revocation fan-out state only for stored records; the held exchange follows the store and closes on revoke or unpair; a peer's revocation ends a hold; holds under the `net` lock. Results: fmt and clippy (macOS and windows-gnu) clean; common-network lib 57, peer_transport 25 (+1 ignored), invariants 2, pairing 8, remote_single_host 11; common-api lib 53, mesh 33, api 16, jobs 2, ui_fixtures 5; common-cli mesh_single_host 3, cli 13 (3 tests updated to the new rule after a first run failed on it).
-- Documents: VERIFICATION round entries with the exact commands; ADR-0003 §9.3, §9.9, §9.12 and §9.15; THREAT_MODEL M3-03, M3-17 and the firewall row; `docs/api/README.md` (proven and unproven refusals, `peer_held` on connect); the UI 2.0 evidence (round 2 and 3 changes, open items); `docs/environment/windows-test-host.md` (runner flags, tunnels, `state.py`, the hold driver and cross-hold, step-name changes, the UIA dump and the NVDA run with its keystroke caveat); both READMEs and AGENTS. D-021 naming: UCompute is the product's name, Common its former name, code identifiers stay `common` (AGENTS, README, spec §26.1, ADR-0004, the UI 2.0 plan, the desktop README).
+- Round 3 (7 security findings, 1 high, all fixed with tests; checkers 7/7 resolved): a refusal is the device's own only after its Hello was read (a forged Initial close can no longer end a dial or read as revoked or held); revocation fan-out state only for stored records; the held exchange follows the store and closes on revoke or unpair; a peer's revocation ends a hold; holds under the `net` lock. Results: fmt and clippy (macOS and windows-gnu) clean; ucompute-network lib 57, peer_transport 25 (+1 ignored), invariants 2, pairing 8, remote_single_host 11; ucompute-api lib 53, mesh 33, api 16, jobs 2, ui_fixtures 5; ucompute-cli mesh_single_host 3, cli 13 (3 tests updated to the new rule after a first run failed on it).
+- Documents: VERIFICATION round entries with the exact commands; ADR-0003 §9.3, §9.9, §9.12 and §9.15; THREAT_MODEL M3-03, M3-17 and the firewall row; `docs/api/README.md` (proven and unproven refusals, `peer_held` on connect); the UI 2.0 evidence (round 2 and 3 changes, open items); `docs/environment/windows-test-host.md` (runner flags, tunnels, `state.py`, the hold driver and cross-hold, step-name changes, the UIA dump and the NVDA run with its keystroke caveat); both READMEs and AGENTS. D-021 naming: UCompute is the product's name, replacing the former name; code identifiers keep the former name for now (AGENTS, README, spec §26.1, ADR-0004, the UI 2.0 plan, the desktop README).
 - Counts: no ledger status changed (`validate_registry.py`: VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0, NOT_STARTED 106; 153 rows). No fix of rounds 1-3 has run on two machines or is in a packaged build.
-- Open: round 2 (PowerShell read not run on Windows; port-8192 startup race; focus after a cancelled or failed Allow; NVDA or UIA checks of the status bar groups and the Allow outcome; the hold driver's proven-refusal step can pass vacuously; cross-hold only SINGLE-HOST; `CommonTestWifi` not in the repo and a restore FAIL likely after a DHCP change; D1 freshness N/A; `windows-uia-dump.ps1` and `windows-nvda-run.ps1` never run); round 3 (all LOW: off-lock hold release during a Sharing restart, a strong held-connection handle after a cancelled dial, untested held minor-0 audit and `CLOSE_HELD` wire value, the `control.proto` minor-0 comment, `health::supervise` final on `peer_unauthorized`). Details: `docs/VERIFICATION.md`. Against the laptop's 593d4ea app (minor 0) the hold driver's `peer_held` steps cannot pass: rebuild the installer first.
+- Open: round 2 (PowerShell read not run on Windows; port-8192 startup race; focus after a cancelled or failed Allow; NVDA or UIA checks of the status bar groups and the Allow outcome; the hold driver's proven-refusal step can pass vacuously; cross-hold only SINGLE-HOST; `UComputeTestWifi` not in the repo and a restore FAIL likely after a DHCP change; D1 freshness N/A; `windows-uia-dump.ps1` and `windows-nvda-run.ps1` never run); round 3 (all LOW: off-lock hold release during a Sharing restart, a strong held-connection handle after a cancelled dial, untested held minor-0 audit and `CLOSE_HELD` wire value, the `control.proto` minor-0 comment, `health::supervise` final on `peer_unauthorized`). Details: `docs/VERIFICATION.md`. Against the laptop's 593d4ea app (minor 0) the hold driver's `peer_held` steps cannot pass: rebuild the installer first.
 
 Next:
-    commit rounds 1-3; caffeinate -i env COMMON_MDNS=0 COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --no-fail-fast; (cd apps/desktop && caffeinate -i pnpm test --maxWorkers=2)
+    commit rounds 1-3; caffeinate -i env UCOMPUTE_MDNS=0 UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --no-fail-fast; (cd apps/desktop && caffeinate -i pnpm test --maxWorkers=2)
     repeat the SINGLE-HOST shakedown with the round-3 binary (discovery, hold with --c/--d, mesh)
     rebuild the macOS app and the Windows NSIS installer from that commit, then WIN_HOST=<laptop> OUT=<dir> [NO_MDNS=1] [CROSS_HOLD=1] tests/distributed/two_machine/run_mac_windows.sh
     on the laptop: scripts\windows-uia-dump.ps1 and scripts\windows-nvda-run.ps1 from a scheduled task while it is unattended
@@ -63,7 +81,7 @@ Next:
 - Verified here: offline driver tests 9 passed, sync keep-list PASS (synthetic). No ledger status changed. No fix has run on two machines; no packaged build contains them yet.
 
 Next:
-    commit the fixes; COMMON_MDNS=0 COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast; (cd apps/desktop && pnpm test --maxWorkers=2)
+    commit the fixes; UCOMPUTE_MDNS=0 UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast; (cd apps/desktop && pnpm test --maxWorkers=2)
     rebuild the macOS app and the Windows NSIS installer from that commit; run scripts\windows-sync-clean.ps1 and scripts\windows-keep-awake.ps1 on the laptop
     then the daemon API runs and the manual UI steps listed in the afternoon entry below
 
@@ -77,7 +95,7 @@ Next:
 - No ledger status changed.
 
 Next:
-    finish the Windows NSIS build (scheduled task CommonTestBuild), verify it with apps/desktop/scripts/verify_windows_app.ps1, install it, then
+    finish the Windows NSIS build (scheduled task UComputeTestBuild), verify it with apps/desktop/scripts/verify_windows_app.ps1, install it, then
     WIN_HOST=10.75.120.9 OUT=<dir> NO_MDNS=1 tests/distributed/two_machine/run_mac_windows.sh   # daemon API run, not an app UI run
     OUT=<dir> tests/distributed/two_machine/run_mac_mac.sh when Kyle's Mac is awake            # daemon API run too
     by hand in the apps, each with its own evidence: the Windows firewall consent step, pairing started in each app,
@@ -99,7 +117,7 @@ Next:
 
 - Implemented (not yet physically verified): the discovery and reconnection fixes, the six desktop defects from docs/evidence/desktop-two-machine-2026-10-19.md, the Windows Firewall consent step, clearer connection states. Details and commands: docs/VERIFICATION.md (2026-10-21 entry).
 - Verified on one Mac: fmt and clippy clean (also for the Windows target), 407 Rust tests passed plus the fixed CLI test, desktop 111/111; one load-sensitive latency test (F-06-04 p95) fails on this loaded machine with and without the change.
-- New test host: Kyle's MacBook Pro (M2 Pro, 16 GB, macOS 15.7.9) reachable over SSH with Kyle's consent (Common project scope); Rust 1.98.0, Node 26.10.0 and pnpm installed in Kyle's home folder. Mac to Mac remote runs worked both ways with the installed apps (Qwen2.5 0.5B).
+- New test host: Kyle's MacBook Pro (M2 Pro, 16 GB, macOS 15.7.9) reachable over SSH with Kyle's consent (UCompute project scope); Rust 1.98.0, Node 26.10.0 and pnpm installed in Kyle's home folder. Mac to Mac remote runs worked both ways with the installed apps (Qwen2.5 0.5B).
 - Limits: no status changes; F-10-05 and F-10-01 stay IMPLEMENTED_UNVERIFIED until the physical run.
 
 Next:
@@ -123,7 +141,7 @@ Then continue WP-01/WP-02 as below; U-05 is exercised with WP-09/WP-11 in stage 
 
 ## 2026-10-19 — Claude Code — unified compute credits with contributor consent recorded (D-019 revised; documentation and registry only)
 
-- Recorded the owner's revised 2026-10-19 decision, "Contribute compute. Earn compute. Buy compute when you need more. Share your compute. Not your computer.", as binding principle D-019, with four guardrails added by the engineering session and labelled as such in D-019 and §26.5. It replaces in place the same-day, uncommitted "Free Compute Commons" draft (community compute barred from paid work); ids D-019 and U-05 are kept and no trace of the two-economy version remains. Edited: spec §25 amendment note and U-05 declaration, §26.1 product purpose/cost and messages (owner slogan and taglines), §26.3 participant-without-hardware row, §26.5 rewritten as "Compute credits and contributor consent" (stages 0–3 with preconditions; eight rules, each with a falsifiable U-05 check), §29.1/29.2/29.3 alignment (network platform fee and compute-credit rows), §29.4 credit economy model (issuance, redemption, contributor share, platform fee, outstanding liability, reserve, grant budget, refunds/chargebacks, fraud and verification cost, capacity coverage; the owner's $10 → $8.50 + $1.50 example worked through as a hypothesis, showing an illustrative margin of about −$1.71 at the verification rate F-07-09's acceptance implies; falsification conditions), §29.5 product-page rule, WP-09/11/12/13, §31 Public contributor network and Commercial managed service gates; ADR-0004 amendment; threat model §6.2 credit-economy abuse row; README, AGENTS hard rule, CONTRIBUTING.
+- Recorded the owner's revised 2026-10-19 decision, "Contribute compute. Earn compute. Buy compute when you need more. Share your compute. Not your computer.", as binding principle D-019, with four guardrails added by the engineering session and labelled as such in D-019 and §26.5. It replaces in place the same-day, uncommitted "free compute" draft (community compute barred from paid work); ids D-019 and U-05 are kept and no trace of the two-economy version remains. Edited: spec §25 amendment note and U-05 declaration, §26.1 product purpose/cost and messages (owner slogan and taglines), §26.3 participant-without-hardware row, §26.5 rewritten as "Compute credits and contributor consent" (stages 0–3 with preconditions; eight rules, each with a falsifiable U-05 check), §29.1/29.2/29.3 alignment (network platform fee and compute-credit rows), §29.4 credit economy model (issuance, redemption, contributor share, platform fee, outstanding liability, reserve, grant budget, refunds/chargebacks, fraud and verification cost, capacity coverage; the owner's $10 → $8.50 + $1.50 example worked through as a hypothesis, showing an illustrative margin of about −$1.71 at the verification rate F-07-09's acceptance implies; falsification conditions), §29.5 product-page rule, WP-09/11/12/13, §31 Public contributor network and Commercial managed service gates; ADR-0004 amendment; threat model §6.2 credit-economy abuse row; README, AGENTS hard rule, CONTRIBUTING.
 - U-05 retitled "Unified compute credits with contributor consent" (P1, M10, economics; depends on F-06-01/02/05/10, F-07-01/02/05/07/08/09/11, X-05/06, I-03), NOT_STARTED, acceptance rewritten (one balance with source lots; backed, reconciling append-only ledger with collected funding, recorded issuer key and reserve refusal; per-device sharing modes default off, terms shown and confirmed, loosened only on the device, enforced by the scheduler and again by the device, consent recorded per allocation and receipt; metered, owner-authorized spends with price, source and fee shown before spend; no transfer or cash redemption while the F-07-11 gate is closed; Sybil-bounded fair access; free Run, private Mesh and self-hosted operation). Original rows F-07-02/07/08/10/11, F-09-11 and I-03 unchanged; they read as parts of the one economy. `tests/registry/test_validator.py` keeps the 5 added / 153 total assertion.
 - Counts: original 148 P0 unchanged (VERIFIED 36, IMPLEMENTED_UNVERIFIED 8, IN_PROGRESS 3, NOT_STARTED 101, BLOCKED 0, INFEASIBLE_WITH_EVIDENCE 0). Added 5 (U-01..U-05): NOT_STARTED 5. Total 153.
 - Verified (tooling only): VERIFICATION.md CREDITS-D019.
@@ -165,7 +183,7 @@ Then the integrator commit for the 2026-10-19 desktop evidence and fixes (F-10-0
 
 ## 2026-10-18 — Claude Code — Windows daemon; first two-machine M3 run
 
-The `common` daemon now runs on Windows 11 (x64/arm64 pins). Tested on the owner's HP laptop (Core Ultra 7 258V, Arc 140V), driven from the Mac over SSH: setup, golden inference on the Arc GPU via Vulkan, and the full M3 flow against the Mac on eduroam — pairing, remote execution both ways, local_only refusal, revocation, loss detection and reconnection — PASS twice. Discovery fails on eduroam (the network drops mDNS between clients). Three Windows defects fixed on the way (disk free, GPU name parsing, engine outliving a killed daemon). Evidence: `docs/evidence/m3-two-machine-2026-10-18.md`. Ledger statuses unchanged; two-machine evidence added to F-02-02/03/05, F-06-02/05/10; F-02-01 and F-10-05 still open (B-002, B-004 updated).
+The `ucompute` daemon now runs on Windows 11 (x64/arm64 pins). Tested on the owner's HP laptop (Core Ultra 7 258V, Arc 140V), driven from the Mac over SSH: setup, golden inference on the Arc GPU via Vulkan, and the full M3 flow against the Mac on eduroam — pairing, remote execution both ways, local_only refusal, revocation, loss detection and reconnection — PASS twice. Discovery fails on eduroam (the network drops mDNS between clients). Three Windows defects fixed on the way (disk free, GPU name parsing, engine outliving a killed daemon). Evidence: `docs/evidence/m3-two-machine-2026-10-18.md`. Ledger statuses unchanged; two-machine evidence added to F-02-02/03/05, F-06-02/05/10; F-02-01 and F-10-05 still open (B-002, B-004 updated).
 
 Next:
 ```
@@ -178,22 +196,22 @@ Then the Windows desktop build (Tauri: MSVC toolchain needs the owner's license 
 
 `target/` had been cleaned; the `.app`/`.dmg` were rebuilt from 08e267e and passed `verify_packaged_app.py` (15/15) with real inference; the executables are byte-identical to the 2026-10-15 build installed in `/Applications`. Workspace 367 passed, desktop 77 passed (docs/VERIFICATION.md).
 
-The installed app's audit log (`~/Library/Application Support/Common/logs/audit.jsonl`, 2026-10-15 22:12 to 2026-10-16 02:33 UTC) shows the first real two-machine use, with a Mac at 192.168.1.115 named "Kyle":
+The installed app's audit log (`~/Library/Application Support/UCompute/logs/audit.jsonl`, 2026-10-15 22:12 to 2026-10-16 02:33 UTC) shows the first real two-machine use, with a Mac at 192.168.1.115 named "Kyle":
 - pairing over the LAN succeeded (twice: revoked once, re-paired);
 - that Mac connected to this one 10 times (inbound, reconnecting about hourly);
 - this Mac's 441 outbound dials to its UDP 8193 all failed with `peer_lost`, and it did not answer ping on 2026-10-17. Likely its macOS firewall blocks incoming connections (stealth mode drops ping) or it was asleep; not confirmed from this side;
 - no group contains it, so a remote request would have been refused (`peer_unauthorized`); none was attempted.
 Not evidence for any ledger row yet: no remote inference ran across the two machines, and the other Mac's side was not observed.
 
-Next: on the other Mac, check System Settings > Network > Firewall for `Common`/`common` and allow incoming connections, create a group containing both devices with "run models" allowed, then run a remote request in both directions and collect both audit logs.
+Next: on the other Mac, check System Settings > Network > Firewall for `UCompute`/`ucompute` and allow incoming connections, create a group containing both devices with "run models" allowed, then run a remote request in both directions and collect both audit logs.
 
 ## 2026-10-15 (evening) — Claude Code — packaged desktop app fixed (stale bundled daemon)
 
-A tester's packaged `Common.app` never started its daemon: the bundled `common` predated `--exit-with-parent`, which the shell passes. `tauri build` now builds and checks the daemon from the same checkout (`apps/desktop/scripts/build-sidecar.sh`), and the daemon's arguments live in one file (`apps/desktop/src-tauri/daemon-args.txt`). Three more defects found while verifying were fixed: quit orphaned the engine (SIGKILL), a crashed app orphaned it too (SIGPIPE on the daemon's next write), and the bundle was not signed. Evidence: `docs/evidence/desktop-sidecar-fix-2026-10-15.md`; the rebuilt `Common_0.1.0_aarch64.dmg` passed all 15 checks of `apps/desktop/scripts/verify_packaged_app.py` with real inference. Workspace 367 passed, desktop 77 passed. Ledger unchanged (F-10-01 stays IMPLEMENTED_UNVERIFIED: fresh-account, UI-only first token not yet run; B-008).
+A tester's packaged `UCompute.app` never started its daemon: the bundled `ucompute` predated `--exit-with-parent`, which the shell passes. `tauri build` now builds and checks the daemon from the same checkout (`apps/desktop/scripts/build-sidecar.sh`), and the daemon's arguments live in one file (`apps/desktop/src-tauri/daemon-args.txt`). Three more defects found while verifying were fixed: quit orphaned the engine (SIGKILL), a crashed app orphaned it too (SIGPIPE on the daemon's next write), and the bundle was not signed. Evidence: `docs/evidence/desktop-sidecar-fix-2026-10-15.md`; the rebuilt `UCompute_0.1.0_aarch64.dmg` passed all 15 checks of `apps/desktop/scripts/verify_packaged_app.py` with real inference. Workspace 367 passed, desktop 77 passed. Ledger unchanged (F-10-01 stays IMPLEMENTED_UNVERIFIED: fresh-account, UI-only first token not yet run; B-008).
 
-Next: replace the old `/Applications/Common.app` with the new build; run the UI-only install → first token on a fresh macOS user account or a second Mac; ship testers the new .dmg with its sha256.
+Next: replace the old `/Applications/UCompute.app` with the new build; run the UI-only install → first token on a fresh macOS user account or a second Mac; ship testers the new .dmg with its sha256.
 
-## 2026-10-15 — Claude Code — M3 Common Mesh: 13 rows VERIFIED (SINGLE-HOST), 3 open
+## 2026-10-15 — Claude Code — M3 UCompute Mesh: 13 rows VERIFIED (SINGLE-HOST), 3 open
 
 **Counts:** VERIFIED 35 (+13), IMPLEMENTED_UNVERIFIED 9, IN_PROGRESS 3, NOT_STARTED 101, BLOCKED 0, INFEASIBLE 0. Commits 5034fb6 … 68e73f0.
 
@@ -205,67 +223,67 @@ Next: replace the old `/Applications/Common.app` with the new build; run the UI-
 
 **Review history:** three adversarial reviews of the first M3 cut (45 findings, including a TLS-resumption bypass of the pinned verifier and lost cross-process revocations) and two of the follow-ups (16 findings, each checked by a skeptic) were fixed. Testing in the app found two more defects, both now fixed: network settings changes failed with EADDRINUSE on the fixed port, and the CLI mesh test leaked daemons and engines on failure.
 
-**Suites at 68e73f0:** `COMMON_HOME=.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast` → 364 passed, 0 failed; clippy `-D warnings` and fmt clean; `apps/desktop` 77 passed, build ok; registry valid.
+**Suites at 68e73f0:** `UCOMPUTE_HOME=.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast` → 364 passed, 0 failed; clippy `-D warnings` and fmt clean; `apps/desktop` 77 passed, build ok; registry valid.
 
 **Next:**
 ```
 python3 scripts/validate_registry.py
 cat docs/BLOCKERS.md                  # B-002 second machine, B-014 default peer share, B-015
-COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast
-M3_DIR=<scratch dir with a/ b/ bin/common> python3 -I tests/distributed/single_host/m3_evidence.py step1   # two-daemon run
+UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --workspace --no-fail-fast
+M3_DIR=<scratch dir with a/ b/ bin/ucompute> python3 -I tests/distributed/single_host/m3_evidence.py step1   # two-daemon run
 ```
 With a second machine: run the same driver across two hosts, pair two packaged desktop installs through the UI, and capture on a LAN interface; then F-02-01, F-10-05 and the M4 pooled-inference work (F-03-*) can start.
 
-## 2026-10-14 (later) — Claude Code — M3 Common Mesh wave A committed (5034fb6)
+## 2026-10-14 (later) — Claude Code — M3 UCompute Mesh wave A committed (5034fb6)
 
-Identity (Ed25519/ring, 0700/0600, redacted), policy (default-deny, 2×2,000-case property tests), audit + redacted diagnostics, and the QUIC transport core (rustls RFC 7250 raw public keys, TLS 1.3 only, pinned verifier inside the handshake, signed capabilities, prost framing, peer loss in 6.5 s) are implemented with 66 tests. Ledger: 11 rows moved to IMPLEMENTED_UNVERIFIED (F-06-01/02/03/04/07/10, F-02-03/04/05/09, F-08-10). In progress: discovery (mDNS), SPAKE2 pairing, remote execution (Mode B), then API/CLI/desktop integration, review and the SINGLE-HOST evidence run. Known gap: reqwest's feature unification compiles rustls tls12 into the binary although every Common TLS config pins 1.3.
+Identity (Ed25519/ring, 0700/0600, redacted), policy (default-deny, 2×2,000-case property tests), audit + redacted diagnostics, and the QUIC transport core (rustls RFC 7250 raw public keys, TLS 1.3 only, pinned verifier inside the handshake, signed capabilities, prost framing, peer loss in 6.5 s) are implemented with 66 tests. Ledger: 11 rows moved to IMPLEMENTED_UNVERIFIED (F-06-01/02/03/04/07/10, F-02-03/04/05/09, F-08-10). In progress: discovery (mDNS), SPAKE2 pairing, remote execution (Mode B), then API/CLI/desktop integration, review and the SINGLE-HOST evidence run. Known gap: reqwest's feature unification compiles rustls tls12 into the binary although every UCompute TLS config pins 1.3.
 
 ## 2026-10-14 — Claude Code (owner's Mac, shell access) — M1 delivered, M2 desktop running, registry 22 VERIFIED
 
-**Verified on the owner's MacBook Air (Apple M2, 8 GB, macOS 26.2):** 186 Rust tests with `COMMON_REQUIRE_FIXTURES=1` (no silent skips) + 43 desktop tests + 8 registry tests; `cargo fmt`/`clippy -D warnings` clean. Evidence per requirement in `docs/VERIFICATION.md` ("M1 evidence"), benchmarks in `benchmarks/results/`.
+**Verified on the owner's MacBook Air (Apple M2, 8 GB, macOS 26.2):** 186 Rust tests with `UCOMPUTE_REQUIRE_FIXTURES=1` (no silent skips) + 43 desktop tests + 8 registry tests; `cargo fmt`/`clippy -D warnings` clean. Evidence per requirement in `docs/VERIFICATION.md` ("M1 evidence"), benchmarks in `benchmarks/results/`.
 
 **Delivered:**
-- Local inference runtime (`common-runtime`): supervised pinned llama.cpp b11609, Metal by default with log-proven offload, CPU fallback with a surfaced reason, streaming, cancel (slot idle ~1.2 ms), typed timeouts, blob hash re-verified before every load, single-slot model manager that refuses to drop in-flight generations.
-- Models (`common-models`): bounds-checked GGUF reader (2×1,000 fuzz, no panics), memory estimate calibrated to within −4.6…+8.9 % of measured engine footprint on 14 combinations, context/KV planner with explicit capping notes, quant recommendation (library only).
-- Artifacts (`common-artifacts`): content-addressed store, https-only resumable verified downloads (real HF pull and kill/resume exercised), safe archive extraction + re-verification, 8-model catalog with licenses.
-- API (`common-api`): OpenAI-compatible (official Python and JS clients pass), SSE, admission control (10× overload bounded), promtool-valid metrics, validated OpenAPI 3.1, loopback-only default + CSRF guard + 2 MiB body bound.
-- CLI (`common`): hardware, models {list,search,pull,inspect,import,verify,rm}, run, chat, serve, setup, doctor, bench, replay; first run auto-provisions the engine; signals stop generation and reap the engine.
-- Desktop (`apps/desktop`): Tauri 2 + React shell; live chat on Metal verified in the browser (DESKTOP-E2E); packaged `Common.app` + dmg built (ad-hoc signed; see F-10-01 evidence once recorded).
+- Local inference runtime (`ucompute-runtime`): supervised pinned llama.cpp b11609, Metal by default with log-proven offload, CPU fallback with a surfaced reason, streaming, cancel (slot idle ~1.2 ms), typed timeouts, blob hash re-verified before every load, single-slot model manager that refuses to drop in-flight generations.
+- Models (`ucompute-models`): bounds-checked GGUF reader (2×1,000 fuzz, no panics), memory estimate calibrated to within −4.6…+8.9 % of measured engine footprint on 14 combinations, context/KV planner with explicit capping notes, quant recommendation (library only).
+- Artifacts (`ucompute-artifacts`): content-addressed store, https-only resumable verified downloads (real HF pull and kill/resume exercised), safe archive extraction + re-verification, 8-model catalog with licenses.
+- API (`ucompute-api`): OpenAI-compatible (official Python and JS clients pass), SSE, admission control (10× overload bounded), promtool-valid metrics, validated OpenAPI 3.1, loopback-only default + CSRF guard + 2 MiB body bound.
+- CLI (`ucompute`): hardware, models {list,search,pull,inspect,import,verify,rm}, run, chat, serve, setup, doctor, bench, replay; first run auto-provisions the engine; signals stop generation and reap the engine.
+- Desktop (`apps/desktop`): Tauri 2 + React shell; live chat on Metal verified in the browser (DESKTOP-E2E); packaged `UCompute.app` + dmg built (ad-hoc signed; see F-10-01 evidence once recorded).
 - Docs: ADR-0002 (accepted), ADR-0003 (proposed M3 design), threat model, README, CI workflow, cargo-deny config.
 
 **Ledger counts:** VERIFIED 22 · IMPLEMENTED_UNVERIFIED 6 (F-01-06, F-01-07, F-01-12, F-10-01, F-10-04, F-10-11) · IN_PROGRESS 3 · NOT_STARTED 117 · BLOCKED 0 · INFEASIBLE 0. New blockers B-012 (second backend), B-013 (tool-call fixture).
 
 **Known limitations:** only macOS arm64 exercised (Linux/Windows paths compile and are fixture-tested; B-004); `available_bytes` is conservative under memory pressure; no second backend; tool-call round trip untested; packaged app unsigned (B-008) and not yet tested from a fresh user account.
 
-**Next actionable task (M2 close-out, then M3):** record F-10-01 evidence from the packaged app (sidecar health, select model, first token), test from a fresh macOS user account, add `common models recommend` (F-01-07), pin a tool-capable fixture (B-013); then start M3 per ADR-0003: `common-identity` (Ed25519 keys, F-06-01), `common-network` (quinn+rustls RPK transport, mDNS discovery, SPAKE2 pairing), remote execution over the authenticated transport.
+**Next actionable task (M2 close-out, then M3):** record F-10-01 evidence from the packaged app (sidecar health, select model, first token), test from a fresh macOS user account, add `ucompute models recommend` (F-01-07), pin a tool-capable fixture (B-013); then start M3 per ADR-0003: `ucompute-identity` (Ed25519 keys, F-06-01), `ucompute-network` (quinn+rustls RPK transport, mDNS discovery, SPAKE2 pairing), remote execution over the authenticated transport.
 
 **Next commands:**
 ```sh
-COMMON_HOME=$PWD/.common COMMON_REQUIRE_FIXTURES=1 cargo test --workspace --exclude common-desktop
+UCOMPUTE_HOME=$PWD/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test --workspace --exclude ucompute-desktop
 python3 scripts/validate_registry.py
-cargo build --release -p common-cli && (cd apps/desktop && bash scripts/prepare-sidecar.sh && pnpm tauri build --bundles app,dmg)
-open target/release/bundle/macos/Common.app
+cargo build --release -p ucompute-cli && (cd apps/desktop && bash scripts/prepare-sidecar.sh && pnpm tauri build --bundles app,dmg)
+open target/release/bundle/macos/UCompute.app
 ```
 
 ## 2026-10-14 — Claude Code (owner's Mac, shell access) — M1 implementation in progress (superseded by the entry above)
 
 **Verified:** Phase 1 on the Mac (`docs/environment/`); Codex slice re-run (17/17 tests, 4 real-inference) and its history imported as `refs/recovered/codex-m1/*`; pinned `llama-server` b11609 reproduces the golden output on loopback (VERIFICATION: ENGINE-SMOKE).
 
-**Implemented (Rust workspace, all tests run with the real engine + fixtures, `COMMON_HOME=.common`):**
-- `common-core` (8 tests), `common-hardware` (14), `common-models` (19 incl. 2×1,000-iteration GGUF fuzz), `common-artifacts` (29 incl. cut-and-resume download, malicious tar), `common-runtime` (32 incl. 6 real-engine tests: CPU/Metal golden text, forced-GPU-failure fallback, conformance suite; cancel → slot idle in ~1.2 ms).
+**Implemented (Rust workspace, all tests run with the real engine + fixtures, `UCOMPUTE_HOME=.ucompute`):**
+- `ucompute-core` (8 tests), `ucompute-hardware` (14), `ucompute-models` (19 incl. 2×1,000-iteration GGUF fuzz), `ucompute-artifacts` (29 incl. cut-and-resume download, malicious tar), `ucompute-runtime` (32 incl. 6 real-engine tests: CPU/Metal golden text, forced-GPU-failure fallback, conformance suite; cancel → slot idle in ~1.2 ms).
 - Desktop app `apps/desktop` (Tauri 2 + React): 43 vitest tests, axe 0 violations, keyboard-only primary flow; `cargo check` clean. Not yet run as a packaged app.
 - Docs: ADR-0002 (accepted), ADR-0003 (proposed), threat model (SD-01..SD-12), SECURITY/CONTRIBUTING/CODE_OF_CONDUCT, CI workflow (`.github/workflows/ci.yml`, cannot run until B-007), `deny.toml`.
 - Registry: acceptance criteria strengthened for F-06-06, F-01-05, F-08-08, F-06-01 (threat-model gaps). Statuses not yet changed: evidence entries are written after the API/CLI land and the evidence workflow runs.
 
-**In progress:** `common-api` (OpenAI-compatible API, admission control, metrics, OpenAPI) and `common-cli` (`common hardware|models|run|chat|serve|setup|doctor|bench`), then adversarial review + fixes, then the evidence run (golden tokens, streaming, cancel latency, Metal vs CPU, memory-estimate calibration on ≥5 model/ctx combos, OpenAI client smoke, overload) and registry status updates.
+**In progress:** `ucompute-api` (OpenAI-compatible API, admission control, metrics, OpenAPI) and `ucompute-cli` (`ucompute hardware|models|run|chat|serve|setup|doctor|bench`), then adversarial review + fixes, then the evidence run (golden tokens, streaming, cancel latency, Metal vs CPU, memory-estimate calibration on ≥5 model/ctx combos, OpenAI client smoke, overload) and registry status updates.
 
 **Ledger counts:** unchanged from the import (NOT_STARTED 143 · IN_PROGRESS 3 · IMPLEMENTED_UNVERIFIED 2) until evidence is attached.
 
 **Next commands:**
 ```sh
-COMMON_HOME=$PWD/.common cargo test                      # whole daemon workspace
-COMMON_HOME=$PWD/.common cargo run -p common-cli -- run stories15M-q4_0 -p "Once upon a time, a little rabbit" -n 32 --temp 0 --seed 42
-COMMON_HOME=$PWD/.common cargo run -p common-cli -- serve  # then: cd apps/desktop && pnpm dev
+UCOMPUTE_HOME=$PWD/.ucompute cargo test                      # whole daemon workspace
+UCOMPUTE_HOME=$PWD/.ucompute cargo run -p ucompute-cli -- run stories15M-q4_0 -p "Once upon a time, a little rabbit" -n 32 --temp 0 --seed 42
+UCOMPUTE_HOME=$PWD/.ucompute cargo run -p ucompute-cli -- serve  # then: cd apps/desktop && pnpm dev
 ```
 
 ## 2026-10-14 — Claude (claude.ai chat, cloud workspace) — registry + research import kit
@@ -290,7 +308,7 @@ python3 scripts/validate_registry.py       # registry rules
 ```
 
 ## 2026-10-14 — Codex (owner's Mac) — first local vertical slice (USER-REPORTED, UNRECONCILED)
-Owner reports: real small GGUF model runs on Mac CPU and Apple GPU; 17 tests pass with repeatable output and saved evidence; local Git repo created; nothing pushed. Location reported: `/Users/nasr/Documents/Codex/2026-10-14/referenced-chatgpt-conversation-this-is-an/outputs/common` (`README.md`, `STATUS.md`). That agent did not have the spec or M0 files. **Not inspected by the registry author.**
+Owner reports: real small GGUF model runs on Mac CPU and Apple GPU; 17 tests pass with repeatable output and saved evidence; local Git repo created; nothing pushed. Location reported: `/Users/nasr/Documents/Codex/2026-10-14/referenced-chatgpt-conversation-this-is-an/outputs/ucompute` (`README.md`, `STATUS.md`). That agent did not have the spec or M0 files. **Not inspected by the registry author.**
 
 ## 2026-10-13 — Claude (claude.ai chat) — M0 research
 M0 research report produced (see `docs/research/README.md`). No code. No benchmarks run.

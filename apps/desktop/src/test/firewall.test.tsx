@@ -48,7 +48,7 @@ describe("Windows Firewall consent step", () => {
     renderDevices();
     const button = await screen.findByRole("button", { name: ALLOW });
     expect(screen.getByText("No Windows Firewall rule for the service was found; other devices may be unable to connect.")).toBeTruthy();
-    expect(screen.getByText("Adds a rule for Common's background service only, on networks Windows treats as Private. Windows will ask you to confirm.")).toBeTruthy();
+    expect(screen.getByText("Adds a rule for UCompute's background service only, on networks Windows treats as Private. Windows will ask you to confirm.")).toBeTruthy();
     // Never silently: reading the state is all that happened so far.
     expect(allowCalls()).toBe(0);
 
@@ -64,7 +64,7 @@ describe("Windows Firewall consent step", () => {
   it("on a network Windows treats as Public the rule does not help, so the notice says so instead of going away", async () => {
     const user = userEvent.setup();
     // The rule exists: no offer, but the Public network is named with what the user can change.
-    windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\Common\\common.exe", public_networks: ["eduroam"] });
+    windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\UCompute\\ucompute.exe", public_networks: ["eduroam"] });
     installFakeDaemon({ network: NETWORK_ON });
     const { unmount } = renderDevices();
     expect(await screen.findByText(PUBLIC_NOTE)).toBeTruthy();
@@ -139,7 +139,7 @@ describe("Windows Firewall consent step", () => {
   });
 
   it("a domain network is named too, pointing at the administrator rather than at Private", async () => {
-    windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\Common\\common.exe", domain_networks: ["corp.example"] });
+    windowsApp({ ...BLOCKED, allowed: true, rule_program: "C:\\UCompute\\ucompute.exe", domain_networks: ["corp.example"] });
     installFakeDaemon({ network: NETWORK_ON });
     renderDevices();
     expect(await screen.findByText("Windows Firewall may still block other devices on this network.")).toBeTruthy();
@@ -163,7 +163,7 @@ describe("Windows Firewall consent step", () => {
   it("stays out of the way with networking off, with the rule in place, off Windows and outside the app", async () => {
     for (const [status, network] of [
       [BLOCKED, NETWORK],
-      [{ ...BLOCKED, allowed: true, rule_program: "C:\\Common\\common.exe" }, NETWORK_ON],
+      [{ ...BLOCKED, allowed: true, rule_program: "C:\\UCompute\\ucompute.exe" }, NETWORK_ON],
       [{ supported: false, allowed: false, rule_program: null }, NETWORK_ON],
     ] as const) {
       windowsApp(status);
@@ -223,8 +223,8 @@ describe("joining a pairing window where nothing answers", () => {
     const user = userEvent.setup();
     const fake = installFakeDaemon({ network: NETWORK_ON });
     const real = fake.fetchMock.getMockImplementation() as typeof fetch;
-    // The hint is the service's (E0 wording, common-network pairing.rs `no_answer`).
-    const hint = "a firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common through the firewall on that device (Devices in its desktop app)";
+    // The hint is the service's (E0 wording, ucompute-network pairing.rs `no_answer`).
+    const hint = "a firewall on the other device may block its pairing port (UDP 51999); on Windows, allow UCompute through the firewall on that device (Devices in its desktop app)";
     fake.fetchMock.mockImplementation(async (u: RequestInfo | URL, init?: RequestInit) =>
       String(u).endsWith("/api/pair/join") && String(init?.body).includes("51999") ? apiError("pairing_failed", "nothing answered at 192.168.1.20:51999", 401, hint) : real(u, init),
     );
@@ -235,7 +235,7 @@ describe("joining a pairing window where nothing answers", () => {
     await user.type(within(d).getByLabelText("Code"), `${JOIN_CODE}{Enter}`);
     const alert = await within(d).findByRole("alert");
     expect(alert.textContent).toContain("Pairing did not complete.");
-    expect(alert.textContent).toContain("A firewall on the other device may block its pairing port (UDP 51999); on Windows, allow Common through the firewall on that device (Devices in its desktop app).");
+    expect(alert.textContent).toContain("A firewall on the other device may block its pairing port (UDP 51999); on Windows, allow UCompute through the firewall on that device (Devices in its desktop app).");
     expect(alert.textContent).toContain("nothing answered at 192.168.1.20:51999");
     expect(alert.textContent).not.toContain("Check the code");
 

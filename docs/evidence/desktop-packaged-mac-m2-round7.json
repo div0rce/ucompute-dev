@@ -5,8 +5,8 @@
       "step": "binaries are arm64 and link only system libraries",
       "ok": true,
       "archs": {
-        "common": "arm64",
-        "common-desktop": "arm64"
+        "ucompute": "arm64",
+        "ucompute-desktop": "arm64"
       }
     },
     {
@@ -14,14 +14,14 @@
       "ok": true,
       "built": "target/release",
       "identical": {
-        "common": true,
-        "common-desktop": true
+        "ucompute": true,
+        "ucompute-desktop": true
       }
     },
     {
       "step": "the app ships THIRD_PARTY_NOTICES naming the Rust crate rustls and the JS package react",
       "ok": true,
-      "path": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/mnt/Common.app/Contents/Resources/THIRD_PARTY_NOTICES.txt",
+      "path": "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/mnt/UCompute.app/Contents/Resources/THIRD_PARTY_NOTICES.txt",
       "bytes": 708159,
       "sha256": "ee59ff8d4a1cfe2e21b3ca8a22752e8956d84370ed96a7dafe56a365d83a33d7"
     },
@@ -52,14 +52,14 @@
         [
           14431,
           14422,
-          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
     {
       "step": "fresh install provisioned the pinned engine inside the new HOME",
       "ok": true,
-      "data_dir": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/home/Library/Application Support/Common",
+      "data_dir": "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/home/Library/Application Support/UCompute",
       "engine": [
         "b11609",
         "llama-b11609-bin-macos-arm64.tar.gz"
@@ -96,7 +96,7 @@
         [
           14549,
           14543,
-          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
@@ -123,10 +123,10 @@
         [
           14591,
           14543,
-          "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ],
-      "log": "/private/tmp/claude-501/-Users-nasr-repos-common/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/home/Library/Logs/org.commoncompute.desktop/daemon.log",
+      "log": "/private/tmp/claude-501/-Users-nasr-repos-ucompute/6a959aab-a433-4b30-9156-1ce8acc61870/scratchpad/verify-work/home/Library/Logs/org.ucompute.desktop/daemon.log",
       "log_bytes": 880
     },
     {
@@ -161,12 +161,12 @@
     }
   ],
   "dmg": {
-    "path": "target/release/bundle/dmg/Common_0.1.0_aarch64.dmg",
+    "path": "target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg",
     "sha256": "c19f2537339520d889972ae528fcf2ae8ac1722268cb550bd45916f5455f660b",
     "bytes": 6307904
   },
   "binaries_in_dmg": {
-    "common": {
+    "ucompute": {
       "sha256": "901a02d87a3411ef52523202ca78e58e2174a6ad64669fd7dd9d7c3ddc8ab520",
       "archs": "arm64",
       "libs": [
@@ -174,7 +174,7 @@
         "/usr/lib/libSystem.B.dylib"
       ]
     },
-    "common-desktop": {
+    "ucompute-desktop": {
       "sha256": "3d6595ce87c6587b993a466b588a7613649e7a57c3c8f44850efe90adf067ab9",
       "archs": "arm64",
       "libs": [
@@ -195,5 +195,5 @@
       ]
     }
   },
-  "daemon_version": "common 0.1.0"
+  "daemon_version": "ucompute 0.1.0"
 }

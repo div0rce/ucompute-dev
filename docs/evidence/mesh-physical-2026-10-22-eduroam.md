@@ -1,5 +1,7 @@
 # Mac and Windows laptop on eduroam: connect at address and remote run (2026-10-22)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Two-machine evidence.** This Mac and the Windows laptop on the Rutgers eduroam network, which drops multicast between clients, so mDNS discovery cannot work there (`docs/evidence/m3-two-machine-2026-10-18.md`). This is the case the connect-at-address fallback (`POST /api/peers/{id}/connect` with an address, added in 6ab9f8b) exists for.
 
 | | Mac | Windows laptop |
@@ -59,9 +61,9 @@ Pairing in both directions, revocation, privacy, disconnect/hold, quit/crash cle
 
 ## Windows firewall consent step and pairing started on Windows (2026-10-22, 21:28-21:29 UTC)
 
-The Windows installer built natively on the laptop from 593d4ea (`Common_0.1.0_x64-setup.exe`, sha256 `c8af273d467c38254fc96037d27dcc6cfdc115adf98f1e248fc4ab61c0ae05c0`, 4,608,282 bytes) was installed silently into `C:\Users\jessg\CommonVerify-593d4ea\app` by `apps/desktop/scripts/verify_windows_app.ps1`, with a fresh data folder (new device identity `b79212f0…`). While its window was open in the laptop's desktop session, the owner's side used both apps by hand (these steps were not automated):
+The Windows installer built natively on the laptop from 593d4ea (`UCompute_0.1.0_x64-setup.exe`, sha256 `c8af273d467c38254fc96037d27dcc6cfdc115adf98f1e248fc4ab61c0ae05c0`, 4,608,282 bytes) was installed silently into `C:\Users\jessg\UComputeVerify-593d4ea\app` by `apps/desktop/scripts/verify_windows_app.ps1`, with a fresh data folder (new device identity `b79212f0…`). While its window was open in the laptop's desktop session, the owner's side used both apps by hand (these steps were not automated):
 
-- **Firewall consent step:** "Allow on private networks" was pressed and the Windows elevation prompt approved at the laptop. The resulting rule, read with `netsh advfirewall firewall show rule name="Common (paired devices)" verbose`: Enabled Yes, Direction In, Profiles **Private**, Protocol **UDP**, Program **`C:\Users\jessg\CommonVerify-593d4ea\app\common.exe`**, Action Allow. Exactly the scope the step promises; nothing broader.
+- **Firewall consent step:** "Allow on private networks" was pressed and the Windows elevation prompt approved at the laptop. The resulting rule, read with `netsh advfirewall firewall show rule name="UCompute (paired devices)" verbose`: Enabled Yes, Direction In, Profiles **Private**, Protocol **UDP**, Program **`C:\Users\jessg\UComputeVerify-593d4ea\app\ucompute.exe`**, Action Allow. Exactly the scope the step promises; nothing broader.
 - **Pairing started on Windows** (the direction Windows Firewall dropped on 2026-10-19, pktmon `receive inspection`): the laptop's audit log records `pairing_started` (port 50969) at 21:28:41 and `pairing_succeeded` with this Mac (`89839a1e…`, role initiator, addr 10.75.79.236:8193) at 21:29:09, then `peer_connected` outbound and, after Sharing was turned on, inbound. **The direction that failed is fixed on real hardware.**
 - **Device name:** this Mac lists the laptop as "JESS-HP" (its computer name), not "This Mac".
 

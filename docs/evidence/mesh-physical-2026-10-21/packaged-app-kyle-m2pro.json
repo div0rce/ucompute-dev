@@ -5,8 +5,8 @@
       "step": "binaries are arm64 and link only system libraries",
       "ok": true,
       "archs": {
-        "common": "arm64",
-        "common-desktop": "arm64"
+        "ucompute": "arm64",
+        "ucompute-desktop": "arm64"
       }
     },
     {
@@ -14,8 +14,8 @@
       "ok": true,
       "built": "target/release",
       "identical": {
-        "common": true,
-        "common-desktop": true
+        "ucompute": true,
+        "ucompute-desktop": true
       }
     },
     {
@@ -45,14 +45,14 @@
         [
           36746,
           36735,
-          "/Users/kylehebron/common-verify-185351/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/Users/kylehebron/ucompute-verify-185351/work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
     {
       "step": "fresh install provisioned the pinned engine inside the new HOME",
       "ok": true,
-      "data_dir": "/Users/kylehebron/common-verify-185351/work/home/Library/Application Support/Common",
+      "data_dir": "/Users/kylehebron/ucompute-verify-185351/work/home/Library/Application Support/UCompute",
       "engine": [
         "b11609",
         "llama-b11609-bin-macos-arm64.tar.gz"
@@ -89,7 +89,7 @@
         [
           36786,
           36782,
-          "/Users/kylehebron/common-verify-185351/work/Applications/Common.app/Contents/MacOS/common serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+          "/Users/kylehebron/ucompute-verify-185351/work/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
         ]
       ]
     },
@@ -125,12 +125,12 @@
     }
   ],
   "dmg": {
-    "path": "target/release/bundle/dmg/Common_0.1.0_aarch64.dmg",
+    "path": "target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg",
     "sha256": "e053551222b0825e78cbc880e7d9b9eed83c4ac8f3fe9bbb1fea7323d694fe8b",
     "bytes": 6105627
   },
   "binaries_in_dmg": {
-    "common": {
+    "ucompute": {
       "sha256": "0e87970ec8f7dab0e8013b6cff28cf9c5b032739f854e9d7fcc6b29381abbddb",
       "archs": "arm64",
       "libs": [
@@ -138,7 +138,7 @@
         "/usr/lib/libSystem.B.dylib"
       ]
     },
-    "common-desktop": {
+    "ucompute-desktop": {
       "sha256": "47eca2cf7950da6ce84fc4c624451d3fe2a928505be739212421bcff51d08e50",
       "archs": "arm64",
       "libs": [
@@ -159,5 +159,5 @@
       ]
     }
   },
-  "daemon_version": "common 0.1.0"
+  "daemon_version": "ucompute 0.1.0"
 }

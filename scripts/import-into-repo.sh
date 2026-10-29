@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Copy this import kit into an existing Common repository without overwriting anything.
+# Copy this import kit into an existing UCompute repository without overwriting anything.
 #   - files absent in the repo are copied as-is
 #   - files that exist and differ are written beside the original as <name>.claude-import
 #   - identical files are skipped
 # Nothing is committed, deleted, or pushed. Prints a summary and the list of conflicts.
 #
-# Usage: scripts/import-into-repo.sh /path/to/common-repo
+# Usage: scripts/import-into-repo.sh /path/to/ucompute-repo
 set -euo pipefail
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${1:?usage: $0 /path/to/repo}"
