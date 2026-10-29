@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -66,8 +67,13 @@ def satisfied(expr, allow):
     return ok and pos == len(toks)  # anything left over ("MIT and GPL-3.0-only") is not understood: refuse
 
 
+def tool(name):
+    """The program's full path: on Windows pnpm is `pnpm.cmd`, which subprocess does not find by its bare name."""
+    return shutil.which(name) or name
+
+
 def rust(crates, target):
-    cmd = ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", target]
+    cmd = [tool("cargo"), "metadata", "--format-version", "1", "--locked", "--filter-platform", target]
     m = json.loads(subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True).stdout)
     pkgs = {p["id"]: p for p in m["packages"]}
     nodes = {n["id"]: n for n in m["resolve"]["nodes"]}
@@ -96,7 +102,7 @@ def rust(crates, target):
 
 def js():
     desk = os.path.join(ROOT, "apps", "desktop")
-    r = subprocess.run(["pnpm", "licenses", "list", "--prod", "--json"], cwd=desk, capture_output=True, text=True, check=True)
+    r = subprocess.run([tool("pnpm"), "licenses", "list", "--prod", "--json"], cwd=desk, capture_output=True, text=True, check=True)
     out = []
     for lic, items in json.loads(r.stdout).items():
         for it in items:
