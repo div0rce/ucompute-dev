@@ -5,8 +5,11 @@ stage host (R, sentinel), with llama.cpp RPC carried only inside UCompute's auth
 split points. A daemon API run: no app window is driven.
 
     python3 -I split_two_machine.py --a <H's API> --b <R's API, through the SSH tunnel> --out <run dir> \
-        [--r-sh "scripts/mac-host.sh run"] [--h-home DIR] [--h-log FILE] [--r-home DIR] [--r-log FILE] \
-        [--link wifi|wired] [--models R1a,R1b] [--prereg FILE]
+        --r-sh "scripts/mac-host.sh run" [--r-ip <R's IPv4 LAN address>] [--r-tree DIR] [--h-home DIR] \
+        [--h-log FILE] [--r-home DIR] [--r-log FILE] [--link wifi|wired] [--models R1a,R1b] [--prereg FILE]
+
+--r-sh is required (no default host). Every R-side command goes through it; an R command that exits non-zero (ssh
+itself exits 255 when it cannot reach R) FAILs the step that needed it, never reads as a clean result.
 
 Steps: preflight (P1.0 and every item of the lab's PREFLIGHT.md; a failed preflight sends no request), the
 default-deny cases (P1.1: unpaired, remote-only groups, pooling allowed on H only, no acknowledgement), pairing, and
@@ -26,6 +29,7 @@ Writes prereg.json (before P1.1), manifest.json, steps.json, raw.jsonl (every HT
 r/, tokens/, bytes/ and lab-input.json under --out. Exit 3 when a step FAILed. Stdlib only.
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -41,21 +45,39 @@ RESULTS = []
 RAW = None
 DRIVEN = "daemon API run (not app UI): pairing, groups, privacy and requests go through the two daemons' loopback APIs"
 DECODE_STEPS = 64  # max_tokens 65 minus max_tokens 1: both requests prefill the same prompt
+AUDIT_MAX = 1000  # /api/audit's largest n (mesh.rs audit_get)
+SSH_PORT = 22  # R's sshd: the LAN probe's positive control, a port the run already reaches R on
+RUN_START = None  # utc() before the run's first request; a full audit page must reach back past it
+SESSIONS = set()  # the split sessions the driver saw open (H's /api/status at each checkpoint)
 # Shell commands by name. The R ones run through --r-sh (ssh); patterns carry [x] so pgrep never matches the shell
 # that runs them.
 R_CMDS = {
     "procs": "pgrep -af 'llama-serve[r]|ggml-rpc-serve[r]|local_soa[k]' || true",
     "rpc": "pgrep -af 'ggml-rpc-serve[r]' || true",
     "ss": "ss -ltnupH",
-    "who": 'who; echo "ssh_client=${SSH_CLIENT%% *}"',
+    "who": 'who; echo "ssh_client=${{SSH_CLIENT%% *}}"',
+    # every logind session, `who` misses Wayland desktops (OD-10); fails when loginctl does
+    "sessions": "l=$(loginctl list-sessions --no-legend) || exit 1; for s in $(echo \"$l\" | awk '{{print $1}}'); do "
+                "loginctl show-session \"$s\" -p Id -p Name -p Class -p Type -p State -p Remote -p RemoteHost "
+                "-p Service -p Seat; echo; done; "
+                'echo "self=${{XDG_SESSION_ID:-}}"; echo "user=$(id -un)"; echo "ssh_client=${{SSH_CLIENT%% *}}"',
     "load": "cat /proc/loadavg",
     "top": "ps -eo pcpu,pid,comm --sort=-pcpu | head -6",
     "banner": "f=$(ls -t {home}/logs/rpc-server-*.log 2>/dev/null | head -1); "
-              "[ -n \"$f\" ] && grep -h transport \"$f\"",
+              "[ -n \"$f\" ] && grep -h transport \"$f\" || true",
     "scan": "grep -rlF {pats} {home}/logs {home}/runs {log} 2>/dev/null || true",
+    # R's tree: the commit `scripts/mac-host.sh sync` recorded (or HEAD of a git checkout), then `path<TAB>blob hash`
+    # of every file but build outputs and data homes, compared with H's HEAD
+    "tree": "cd {tree} && {{ if [ -e .git ]; then git rev-parse HEAD; else cat .ucompute-sync-head; fi; }} && "
+            "f=$(mktemp) && find . -type f -not -path './.git/*' -not -path './target/*' -not -path './.ucompute*' "
+            "-not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path './apps/desktop/src-tauri/binaries/*' "
+            "-not -path './apps/desktop/src-tauri/gen/*' -not -path './apps/desktop/dist/*' | sed 's|^\\./||' "
+            "| LC_ALL=C sort >\"$f\" && git hash-object --stdin-paths <\"$f\" | paste \"$f\" - && rm -f \"$f\"",
 }
 H_CMDS = {
-    "git": "git rev-parse HEAD && git status --porcelain",
+    # Untracked files are left out: the runner creates its evidence folder inside the tree before preflight.
+    "git": "git rev-parse HEAD && git status --porcelain --untracked-files=no",
+    "tree": "git -c core.quotePath=false ls-tree -r HEAD",
     "procs": "pgrep -fl 'llama-serve[r]|ggml-rpc-serve[r]|cargo [b]uild|cargo [t]est|rust[c] |local_soa[k]"
              "|ucompute-deskto[p]' || true",
     "load": "sysctl -n vm.loadavg",
@@ -138,16 +160,23 @@ def sse(base, body, timeout=900):
     return out
 
 
+class RShellError(Exception):
+    """An R command did not complete: ssh could not reach R (exit 255), the command failed, or it timed out."""
+
+
 def shell(where, key, **kw):
-    """A named command on H (this Mac) or R (through --r-sh); its stdout."""
+    """A named command on H (this Mac) or R (through --r-sh); its stdout. On R, a non-zero exit raises RShellError:
+    every R command ends in `|| true` or cannot fail on its own, so it means the transport failed (privacy:F1)."""
     cmd = (R_CMDS if where == "r" else H_CMDS)[key].format(**kw)
     argv = [*shlex.split(ARGS.r_sh), cmd] if where == "r" else ["sh", "-c", cmd]
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
-        out = p.stdout
+        out, rc, err = p.stdout, p.returncode, p.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
-        out = f"ERROR {e!r}"
-    log_raw({"shell": where, "cmd": cmd, "out": out})
+        out, rc, err = f"ERROR {e!r}", None, repr(e)
+    log_raw({"shell": where, "cmd": cmd, "out": out, "rc": rc, "stderr": err[-2000:]})
+    if where == "r" and rc != 0:
+        raise RShellError(f"R command {key!r} exited {rc}: {err.strip()[-300:]}")
     return out
 
 
@@ -216,6 +245,40 @@ def who_others(text):
     return [x for x in lines[:-1] if x.strip() and not (client and f"({client})" in x)]
 
 
+def sessions_others(text):
+    """The `loginctl show-session` blocks (the "sessions" command) of active or online sessions other than the run's
+    own SSH sessions (this command's, and the run's tunnel: sshd, remote, the run's user, from the run's client
+    address) and the user manager, one line each (OD-10: a desktop login on a seat is caught, `who` may not list it)."""
+    blocks, meta = [], {}
+    for chunk in text.strip().split("\n\n"):
+        kv = dict(line.partition("=")[::2] for line in chunk.splitlines() if "=" in line)
+        if "Id" in kv:
+            blocks.append(kv)
+        else:
+            meta.update(kv)
+    me, user, client = meta.get("self", ""), meta.get("user", ""), meta.get("ssh_client", "")
+
+    def own(s):
+        return (s["Id"] == me or s.get("Class", "").startswith("manager")
+                or (s.get("Service") == "sshd" and s.get("Remote") == "yes" and bool(user) and s.get("Name") == user
+                    and bool(client) and s.get("RemoteHost") == client))
+    return [" ".join(f"{k}={s.get(k, '')}" for k in ("Id", "Name", "Class", "Type", "State", "Seat", "RemoteHost"))
+            for s in blocks if s.get("State") in ("active", "online") and not own(s)]
+
+
+def tree_diff(ls_tree, listing):
+    """Paths that differ between HEAD (`git ls-tree -r HEAD`, regular files) and R's tree (`path<TAB>blob hash`
+    lines): changed, missing on R or extra on R."""
+    want = {}
+    for line in ls_tree.splitlines():
+        meta, _, path = line.partition("\t")
+        f = meta.split()
+        if len(f) == 3 and f[0] in ("100644", "100755"):
+            want[path] = f[2]
+    got = {p: h for p, _, h in (x.partition("\t") for x in listing.splitlines() if x)}
+    return sorted(p for p in want.keys() | got.keys() if want.get(p) != got.get(p))
+
+
 def free_bytes(vm_stat):
     """Free, inactive and speculative pages of `vm_stat`, in bytes."""
     page = int(re.search(r"page size of (\d+) bytes", vm_stat).group(1))
@@ -249,27 +312,48 @@ def lab_input(runs, link):
 
 def r_clean(tag, rpc_allowed=False):
     """R runs no rpc-server (unless allowed) and listens only where UCompute does; saves what it saw."""
-    rpc, ss = shell("r", "rpc"), shell("r", "ss")
+    try:
+        rpc, ss = shell("r", "rpc"), shell("r", "ss")
+    except RShellError as e:
+        return False, {"r_shell_error": str(e)}, ""
     save(f"r/pgrep-{tag}.txt", rpc)
     save(f"r/ss-ltnup-{tag}.txt", ss)
     bad = listeners_bad(ss, rpc_allowed)
     return (rpc_allowed or not rpc.strip()) and not bad, {"rpc_server": rpc.strip(), "bad_listeners": bad}, ss
 
 
-def preflight(prereg):
+def preflight(prereg, a, b):
+    try:
+        return preflight_checks(prereg, a, b)
+    except RShellError as e:
+        return step("preflight", False, r_shell_error=str(e))
+
+
+def preflight_checks(prereg, a, b):
     pf, checks = prereg["preflight"], {}
     head, _, dirty = shell("h", "git").partition("\n")
-    checks["same_commit"] = {"ok": bool(head.strip()) and not dirty.strip(), "head": head.strip(),
-                             "uncommitted": dirty.strip().splitlines()[:20],
-                             "why": "R gets HEAD only (scripts/mac-host.sh sync), so H must build HEAD"}
+    head = head.strip()
+    dirty = "\n".join(l for l in dirty.splitlines() if not l.startswith("??"))
+    r_head, _, r_files = shell("r", "tree", tree=ARGS.r_tree).partition("\n")
+    differs = tree_diff(shell("h", "tree"), r_files)
+    builds = {}
+    for side, base in (("h", a), ("r", b)):
+        v = call(base, "GET", "/health")[1]
+        builds[side] = v.get("commit") if isinstance(v, dict) else None
+    checks["same_commit"] = {"ok": bool(head) and not dirty.strip() and r_head.strip() == head and not differs
+                             and all(c == head for c in builds.values()),
+                             "head": head, "uncommitted": dirty.strip().splitlines()[:20], "r_tree": ARGS.r_tree,
+                             "r_head": r_head.strip(), "r_tree_differs": differs[:20], "build_commit": builds,
+                             "why": "H's tree is clean at HEAD, R's tree holds exactly HEAD's files, and both "
+                                    "daemons were built from HEAD with a clean tree (/health commit)"}
     procs = shell("r", "procs")
     checks["r_soak_and_engines_stopped"] = {"ok": not procs.strip(), "found": procs.strip()}
     ss = shell("r", "ss")
     save("r/ss-ltnup-preflight.txt", ss)
     bad = listeners_bad(ss)
     checks["r_only_ucompute_listens"] = {"ok": not bad, "others": bad}
-    others = who_others(shell("r", "who"))
-    checks["r_who_empty"] = {"ok": not others, "others": others}
+    logins, others = sessions_others(shell("r", "sessions")), who_others(shell("r", "who"))
+    checks["r_no_other_sessions"] = {"ok": not logins and not others, "loginctl": logins, "who": others}
     hp = shell("h", "procs")
     checks["h_no_other_engines_or_builds"] = {"ok": not hp.strip(), "found": hp.strip()}
     checks["h_ac_power"] = {"ok": "AC Power" in shell("h", "power")}
@@ -327,6 +411,8 @@ def checkpoint(a, rid, tag):
     time.sleep(0.2)  # the tunnel settles after [DONE] (SCORING-INPUT.md)
     _, v, _ = call(a, "GET", "/api/status")
     sp = (v if isinstance(v, dict) else {}).get("split") or {}
+    if sp.get("session"):
+        SESSIONS.add(sp["session"])
     _, pv, _ = call(a, "GET", "/api/peers")
     peers = pv.get("peers", []) if isinstance(pv, dict) else []
     conn = next((p.get("connection") for p in peers if p["id"] == rid), None) or {}
@@ -363,12 +449,15 @@ def run_model(a, b, rid, m, prereg, lab_runs, rows):
     save(f"h/status-{label}.json", status)
     clean, facts, ss = r_clean(f"session-{label}", rpc_allowed=True)
     ports = rpc_ports(ss)
-    # R's rpc-server must not answer on R's LAN address (nc's exit code: 0 would mean it connected)
+    # R's rpc-server must not answer on R's LAN address (nc's exit code: 0 would mean it connected); it counts only
+    # when R's sshd answers there in the same step (the positive control)
+    control = shell("h", "nc", ip=ARGS.r_ip, port=SSH_PORT).strip().rpartition("rc=")[2]
     nc = [shell("h", "nc", ip=ARGS.r_ip, port=p).strip().rpartition("rc=")[2] for p in ports]
     banner = shell("r", "banner", home=ARGS.r_home)
     up = step(f"session_{label}", all(x["status"] == 200 for x in loads) and got == want and clean and len(ports) == 1
-              and all(x not in ("", "0") for x in nc) and "TCP" in banner,
-              loads=loads, placement=got, want=want, rpc_ports=ports, lan_probe_rc=nc, banner=banner.strip(), **facts)
+              and control == "0" and all(x not in ("", "0") for x in nc) and "TCP" in banner,
+              loads=loads, placement=got, want=want, rpc_ports=ports, lan_control_rc=control, lan_probe_rc=nc,
+              banner=banner.strip(), **facts)
     if not up:
         call(a, "POST", "/api/unload")
         return
@@ -434,17 +523,29 @@ def run_model(a, b, rid, m, prereg, lab_runs, rows):
                         "equal_prefix_chars": same})
     save(f"tokens/compare-{label}.json", compare)
     step(f"local_{label}", ok, compare=compare, note="as measured: Metal head with an x86 CPU stage (ADR-0005 D10)")
+    stage_gone(a, label)
+
+
+def stage_gone(a, label):
     call(a, "POST", "/api/unload")
-    gone = wait(lambda: not shell("r", "rpc").strip(), 15)
-    step(f"stage_gone_{label}", gone is not None, within_s=gone)
+    try:
+        gone, err = wait(lambda: not shell("r", "rpc").strip(), 15), None
+    except RShellError as e:
+        gone, err = None, str(e)
+    step(f"stage_gone_{label}", gone is not None, within_s=gone, r_shell_error=err)
 
 
 def audit_join(a, b):
-    ev = {}
+    """Both sides' audit (the largest page), joined on the split sessions. A full page may have cut the run's start
+    off, so its oldest event must predate the run (privacy:F2); the sessions opened are exactly those the driver
+    saw."""
+    ev, oldest, whole = {}, {}, {}
     for side, base in (("h", a), ("r", b)):
-        _, v, _ = call(base, "GET", "/api/audit")
+        _, v, _ = call(base, "GET", f"/api/audit?n={AUDIT_MAX}")
         ev[side] = v.get("events", []) if isinstance(v, dict) else []
         save(f"{side}/audit.jsonl", "".join(json.dumps(e) + "\n" for e in ev[side]))
+        oldest[side] = ev[side][0].get("ts_utc") if ev[side] else None
+        whole[side] = len(ev[side]) < AUDIT_MAX or (oldest[side] or "") < RUN_START
 
     def sessions(side, kind, role):
         return {(e.get("fields") or {}).get("session") for e in ev[side]
@@ -452,8 +553,9 @@ def audit_join(a, b):
     opened = sessions("h", "session_open", "head")
     joined = opened <= sessions("r", "session_open", "stage")
     closed = opened <= sessions("h", "session_close", "head") and opened <= sessions("r", "session_close", "stage")
-    return ev, step("audit_join", bool(opened) and joined and closed, sessions=len(opened), joined=joined,
-                    closed_both_sides=closed)
+    return ev, step("audit_join", bool(opened) and joined and closed and opened == SESSIONS and all(whole.values()),
+                    sessions=len(opened), driver_sessions=len(SESSIONS), joined=joined, closed_both_sides=closed,
+                    run_start=RUN_START, oldest=oldest, whole_run=whole)
 
 
 def canary_scan(prereg, ev):
@@ -468,19 +570,35 @@ def canary_scan(prereg, ev):
         if any(c.encode() in data for c in canaries):
             hits["h"].append(f)
     pats = " ".join("-e " + shlex.quote(c) for c in canaries)
-    hits["r"] = shell("r", "scan", pats=pats, home=ARGS.r_home, log=ARGS.r_log).split()
-    save("scan.json", {"canaries": canaries, "h_files_scanned": len(files), "hits": hits})
-    step("canary_scan", not any(hits.values()), h_files=len(files), hits=hits)
+    try:
+        hits["r"], err = shell("r", "scan", pats=pats, home=ARGS.r_home, log=ARGS.r_log).split(), None
+    except RShellError as e:
+        err = str(e)
+    save("scan.json", {"canaries": canaries, "h_files_scanned": len(files), "hits": hits, "r_shell_error": err})
+    step("canary_scan", not err and not any(hits.values()), h_files=len(files), hits=hits, r_shell_error=err)
+
+
+def teardown(a):
+    call(a, "POST", "/api/unload")
+    ok, facts, _ = r_clean("teardown")
+    step("teardown", ok, **facts)
 
 
 def p1(args, prereg, lab_runs, rows):
+    global RUN_START
     a, b = args.a, args.b
-    if not preflight(prereg):
+    RUN_START = utc()
+    if not preflight(prereg, a, b):
         return
     _, ha, _ = call(a, "GET", "/api/network")
     _, rb, _ = call(b, "GET", "/api/network")
     hid, rid = ha["peer_id"], rb["peer_id"]
     args.r_ip = args.r_ip or (rb.get("dial_addr") or "").rpartition(":")[0]
+    try:  # the LAN probe needs R's IPv4 address (an empty or bracketed IPv6 one fails nc on its own)
+        ipaddress.IPv4Address(args.r_ip)
+    except ValueError:
+        step("r_ip", False, r_ip=args.r_ip, why="R's LAN address must be IPv4: pass --r-ip")
+        return
     save("prereg.json", {**prereg, "run": {"utc": utc(), "link": args.link, "head": hid, "stage": rid,
                                            "r_ip": args.r_ip, "driven": DRIVEN}})
     manifest = {"utc": utc(), "commit": shell("h", "git").split("\n")[0], "ping": shell("h", "ping", ip=args.r_ip)}
@@ -518,12 +636,14 @@ def p1(args, prereg, lab_runs, rows):
          text="Pooling splits one model")  # (d)
     for m in prereg["models"]:
         if m["label"] in args.models.split(","):
-            run_model(a, b, rid, m, prereg, lab_runs, rows)
+            try:
+                run_model(a, b, rid, m, prereg, lab_runs, rows)
+            except RShellError as e:
+                step(f"model_{m['label']}", False, r_shell_error=str(e))
+                call(a, "POST", "/api/unload")
     ev, _ = audit_join(a, b)
     canary_scan(prereg, ev)
-    call(a, "POST", "/api/unload")
-    ok, facts, _ = r_clean("teardown")
-    step("teardown", ok, **facts)
+    teardown(a)
 
 
 def main():
@@ -532,8 +652,9 @@ def main():
     ap.add_argument("--a", required=True, help="H's API (this Mac's dev daemon)")
     ap.add_argument("--b", required=True, help="R's API (the stage host, through the SSH tunnel)")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--r-sh", default="scripts/mac-host.sh run", help="prefix that runs one shell command on R")
-    ap.add_argument("--r-ip", help="R's LAN address (default: from R's dial address)")
+    ap.add_argument("--r-sh", required=True, help="prefix that runs one shell command on R (no default host)")
+    ap.add_argument("--r-ip", help="R's IPv4 LAN address (default: from R's dial address)")
+    ap.add_argument("--r-tree", default="$HOME/src/ucompute", help="R's source tree, synced from HEAD and built")
     ap.add_argument("--h-home", default=os.environ.get("UCOMPUTE_HOME", ".ucompute-split"))
     ap.add_argument("--h-log", help="H's daemon log")
     ap.add_argument("--r-home", default="$HOME/.ucompute-acceptance")

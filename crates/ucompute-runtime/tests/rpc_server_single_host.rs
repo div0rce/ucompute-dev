@@ -1,7 +1,7 @@
 //! WP-04 C3, REAL and SINGLE-HOST: the pinned `ggml-rpc-server` started by `rpc_server::start`,
 //! checked through the OS's own socket tables (`sockets::live`). One host, loopback only: this is
 //! not a stage host on another machine and exercises no transport. The socket owner checks exist on
-//! Linux and macOS only; the last three tests are Linux only (`pre_exec`).
+//! Linux and macOS only; the tests on `pre_exec` (cap, nice, PDEATHSIG) are Linux only.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 mod support;
@@ -45,7 +45,7 @@ fn lan_ip() -> Option<Ipv4Addr> {
 }
 
 #[tokio::test]
-async fn rpc_server_binds_loopback_only() {
+async fn rpc_server_binds_loopback_only_single_host() {
     let Some(engine) = engine_dir() else { return };
     let logs = tempfile::tempdir().unwrap();
     let s = rpc_server::start(&engine, logs.path(), 2, None).await.unwrap();
@@ -65,7 +65,7 @@ async fn rpc_server_binds_loopback_only() {
 }
 
 #[tokio::test]
-async fn rpc_server_stops_on_drop() {
+async fn rpc_server_stops_on_drop_single_host() {
     let Some(engine) = engine_dir() else { return };
     let logs = tempfile::tempdir().unwrap();
     let s = rpc_server::start(&engine, logs.path(), 2, None).await.unwrap();
@@ -104,7 +104,7 @@ fn squatter(listener: TcpListener) -> std::sync::mpsc::Receiver<usize> {
 }
 
 #[tokio::test]
-async fn squatted_rpc_port_is_detected_and_sent_nothing() {
+async fn squatted_rpc_port_is_detected_and_sent_nothing_single_host() {
     let Some(engine) = engine_dir() else { return };
     let logs = tempfile::tempdir().unwrap();
     // the same address the server wants, and the same port on IPv6 loopback
@@ -122,11 +122,16 @@ async fn squatted_rpc_port_is_detected_and_sent_nothing() {
             0,
             "{addr}: the squatter got a connection or bytes"
         );
+        assert_eq!(
+            std::fs::read_dir(logs.path()).unwrap().count(),
+            0,
+            "{addr}: a squatted start leaves no log"
+        );
     }
 }
 
 #[tokio::test]
-async fn foreign_client_on_rpc_port_is_detected() {
+async fn foreign_client_on_rpc_port_is_detected_single_host() {
     let Some(engine) = engine_dir() else { return };
     let nc = ["/usr/bin/nc", "/bin/nc"]
         .into_iter()
@@ -204,12 +209,13 @@ fn rlimit_as(pid: &str) -> String {
         .to_string()
 }
 
-/// A hostile head asks for more memory than the cap allows: the server refuses (or dies) and the
+/// A SYNTHETIC hostile head asks for more memory than the cap allows: the capped server refuses the
+/// `ALLOC_BUFFER` (remote_ptr 0, as seen on sentinel; a closed connection also passes) and the
 /// daemon's own limit is untouched. The uncapped control on the same host grants the same request,
 /// so the refusal is the cap's, not the kernel's overcommit rule.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn rpc_server_memory_cap_kills_server_not_daemon() {
+async fn rpc_server_memory_cap_refuses_alloc_synthetic_head_single_host() {
     let Some(engine) = engine_dir() else { return };
     const CAP: u64 = 1 << 30;
     const ASK: u64 = 4 << 30;
@@ -236,32 +242,130 @@ async fn rpc_server_memory_cap_kills_server_not_daemon() {
     process::stop(capped.child).await;
 }
 
-/// The server yields the CPU to the daemon: nice 10 (`setpriority` in `pre_exec`).
+/// proc(5): field 19 of `/proc/<pid>/stat` is nice; fields after the `(comm)` start at field 3.
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn rpc_server_runs_at_nice_10() {
-    let Some(engine) = engine_dir() else { return };
-    let logs = tempfile::tempdir().unwrap();
-    let s = rpc_server::start(&engine, logs.path(), 2, None).await.unwrap();
-    let stat = std::fs::read_to_string(format!("/proc/{}/stat", s.child.id().unwrap())).unwrap();
-    // proc(5): field 19 is nice; fields after the `(comm)` start at field 3
-    let nice = stat
-        .rsplit_once(')')
+fn nice_of(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat.rsplit_once(')')
         .unwrap()
         .1
         .split_whitespace()
         .nth(16)
         .unwrap()
-        .to_string();
+        .to_string()
+}
+
+/// The server yields the CPU to the daemon: nice 10 (`setpriority` in `pre_exec`).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rpc_server_runs_at_nice_10_single_host() {
+    let Some(engine) = engine_dir() else { return };
+    let logs = tempfile::tempdir().unwrap();
+    let s = rpc_server::start(&engine, logs.path(), 2, None).await.unwrap();
+    let nice = nice_of(s.child.id().unwrap());
     process::stop(s.child).await;
     assert_eq!(nice, "10");
+}
+
+/// Child-process helper for the two tests below: a stand-in daemon, started under the nice or the
+/// address-space limit its parent set, starts the server with the cap in `RPC_TEST_CAP` and prints
+/// the server's nice and RLIMIT_AS line. `start` fails if `confine` cannot apply them.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "child-process helper"]
+fn confined_helper() {
+    let cap: u64 = std::env::var("RPC_TEST_CAP").unwrap().parse().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let s = rpc_server::start(&engine_dir().unwrap(), logs.path(), 2, Some(cap))
+            .await
+            .unwrap();
+        let pid = s.child.id().unwrap();
+        println!("nice {}", nice_of(pid));
+        println!("limit {}", rlimit_as(&pid.to_string()));
+        process::stop(s.child).await;
+    });
+}
+
+/// [`confined_helper`] in a child process whose `pre_exec` runs `setup` (raise the nice, lower the
+/// limit: neither can be undone in this test process); its output.
+#[cfg(target_os = "linux")]
+fn run_confined(cap: u64, setup: fn() -> std::io::Result<()>) -> String {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--ignored", "--exact", "confined_helper", "--nocapture"])
+        .env("RPC_TEST_CAP", cap.to_string())
+        .env("MALLOC_ARENA_MAX", "2");
+    // SAFETY: `setup` makes one setpriority or setrlimit call and allocates nothing.
+    unsafe { cmd.pre_exec(setup) };
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "helper failed: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+/// A daemon already niced above 10 (here 15) starts its server at its own nice: `confine` only
+/// ever raises the nice, which an unprivileged process may; lowering it to 10 is EACCES and failed
+/// every pooled session (review pre-exec-nice-rlimit-fail-closed).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rpc_server_keeps_a_higher_daemon_nice_single_host() {
+    if engine_dir().is_none() {
+        return;
+    }
+    let out = run_confined(4 << 30, || {
+        // SAFETY: plain syscall on the child itself.
+        match unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 15) } {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    });
+    assert!(out.lines().any(|l| l == "nice 15"), "{out}");
+}
+
+/// A daemon under a hard RLIMIT_AS below the stage's cap starts its server at its own limit, soft
+/// and hard: `confine` only ever lowers the limit, and raising the hard limit was EPERM. A cap
+/// below the daemon's limit still applies.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn rpc_server_keeps_a_lower_daemon_address_limit_single_host() {
+    const DAEMON: u64 = 6 << 30;
+    if engine_dir().is_none() {
+        return;
+    }
+    let lower = || {
+        let l = libc::rlimit {
+            rlim_cur: DAEMON,
+            rlim_max: DAEMON,
+        };
+        // SAFETY: plain syscall on the child itself.
+        match unsafe { libc::setrlimit(libc::RLIMIT_AS, &l) } {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    };
+    let limit = |out: &str| out.lines().find_map(|l| l.strip_prefix("limit ")).unwrap().to_string();
+    let fields = |l: &str| {
+        l.split_whitespace()
+            .filter_map(|w| w.parse::<u64>().ok())
+            .collect::<Vec<_>>()
+    };
+    let out = run_confined(64 << 30, lower);
+    assert_eq!(fields(&limit(&out)), [DAEMON, DAEMON], "{out}");
+    let out = run_confined(2 << 30, lower);
+    assert_eq!(fields(&limit(&out)), [2 << 30, 2 << 30], "{out}");
 }
 
 /// PDEATHSIG follows the thread that forked, and tokio retires an idle blocking-pool thread after
 /// 10 s. Started from inside `spawn_blocking`, whose thread then idles out, the server lives on.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rpc_server_survives_blocking_pool_idle() {
+async fn rpc_server_survives_blocking_pool_idle_single_host() {
     let Some(engine) = engine_dir() else { return };
     let logs = tempfile::tempdir().unwrap();
     let dir = logs.path().to_path_buf();
@@ -277,8 +381,8 @@ async fn rpc_server_survives_blocking_pool_idle() {
     process::stop(s.child).await;
 }
 
-/// Child-process helper for [`rpc_server_dies_with_daemon`]: a stand-in daemon that starts the
-/// server from a worker task, prints its pid and waits to be killed.
+/// Child-process helper for [`rpc_server_dies_with_daemon_single_host`]: a stand-in daemon that
+/// starts the server from a worker task, prints its pid and waits to be killed.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "child-process helper"]
@@ -299,7 +403,7 @@ fn daemon_helper() {
 /// The daemon is SIGKILLed (no unwinding, no `kill_on_drop`): PDEATHSIG takes the server with it.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn rpc_server_dies_with_daemon() {
+async fn rpc_server_dies_with_daemon_single_host() {
     use std::io::BufRead;
     if engine_dir().is_none() {
         return;

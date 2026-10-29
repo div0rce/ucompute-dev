@@ -21,7 +21,7 @@
         "summary": "Liveness",
         "description": "Always 200 while the process runs. Never requires authentication.",
         "security": [{}],
-        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "ok" }, "version": { "type": "string" } }, "required": ["status", "version"] } } } } }
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "const": "ok" }, "version": { "type": "string" }, "commit": { "type": "string", "description": "The commit the binary was built from: HEAD, with -dirty when the tree had changes; the synced commit in a tree copied by scripts/mac-host.sh sync; or unknown." } }, "required": ["status", "version", "commit"] } } } } }
       }
     },
     "/ready": {

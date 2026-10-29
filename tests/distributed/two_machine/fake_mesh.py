@@ -389,10 +389,13 @@ class SplitMesh(Mesh):
     one turn per token) plus a prefill, so the lab's scorer accepts the run. The texts, timings, `ss`, `who` and
     the other shell outputs are canned. Nothing here is P1 or evidence of UCompute.
 
-    `bad`: dirty, busy_r, other_user, r_engine_left, low_memory (preflight); stage_spawns_on_refusal,
-    stage_refusal_untyped (P1.1); wrong_placement, public_rpc, rpc_reachable, rdma_banner (the session);
-    session_changes (a prompt's checkpoints); local_uses_split; rpc_outlives_session; leaks_prompt (R's logs);
-    no_close_audit."""
+    `bad`: dirty, busy_r, other_user, desktop_login, r_engine_left, low_memory, r_tree_modified, r_tree_head,
+    r_stale_build, h_dirty_build (preflight); r_ip_v6; stage_spawns_on_refusal, stage_refusal_untyped (P1.1);
+    wrong_placement, public_rpc, rpc_reachable, lan_down, rdma_banner (the session); session_changes (a prompt's
+    checkpoints); local_uses_split; rpc_outlives_session; leaks_prompt (R's logs); no_close_audit, extra_session,
+    audit_full_page."""
+    HEAD = "abc123"
+    BLOBS = {"Cargo.toml": "1" * 40, "crates/ucompute-api/src/lib.rs": "2" * 40, "scripts/mac-host.sh": "3" * 40}
     PER = {"R1a": (14150, 3592), "R1b": (21830, 6152)}
     TIMES = {"R1a": (230.0, 36.0), "R1b": (350.0, 54.0)}  # TTFT and TPOT (ms) inside the lab's Wi-Fi bands
 
@@ -427,6 +430,10 @@ class SplitMesh(Mesh):
                         "c": {"to_r": 200_000_000, "to_h": 9_000, "switches": 40}}  # the upload
         self.log(self.H, "session_open", self.R.id, role="head", session=sid)
         self.log(self.R, "session_open", self.H.id, role="stage", session=sid)
+        if "extra_session" in self.bad and self.sessions == 1:  # one the driver never sees in /api/status
+            for d, role in ((self.H, "head"), (self.R, "stage")):
+                for kind in ("session_open", "session_close"):
+                    self.log(d, kind, None, role=role, session="f" * 32)
 
     def traffic(self, m, tokens, n):
         c, (up, down), act = self.session["c"], self.PER[m["label"]], m["hidden"] * 4
@@ -435,6 +442,14 @@ class SplitMesh(Mesh):
         c["switches"] += 6 + 2 * (n - 1)
 
     def route(self, me, method, p, body):
+        if p == "/health":
+            stale = (me is self.R and "r_stale_build" in self.bad) or (me is self.H and "h_dirty_build" in self.bad)
+            return 200, {"status": "ok", "version": "1.0.0",
+                         "commit": "0ld000" if stale and me is self.R else self.HEAD + ("-dirty" if stale else "")}
+        if p == "/api/network" and method == "GET" and me is self.R and "r_ip_v6" in self.bad:
+            return 200, {**super().route(me, method, p, body)[1], "dial_addr": "[fe80::1]:8193"}
+        if p == "/api/audit" and "audit_full_page" in self.bad:  # a page of 1000 that starts after the run did
+            return 200, {"events": [me.audit[0]] * (1000 - len(me.audit)) + me.audit}
         if p == "/api/status":
             s = self.session if me is self.H else None
             split = self.loaded_split if me is self.H else None
@@ -511,6 +526,13 @@ class SplitMesh(Mesh):
                 "ss": self.ss(rpc),
                 "who": ("kyle pts/1 2026-10-29 10:00 (10.0.0.77)\n" if "other_user" in bad else "")
                 + "div0rce pts/0 2026-10-29 09:00 (10.0.0.1)\nssh_client=10.0.0.1\n",
+                "sessions": ("Id=2\nName=div0rce\nClass=user\nType=wayland\nState=active\nRemote=no\nRemoteHost=\n"
+                             "Service=gdm-password\nSeat=seat0\n\n" if "desktop_login" in bad else "")
+                + "Id=c7\nName=div0rce\nClass=user\nType=tty\nState=active\nRemote=yes\nRemoteHost=10.0.0.1\n"
+                  "Service=sshd\nSeat=\n\nself=c7\nuser=div0rce\nssh_client=10.0.0.1\n",
+                "tree": ("0ld000" if "r_tree_head" in bad else self.HEAD) + "\n" + "".join(
+                    f"{p}\t{'9' * 40 if 'r_tree_modified' in bad and p == 'Cargo.toml' else h}\n"
+                    for p, h in sorted(self.BLOBS.items())),
                 "load": ("1.50" if "busy_r" in bad else "0.12") + " 0.20 0.30 1/300 4242\n",
                 "top": "%CPU PID COMMAND\n 1.0 1 systemd\n",
                 "banner": "transport : "
@@ -518,7 +540,9 @@ class SplitMesh(Mesh):
                 "scan": "/home/x/.ucompute-acceptance/logs/engine-1.log\n" if "leaks_prompt" in bad else "",
             }[key]
         return {
-            "git": "abc123\n" + (" M crates/x.rs\n" if "dirty" in bad else ""),
+            "git": self.HEAD + "\n" + (" M crates/x.rs\n" if "dirty" in bad else "")
+                   + ("?? docs/evidence/pool-two-machine-x/\n" if "untracked_out" in bad else ""),
+            "tree": "".join(f"100644 blob {h}\t{p}\n" for p, h in sorted(self.BLOBS.items())),
             "procs": "",
             "load": "{ 0.50 0.60 0.70 }\n",
             "power": "Now drawing from 'AC Power'\n",
@@ -528,7 +552,8 @@ class SplitMesh(Mesh):
                    "Pages active: 9.\nPages inactive: 50000.\nPages speculative: 1000.\n",
             "top": "%CPU PID COMMAND\n 2.0 1 launchd\n",
             "ping": "round-trip min/avg/max/stddev = 5.1/12.5/24.0/3.0 ms\n",
-            "nc": "rc=0\n" if "rpc_reachable" in bad else "rc=1\n",
+            "nc": "rc=1\n" if kw.get("port") == 22 and "lan_down" in bad else
+                  "rc=0\n" if kw.get("port") == 22 or "rpc_reachable" in bad else "rc=1\n",
         }[key]
 
 

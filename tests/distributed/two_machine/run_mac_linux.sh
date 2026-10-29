@@ -17,11 +17,12 @@
 #
 #   LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/pool-two-machine-<date>/run-<HHMM> \
 #     [LINK=wifi|wired] [MODELS=R1a,R1b] [LAB=<ucompute-core-lab checkout>] [H_PORT=18320] [H_LISTEN=18420] \
-#     tests/distributed/two_machine/run_mac_linux.sh
+#     [R_IP=<the Linux host's IPv4 LAN address, default LINUX_HOST>] tests/distributed/two_machine/run_mac_linux.sh
 #
 # The head H is a dev daemon from this checkout (target/release/ucompute, built from HEAD with a clean tree; sync the
-# same HEAD to the Linux host and build it there first) with UCOMPUTE_HOME=.ucompute-split, hardlinked from .ucompute's
-# models and backends (no extra disk). The Linux daemon A is the stage host R. The installed app is quit for the
+# same HEAD to the Linux host with scripts/mac-host.sh sync and build it there first: the driver's preflight compares
+# ~/src/ucompute there and both daemons' /health commit with HEAD) with UCOMPUTE_HOME=.ucompute-split, hardlinked
+# from .ucompute's models and backends (no extra disk). The Linux daemon A is the stage host R. The installed app is quit for the
 # run and started again at the end; A's and H's state is saved and put back (state.py). The driver,
 # split_two_machine.py, runs under caffeinate -dimsu and writes the run directory $OUT; with LAB set, the lab's
 # scorer reads $OUT/lab-input.json into $OUT/lab-score.json.
@@ -80,7 +81,7 @@ if [ "${SPLIT:-}" = 1 ]; then
   rc=0
   # shellcheck disable=SC2086
   caffeinate -dimsu python3 -I tests/distributed/two_machine/split_two_machine.py --a "$HS" --b "$A" --out "$OUT" \
-    --r-sh "$H run" --h-home "$HOME_H" --h-log "$OUT/h/daemon.log" --link "${LINK:-wifi}" ${MODELS:+--models "$MODELS"} \
+    --r-sh "$H run" --r-ip "${R_IP:-$LINUX_HOST}" --h-home "$HOME_H" --h-log "$OUT/h/daemon.log" --link "${LINK:-wifi}" ${MODELS:+--models "$MODELS"} \
     | tee "$OUT/split-console.txt" || rc=$?
   if [ -n "${LAB:-}" ] && [ -s "$OUT/lab-input.json" ]; then
     python3 -I -B "$LAB/p1-predictions/score_p1.py" "$OUT/lab-input.json" >"$OUT/lab-score.json" || rc=1

@@ -3,11 +3,13 @@
 //! inside the authenticated connection (`ucompute_network::rpc`).
 //!
 //! Order of checks (`openai::run`, then [`ensure`]): the policy for pooled inference with that peer
-//! (before admission, any load or any network activity), `split_at`, the acknowledgement of
-//! [`disclosure`], the licence gate, the model's KV shape and the stage estimate, the connection,
-//! the session, and only then the split engine's load, which uploads the stage's weights.
+//! (before admission, any load or any network activity), this platform's bridge owner check,
+//! `split_at`, the acknowledgement of [`disclosure`], the licence gate, the model's KV shape and
+//! the stage estimate, the connection, the session, and only then the split engine's load, which
+//! uploads the stage's weights.
 //!
-//! One session at a time ([`Active`] in `AppState::split`). It ends on unload, on any Deny or loss
+//! One session at a time ([`Active`] in `AppState::split`); a different split replaces it only
+//! while no request holds it (`Overloaded` otherwise). It ends on unload, on any Deny or loss
 //! (`rpc`'s 1 s tick: privacy `local_only`, networking off, the group's pooling off, a hold or a
 //! revocation) or 10 s after the split engine stopped using it (a local load replaced it). Its end
 //! stops the split engine and fails its requests with the session's reason; nothing falls back to
@@ -72,6 +74,9 @@ pub struct Active {
     pub mode: SplitMode,
     pub session: Arc<SplitSession>,
     pub split: Split,
+    /// One clone per request from [`ensure`] until its generation ends (loading, held or
+    /// streaming): another split never replaces this one while a clone is out (F-08-08).
+    users: Arc<()>,
 }
 
 impl Active {
@@ -168,6 +173,18 @@ pub fn plan(n_layer: u32, split_at: u32, mode: SplitMode, gpu: Option<&str>) -> 
     })
 }
 
+/// Refused where the head's bridge cannot prove a connection is its split engine's
+/// (`rpc::HEAD_OWNER_CHECK`): every engine connection would be reset after the stage started.
+fn head_gate(owner_check: bool) -> Result<()> {
+    if owner_check {
+        return Ok(());
+    }
+    Err(UComputeError::new(
+        ErrorCode::BackendUnavailable,
+        "pooling as the head is not available on this platform yet",
+    ))
+}
+
 /// The pinned llama.cpp release on this platform; a stage host refuses any other.
 pub fn engine_release() -> Result<String> {
     ucompute_artifacts::backend::BackendPins::builtin()?
@@ -185,13 +202,16 @@ pub fn close(st: &AppState) {
 
 /// The split engine for `model_id` with `peer`: the open session when it serves the same split,
 /// else a new one. Called after `evaluate` allowed pooled inference with `peer` and after
-/// admission. Returns the loaded model and its session.
+/// admission. Returns the loaded model, its session and the request's hold on the split, which
+/// the caller keeps until its generation ends: a different split is refused with `Overloaded`
+/// while any hold is out, never cancelled.
 pub async fn ensure(
     st: &Arc<AppState>,
     model_id: &str,
     peer: PeerId,
     params: &SplitParams,
-) -> Result<(Arc<dyn LoadedModel>, Arc<SplitSession>)> {
+) -> Result<(Arc<dyn LoadedModel>, Arc<SplitSession>, Arc<()>)> {
+    head_gate(rpc::HEAD_OWNER_CHECK)?;
     let split_at = params.split_at.ok_or_else(|| {
         UComputeError::invalid("a split target needs \"split_at\": the first block of the second stage")
     })?;
@@ -223,30 +243,29 @@ pub async fn ensure(
     let n_ctx = meta.context_length.min(4096);
     let est_bytes = ucompute_models::estimate_stage(&meta, size, n_ctx, KvType::F16, remote).total_bytes;
 
-    let reuse = st.split_slot().as_ref().and_then(|a| {
-        (a.peer == peer
-            && a.model_id == model_id
-            && a.split_at == split_at
-            && a.mode == mode
-            && a.session.failure().is_none())
-        .then(|| (a.session.clone(), a.split.clone()))
-    });
-    let (session, split) = match reuse {
-        Some(r) => r,
-        None => {
-            let busy = st
-                .manager
-                .snapshot()
-                .loaded
-                .is_some_and(|v| v.in_flight > 0 && v.info.split.is_some());
-            if busy {
+    // Decided and taken under one lock: a request that took a hold is never replaced, from its
+    // session's open through the load to its stream's end (the manager's view lags a load).
+    let (reuse, replaced) = {
+        let mut slot = st.split_slot();
+        match slot.as_ref().filter(|a| a.session.failure().is_none()) {
+            Some(a) if a.peer == peer && a.model_id == model_id && a.split_at == split_at && a.mode == mode => {
+                (Some((a.session.clone(), a.split.clone(), a.users.clone())), false)
+            }
+            Some(a) if Arc::strong_count(&a.users) > 1 => {
                 return Err(UComputeError::new(
                     ErrorCode::Overloaded,
-                    "another split of this device is still serving requests; retry when they finish",
-                ));
+                    "another split of this device is still loading or serving requests; retry when they finish",
+                ))
             }
-            let replaced = st.split_slot().is_some();
-            close(st);
+            _ => {
+                let replaced = slot.take().inspect(|a| a.session.close()).is_some();
+                (None, replaced)
+            }
+        }
+    };
+    let (session, split, users) = match reuse {
+        Some(r) => r,
+        None => {
             let node = st.node().await?;
             let conn = st.peer_connection(&node, peer).await?;
             if licence_after_connect {
@@ -298,6 +317,7 @@ pub async fn ensure(
                     tracing::warn!(error = %e, "split engine not stopped");
                 }
             });
+            let users = Arc::new(());
             *st.split_slot() = Some(Active {
                 peer,
                 model_id: model_id.to_string(),
@@ -305,8 +325,9 @@ pub async fn ensure(
                 mode,
                 session: session.clone(),
                 split: split.clone(),
+                users: users.clone(),
             });
-            (session, split)
+            (session, split, users)
         }
     };
     let opts = LoadOptions {
@@ -314,7 +335,7 @@ pub async fn ensure(
         ..st.load_options()
     };
     match st.manager.ensure_loaded(model_id, opts).await {
-        Ok(m) => Ok((m, session)),
+        Ok(m) => Ok((m, session, users)),
         Err(e) => {
             // the session's own reason (peer lost, policy, cap) says more than the engine's exit
             let e = session.failure().unwrap_or(e);
@@ -375,6 +396,20 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+    }
+
+    /// ADR-0005 D4: where the bridge has no owner check, a split as the head is refused with a
+    /// typed reason before any connection (ensure's first check), not by a stage started for it.
+    #[test]
+    fn head_gate_refuses_platforms_without_the_owner_check() {
+        assert!(head_gate(true).is_ok());
+        let e = head_gate(false).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BackendUnavailable);
+        assert!(e.message.contains("not available on this platform"), "{e}");
+        assert_eq!(
+            head_gate(rpc::HEAD_OWNER_CHECK).is_ok(),
+            cfg!(any(target_os = "linux", target_os = "macos"))
+        );
     }
 
     #[test]

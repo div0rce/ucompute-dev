@@ -9,9 +9,9 @@ It starts nothing. Point it at a daemon started with its own UCOMPUTE_HOME and p
 
 Each cycle runs, in an order drawn from --seed: a golden completion (JSON), a golden stream, a stream cancelled by
 closing the socket, a chat completion, a pull that must hit the cache, an overload burst, and every --kill-every
-cycles a SIGKILL of the engine. Every --sample seconds one JSONL line: the daemon's RSS and open files, its engines
-and any orphaned engine, the log size, the error-code histogram and the p95 of golden completions in that window.
-The last line is the verdict.
+cycles a SIGKILL of the engine. Every --sample seconds one JSONL line: the daemon's RSS and open files, the host's
+load averages (/proc/loadavg; null where it does not exist), its engines and any orphaned engine, the log size, the
+error-code histogram and the p95 of golden completions in that window. The last line is the verdict.
 
 Bounds, fixed before any run: zero untyped errors (an error response without a known `error.code`, or no response
 at all); zero orphaned engines (an engine of --home whose parent is not the daemon) at every sample; every golden
@@ -159,6 +159,15 @@ def fds(pid):
         return max(0, len(out.splitlines()) - 1) if out else None
 
 
+def loadavg(path="/proc/loadavg"):
+    """The 1, 5 and 15 minute load averages from /proc/loadavg; None where it does not exist (macOS)."""
+    try:
+        with open(path) as f:
+            return [float(x) for x in f.read().split()[:3]]
+    except (OSError, ValueError):
+        return None
+
+
 class Soak:
     def __init__(self, a):
         self.a, self.rng = a, random.Random(a.seed)
@@ -249,7 +258,7 @@ class Soak:
         except OSError:
             log = None
         row = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "elapsed_s": round(time.monotonic() - t_start),
-               "cycles": self.cycles, "rss_kib": rss_kib(self.a.pid), "fds": fds(self.a.pid), "engines": len(mine),
+               "cycles": self.cycles, "rss_kib": rss_kib(self.a.pid), "fds": fds(self.a.pid), "loadavg": loadavg(), "engines": len(mine),
                "orphans": orphans, "log_bytes": log, "golden_p95_ms": p95(self.lat), "golden_n": len(self.lat),
                "codes": dict(self.codes), "kills_recovered_s": self.kills, "errors": self.errors}
         out.write(json.dumps(row) + "\n")

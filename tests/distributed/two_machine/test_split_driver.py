@@ -4,6 +4,7 @@ nothing here is evidence of UCompute. Also checks that its lab-input.json is acc
 (ucompute-core-lab p1-predictions/score_p1.py, read only; skipped when that checkout is absent; set UCOMPUTE_CORE_LAB).
 Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 """
+import argparse
 import importlib.util
 import json
 import os
@@ -43,9 +44,13 @@ def score(lab_input_text):
     return p.returncode, p.stdout, p.stderr
 
 
-def run(*bad, flags=()):
+R_SH = ("--r-sh", "unused: the fake answers R's commands")
+
+
+def run(*bad, flags=(), mesh=None):
     with tempfile.TemporaryDirectory() as home:
-        return fake_mesh.drive("split_two_machine.py", fake_mesh.SplitMesh(bad), "--h-home", home, *flags)
+        return fake_mesh.drive("split_two_machine.py", mesh or fake_mesh.SplitMesh(bad), "--h-home", home, *R_SH,
+                               *flags)
 
 
 class SplitDriverSyntheticTests(unittest.TestCase):
@@ -81,7 +86,11 @@ class SplitDriverSyntheticTests(unittest.TestCase):
 
     def test_each_broken_behaviour_fails_its_step(self):
         for bad, name in (("dirty", "preflight"), ("busy_r", "preflight"), ("other_user", "preflight"),
-                          ("r_engine_left", "preflight"), ("low_memory", "preflight"),
+                          ("desktop_login", "preflight"), ("r_engine_left", "preflight"), ("low_memory", "preflight"),
+                          ("r_tree_modified", "preflight"), ("r_tree_head", "preflight"),
+                          ("r_stale_build", "preflight"), ("h_dirty_build", "preflight"), ("r_ip_v6", "r_ip"),
+                          ("lan_down", "session_R1a"), ("extra_session", "audit_join"),
+                          ("audit_full_page", "audit_join"),
                           ("stage_spawns_on_refusal", "deny_stage_refuses"),
                           ("stage_refusal_untyped", "deny_stage_refuses"), ("rdma_banner", "session_R1a"),
                           ("rpc_outlives_session", "stage_gone_R1a"), ("rpc_outlives_session", "teardown"),
@@ -97,13 +106,36 @@ class SplitDriverSyntheticTests(unittest.TestCase):
                     self.assertEqual(list(steps), ["preflight"])
                     self.assertEqual(json.loads(files["lab-input.json"])["runs"], [])
 
+    def test_the_runners_untracked_evidence_folder_does_not_fail_preflight(self):
+        # run_mac_linux.sh creates $OUT under docs/evidence before the driver starts.
+        steps, lines, code, _ = run("untracked_out")
+        self.assertEqual(code, 0, "\n".join(lines))
+        self.assertIs(steps["preflight"]["ok"], True, lines)
+
     def test_a_canary_in_a_head_log_fails_the_scan(self):
         with tempfile.TemporaryDirectory() as home:
             (Path(home) / "logs").mkdir()
             (Path(home) / "logs" / "engine-x.log").write_text("prompt: ... UCOMPUTE-CANARY-4F2DF3728656CA72 ...")
-            steps, _, _, _ = fake_mesh.drive("split_two_machine.py", fake_mesh.SplitMesh(), "--h-home", home)
+            steps, _, _, _ = fake_mesh.drive("split_two_machine.py", fake_mesh.SplitMesh(), "--h-home", home, *R_SH)
         self.assertIs(steps["canary_scan"]["ok"], False)
         self.assertEqual(len(steps["canary_scan"]["hits"]["h"]), 1)
+
+    def test_r_sh_is_required(self):
+        with tempfile.TemporaryDirectory() as out:  # no default host to fall back to; nothing is run
+            p = subprocess.run([sys.executable, "-I", str(HERE / "split_two_machine.py"), "--a", "http://a", "--b",
+                                "http://b", "--out", out], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("--r-sh", p.stderr)
+
+    def test_a_full_audit_page_that_reaches_back_past_the_run_passes(self):
+        mesh = fake_mesh.SplitMesh()
+        for d in (mesh.H, mesh.R):  # 1200 events from before the run: the page of 1000 is full
+            d.audit += [{"ts_utc": "2026-01-01T00:00:00Z", "kind": "network_changed", "fields": {}}] * 1200
+        steps, lines, code, files = run(mesh=mesh)
+        self.assertIs(steps["audit_join"]["ok"], True, lines)
+        self.assertEqual(steps["audit_join"]["whole_run"], {"h": True, "r": True})
+        self.assertEqual(len(files["h/audit.jsonl"].splitlines()), 1000)
+        self.assertEqual(steps["audit_join"]["sessions"], steps["audit_join"]["driver_sessions"])
 
     def test_parsers(self):
         ss = ('tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("ucompute",pid=1,fd=9))\n'
@@ -120,6 +152,34 @@ class SplitDriverSyntheticTests(unittest.TestCase):
         self.assertEqual(D.who_others("me pts/0 x (10.0.0.1)\nssh_client=10.0.0.1\n"), [])
         self.assertEqual(D.who_others("ssh_client=10.0.0.1\n"), [])
         self.assertEqual(D.who_others("you tty1 x\nssh_client=\n"), ["you tty1 x"])
+        # OD-10: loginctl show-session blocks as the driver's "sessions" command prints them (SYNTHETIC text in
+        # loginctl's key=value format; not captured on sentinel): a GNOME Wayland login on seat0 that `who` does not
+        # list, the user manager, a closing session, the run's own command and tunnel sessions, and a second SSH login
+        loginctl = ("Id=2\nName=div0rce\nClass=user\nType=wayland\nState=active\nRemote=no\nRemoteHost=\n"
+                    "Service=gdm-password\nSeat=seat0\n\n"
+                    "Id=3\nName=div0rce\nClass=manager\nType=unspecified\nState=active\nRemote=no\nRemoteHost=\n"
+                    "Service=systemd-user\nSeat=\n\n"
+                    "Id=9\nName=div0rce\nClass=user\nType=tty\nState=closing\nRemote=yes\nRemoteHost=10.0.0.5\n"
+                    "Service=sshd\nSeat=\n\n"
+                    "Id=41\nName=div0rce\nClass=user\nType=tty\nState=active\nRemote=yes\nRemoteHost=10.0.0.1\n"
+                    "Service=sshd\nSeat=\n\n"
+                    "Id=44\nName=div0rce\nClass=user\nType=tty\nState=active\nRemote=yes\nRemoteHost=10.0.0.1\n"
+                    "Service=sshd\nSeat=\n\n"
+                    "Id=45\nName=div0rce\nClass=user\nType=tty\nState=online\nRemote=yes\nRemoteHost=10.0.0.7\n"
+                    "Service=sshd\nSeat=\n\n"
+                    "self=44\nuser=div0rce\nssh_client=10.0.0.1\n")
+        self.assertEqual(D.sessions_others(loginctl), [
+            "Id=2 Name=div0rce Class=user Type=wayland State=active Seat=seat0 RemoteHost=",
+            "Id=45 Name=div0rce Class=user Type=tty State=online Seat= RemoteHost=10.0.0.7"])
+        self.assertEqual(D.sessions_others("self=44\nuser=div0rce\nssh_client=10.0.0.1\n"), [])
+        # without the run's client address only the run's own session is its own
+        self.assertEqual(len(D.sessions_others(loginctl.replace("ssh_client=10.0.0.1", "ssh_client="))), 3)
+        # R's tree against HEAD: changed, missing and extra paths; a symlink in HEAD is not a regular file
+        head = ("100644 blob aaa\tCargo.toml\n100755 blob bbb\tscripts/x.sh\n100644 blob ccc\tgone.rs\n"
+                "120000 blob ddd\tlink\n")
+        self.assertEqual(D.tree_diff(head, "Cargo.toml\taaa\nscripts/x.sh\tbbb\ngone.rs\tccc\n"), [])
+        self.assertEqual(D.tree_diff(head, "Cargo.toml\taaX\nscripts/x.sh\tbbb\nnew.rs\teee\n"),
+                         ["Cargo.toml", "gone.rs", "new.rs"])
         self.assertEqual(D.free_bytes("(page size of 4096 bytes)\nPages free: 10.\nPages active: 99.\n"
                                       "Pages inactive: 5.\nPages speculative: 1.\n"), 16 * 4096)
         # tpot = ([DONE] - ttft) / (completion_tokens - 1), both client-side
@@ -145,6 +205,38 @@ class SplitDriverSyntheticTests(unittest.TestCase):
         # the shortcut (after_n65 - after_n1) / 64 would also count a prefill; the decode-only method does not
         c = t.counters(14150, 3592, 1.0)
         self.assertEqual(D.per_token(c)["to_r"], 14150)
+
+
+class RShellFailureTests(unittest.TestCase):
+    """privacy:F1: the driver's own shell() with an R prefix that exits 255 with empty stdout, as ssh does when it
+    cannot reach R. Each R check FAILs; none reads the empty output as a clean result. Only this Mac's read-only
+    commands (git, pgrep, pmset, vm_stat, ps, sysctl) run for real; no daemon is called."""
+
+    def test_r_side_ssh_failure_fails_every_r_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh = Path(tmp) / "ssh"
+            ssh.write_text("#!/bin/sh\nexit 255\n")
+            ssh.chmod(0o755)
+            d = fake_mesh.load("split_two_machine.py")
+            d.ARGS = argparse.Namespace(r_sh=str(ssh), out=tmp, h_home=tmp, h_log=None, r_home="$HOME/.x",
+                                        r_log="$HOME/.x.log", r_tree="$HOME/src/ucompute", r_ip="10.0.0.2")
+            d.RAW = open(Path(tmp) / "raw.jsonl", "w")
+            d.call = lambda *a, **k: (200, {"commit": "x"}, 1.0)
+            d.RUN_START = d.utc()
+            prereg = json.loads((HERE / "split_prereg.json").read_text())
+            try:
+                d.preflight(prereg, "http://a", "http://b")
+                d.canary_scan(prereg, {})
+                d.stage_gone("http://a", "R1a")
+                d.teardown("http://a")
+            finally:
+                d.RAW.close()
+            raw = [json.loads(x) for x in (Path(tmp) / "raw.jsonl").read_text().splitlines()]
+        steps = {r["step"]: r for r in d.RESULTS}
+        for name in ("preflight", "canary_scan", "stage_gone_R1a", "teardown"):
+            self.assertIs(steps[name]["ok"], False, steps[name])
+            self.assertIn("exited 255", steps[name]["r_shell_error"])
+        self.assertTrue(any(r.get("shell") == "r" and r["rc"] == 255 and r["out"] == "" for r in raw))
 
 
 if __name__ == "__main__":

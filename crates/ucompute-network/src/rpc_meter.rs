@@ -261,10 +261,11 @@ mod tests {
         v
     }
 
-    // A REAL session (lab tools/rpc_capture.py, this Mac, b11609, 2026-10-24): R0 configuration A
-    // behind a recording proxy, every chunk in the proxy's read order with its real length and
-    // timing, payload bytes zeroed and the real command headers kept. K lines carry the proxy's own
-    // totals after the load, after n_predict 1 and after n_predict 65.
+    // A REAL session (lab tools/rpc_capture.py, this Mac, b11609; recaptured in lab 7de354b): R0
+    // configuration A behind a recording proxy, every chunk in the proxy's read order with its real
+    // length and timing, payload bytes zeroed except the real command headers and the real
+    // GRAPH_COMPUTE payloads (`g<offset>`). K lines carry the proxy's own totals after the load,
+    // after n_predict 1 and after n_predict 65.
     const R0A: &str = include_str!("fixtures/rpc-session-b11609-r0a.txt");
 
     #[test]
@@ -277,6 +278,7 @@ mod tests {
         // (the recorder located headers with the lab's Python parser; the meter re-parses the bytes)
         let (mut episodes, mut expected) = (0, 0);
         let mut implied: Vec<(usize, bool)> = Vec::new(); // per tunnel: header bytes still to come, armed
+        let (mut graphs, mut ops) = (0, std::collections::BTreeSet::new());
         for line in R0A.lines().filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split(' ').collect();
             if f[0] == "K" {
@@ -307,6 +309,14 @@ mod tests {
                     for i in 0..hex.len() / 2 {
                         chunk[off + i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
                     }
+                    // the ops the graph check will read (check_graph's layout; whole payloads)
+                    let p = &chunk[off..off + hex.len() / 2];
+                    let u32_at = |i: usize| u32::from_le_bytes(p[i..i + 4].try_into().unwrap());
+                    let at = 16 + u32_at(12) as usize * 8;
+                    for t in 0..u32_at(at) as usize {
+                        ops.insert(u32_at(at + 4 + t * RPC_TENSOR + OP_AT));
+                    }
+                    graphs += 1;
                     continue;
                 }
                 let off: usize = off.parse().unwrap();
@@ -343,7 +353,13 @@ mod tests {
         assert_eq!(per(loaded.to_r, one.to_r, full.to_r), 6696.765625);
         assert_eq!(per(loaded.to_h, one.to_h, full.to_h), 1159.25);
         assert_eq!(per(loaded.switches, one.switches, full.switches) / 2.0, 0.9609375);
-        // every command of the real session is in ALLOWED (on_chunk would have tripped above)
+        // every command of the real session is in ALLOWED and every op of its real graphs passes
+        // the graph check (on_chunk would have tripped above); the lab reads ops in 0-48, 74 and 100
+        assert_eq!(graphs, 3);
+        assert_eq!(
+            ops.into_iter().collect::<Vec<_>>(),
+            [0, 1, 2, 7, 25, 29, 36, 37, 38, 42, 48, 74, 100]
+        );
         // healthy on loopback: R never stays silent anywhere near T_rpc (10 s) while H waits on it
         assert!(longest < Duration::from_secs(1), "longest armed silence {longest:?}");
         // every compute or readback got its reply, the meter armed for each, and for nothing else:

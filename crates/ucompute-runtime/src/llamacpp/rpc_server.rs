@@ -20,7 +20,7 @@
 
 use super::{process, sockets};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
@@ -34,6 +34,8 @@ pub struct RpcServer {
     pub port: u16,
     /// The one device the server exposes, as its banner names it, e.g. `MTL0 (Apple M2)`.
     pub device: String,
+    /// Its stdout and stderr; the caller removes it after a clean stop, as for llama-server's.
+    pub log_path: PathBuf,
 }
 
 /// The banner and the listener appear within a second on this Mac (b11609, Metal).
@@ -135,9 +137,18 @@ pub async fn start_at(
         )
     })?;
     match wait_ready(&mut child, port, &log_path).await {
-        Ok(device) => Ok(RpcServer { child, port, device }),
+        Ok(device) => Ok(RpcServer {
+            child,
+            port,
+            device,
+            log_path,
+        }),
         Err(e) => {
             process::stop(child).await;
+            // a squatted port is in the message and [`start`] retries: its log holds nothing
+            if e.message.contains(SQUATTED) {
+                let _ = std::fs::remove_file(&log_path);
+            }
             Err(e)
         }
     }
@@ -240,12 +251,16 @@ fn listener_state(_pid: u32, _port: u16) -> Result<sockets::Listener> {
 }
 
 /// Linux, between fork and exec (async-signal-safe calls only): die with the daemon, refuse to run
-/// if the daemon already died, cap the address space, and yield the CPU to the daemon.
+/// if the daemon already died, cap the address space, and yield the CPU to the daemon. The cap and
+/// the nice only ever tighten what the daemon has: an unprivileged process can lower its RLIMIT_AS
+/// and raise its nice, never the reverse, so a daemon already niced above 10 or under a lower hard
+/// limit keeps those instead of failing every spawn.
 #[cfg(target_os = "linux")]
 fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
     let daemon = std::process::id() as libc::pid_t;
     // SAFETY: the closure runs in the forked child before exec and makes only async-signal-safe
-    // syscalls (prctl, getppid, setrlimit, setpriority, _exit); it allocates nothing.
+    // syscalls (prctl, getppid, getrlimit, setrlimit, getpriority, setpriority, _exit); it
+    // allocates nothing.
     unsafe {
         cmd.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
@@ -256,6 +271,15 @@ fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
                 libc::_exit(1);
             }
             if let Some(cap) = mem_cap {
+                let mut now = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_AS, &mut now) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // rlim_cur <= rlim_max; RLIM_INFINITY is the largest value
+                let cap = cap.min(now.rlim_cur);
                 let limit = libc::rlimit {
                     rlim_cur: cap,
                     rlim_max: cap,
@@ -264,7 +288,8 @@ fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
+            // a failed getpriority reads as -1: then 10 is set, or the spawn fails as before
+            if libc::getpriority(libc::PRIO_PROCESS, 0) < 10 && libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())

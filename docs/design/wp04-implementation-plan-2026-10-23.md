@@ -462,7 +462,7 @@ Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/
 - `caffeinate -dimsu` for the run (a sleeping Mac invalidated an earlier run).
 - Record both host manifests, the engine archive hashes and the model sha256.
 - Confirm:
-  - `who` on sentinel shows no other interactive user (OD-10);
+  - no other session on sentinel (OD-10): `loginctl list-sessions` and `show-session` list no active or online session but the run's own SSH sessions and the user manager (a Wayland desktop login does not show in `who`), and `who` lists no one else;
   - no other acceptance run is using sentinel ports;
   - the Mac has at least 3 GB free memory.
 - Pre-register `T_rpc`, the byte caps, `RLIMIT_AS`, the prompts with canaries (3), and `split_at`, in `prereg.json` **before** step P1.1.
@@ -479,7 +479,7 @@ After each case, on sentinel: `pgrep -a ggml-rpc-server` is empty, and `ss -ltnu
 - Setup: group `pool` with `allow_pooled_inference` on both sides; `serve_peers` on R; privacy `trusted_group` on H; acknowledged request.
 - Checks:
   - `ss -ltnp` on sentinel shows rpc-server only on `127.0.0.1:<pR>`, owned by the child of the daemon pid;
-  - `nc -z -w2 192.168.1.167 <pR>` from the Mac is refused;
+  - `nc -z -w2 192.168.1.167 <pR>` from the Mac is refused, while `nc -z -w2 192.168.1.167 22` (sshd) connects in the same step (the positive control);
   - H log shows the handshake ok, version v8.0.0 and `transport: TCP`. This is the cross-architecture verdict: on failure, stop and record (OD-3 fallback);
   - the layer-to-device log matches the plan, and the envelope `placement` equals it.
 
@@ -589,7 +589,7 @@ Gate D is not declared. Updates also go to ADR-0005 §8 and §9, ADR-0003 §9.7,
 | OD-7 | R2 capacity run: Qwen2.5-7B Q4_K_M (about 4.7 GB) does not fit on this Mac's disk (4.2 GB free). It needs sentinel as H and a Mac R role (not built) | R2 only | Deferred |
 | OD-8 | Landlock or seccomp sandbox for rpc-server (new dependency) | Nothing | Deferred to F-06-08 |
 | OD-9 | Require acknowledged consent when `PUT /api/groups` turns `allow_pooled_inference` on | Nothing | Deferred to Gate E; per-request acknowledgement is the gate for now |
-| OD-10 | Confirm sentinel has no other interactive local users during P1 (the R11 assumption) | P1 start | Check `who` in preflight; abort if others are present |
+| OD-10 | Confirm sentinel has no other interactive local users during P1 (the R11 assumption) | P1 start | Check `loginctl` sessions and `who` in preflight; abort if others are present |
 | OD-11 | Linux-only stage host in this build | Nothing | Yes |
 | OD-12 | The F-03-03 split proposed in ADR-0003 D6: native frame format vs measured RPC ratio | Nothing; B-016 stays open | No criterion change |
 

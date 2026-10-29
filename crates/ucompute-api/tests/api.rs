@@ -550,7 +550,17 @@ async fn status_ready_models_and_admin_validation() {
     let (srv, _dir) = empty_server(cfg()).await;
     let c = client();
     let v: Value = c.get(srv.url("/health")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(v, json!({"status": "ok", "version": ucompute_core::VERSION}));
+    let commit = env!("UCOMPUTE_BUILD_COMMIT");
+    assert_eq!(
+        v,
+        json!({"status": "ok", "version": ucompute_core::VERSION, "commit": commit})
+    );
+    // build.rs: 40 hex digits of HEAD (or of the synced commit), "-dirty" when the tree had changes
+    let head = commit.trim_end_matches("-dirty");
+    assert!(
+        head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{commit}"
+    );
 
     let r = c.get(srv.url("/ready")).send().await.unwrap();
     assert_eq!(r.status(), 200, "nothing loaded = ready to accept a load");

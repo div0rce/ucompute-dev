@@ -654,7 +654,8 @@ async fn start_split(
     }
     let permit = admit(st).await?;
     job.started();
-    let (model, session) = crate::split::ensure(st, model_id, peer, split).await?;
+    // `users` is this request's hold on the split, kept until the stream below ends
+    let (model, session, users) = crate::split::ensure(st, model_id, peer, split).await?;
     let info = model.info();
     job.loaded(&info.device_actual);
     fmt.placement = Some(json!({"devices": info.device_actual, "stages": info.split, "session": session.session_id()}));
@@ -669,6 +670,7 @@ async fn start_split(
     // session's reason is known) is the session's reason.
     let gen = gen
         .then(move |ev| {
+            let _ = &users;
             let session = session.clone();
             async move {
                 match ev {

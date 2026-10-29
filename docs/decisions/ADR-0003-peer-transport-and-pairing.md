@@ -142,7 +142,7 @@ llama-server --rpc 127.0.0.1:pL ──TCP lo0──▶ common RpcBridge(listen 1
 | `packet_capture_contains_no_plaintext_prompt` (+ positive control) | yes on `lo0`; **needs `sudo tcpdump`** (`/dev/bpf*` is root-only on this Mac ✅; Linux CI: `CAP_NET_RAW`) | capture on the LAN NIC for the real session |
 | `capabilities_exchanged_after_handshake`, `oversized_capability_message_rejected`, `version_negotiation`, `old_new_peer_interop`, `unknown_fields_ignored_safely` | yes | — |
 | `kill_peer_detected_within_bound` (SIGKILL), `revoked_peer_disconnected_within_5s`, `revoked_key_cannot_reconnect`, persistence across restart | yes | partition (unplug) variant |
-| `rpc_server_binds_loopback_only`, tunnel open/close, idle timeout, byte counters | yes | — |
+| `rpc_server_binds_loopback_only_single_host`, tunnel open/close, idle timeout, byte counters | yes | — |
 | Two-node split generates tokens; per-process memory per layer range | yes **but recorded SINGLE-HOST only**; never satisfies F-03-01 | **required** for F-03-01, Gate D |
 | bytes/token/boundary; encrypted vs plaintext overhead | loopback numbers = CPU-cost lower bound only | **required** for bench:two-node-lan, H1 ≤ 5 % on 1 GbE |
 | X-20 WAN-blocked LAN cluster | not meaningful on one host | **required** |
