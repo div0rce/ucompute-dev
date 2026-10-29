@@ -195,6 +195,35 @@ def daemon_restarted(parent, app_pid, restarted_after_s, text, killed, restarted
     return parent == app_pid and restarted_after_s <= 10 and log_holds_both_runs(text, killed, restarted)
 
 
+def gatekeeper_rejected(returncode, output):
+    """`spctl --assess --type execute` refused the app: what a downloaded, ad-hoc-signed app meets on first open."""
+    return returncode != 0 and "rejected" in output
+
+
+def gatekeeper_on_download(work, dmg):
+    """Read-only: a copy of the DMG marked as downloaded (com.apple.quarantine), its app copied out still quarantined,
+    and Gatekeeper's assessment of it. Approving the app (Open Anyway) changes a security setting and stays manual."""
+    dl, qmnt, app = work / "downloaded.dmg", work / "qmnt", work / "downloaded" / "Common.app"
+    shutil.copy(dmg, dl)
+    sh("xattr", "-w", "com.apple.quarantine", f"0081;{int(time.time()):x};Safari;", str(dl))
+    qmnt.mkdir()
+    sh("hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(qmnt), str(dl))
+    try:
+        app.parent.mkdir()
+        sh("ditto", str(qmnt / "Common.app"), str(app))
+    finally:
+        sh("hdiutil", "detach", str(qmnt), check=False)
+    quarantined = "com.apple.quarantine" in sh("xattr", str(app)).stdout
+    if not quarantined:  # what a browser download and a Finder copy would have set
+        sh("xattr", "-w", "com.apple.quarantine", f"0081;{int(time.time()):x};Safari;", str(app))
+    r = sh("spctl", "--assess", "--type", "execute", "-vv", str(app), check=False)
+    out = (r.stdout + r.stderr).strip()
+    shutil.rmtree(app.parent)
+    dl.unlink()
+    return {"quarantine_propagated": quarantined, "spctl_exit": r.returncode, "spctl": out[:300],
+            "rejected": gatekeeper_rejected(r.returncode, out)}
+
+
 def names_packages(notices, *names):
     """Each of `names` has its own entry in THIRD_PARTY_NOTICES: a line `<name> <version> — <licence>…`
     (scripts/gen_notices.py), so `rustls-pki-types` or a licence text that mentions the name does not count."""
@@ -268,6 +297,9 @@ def main():
              sha256=sha256(notices) if text else None)
         v = sh("codesign", "--verify", "--deep", "--strict", str(app_src), check=False)
         step("app signature verifies (ad-hoc; no Developer ID, B-008)", v.returncode == 0, stderr=v.stderr.strip())
+        gk = gatekeeper_on_download(work, a.dmg)
+        step("Gatekeeper refuses a downloaded copy on first open, as the install notes say (ad-hoc signed; read-only "
+             "spctl assessment, the Open Anyway approval stays manual)", gk["rejected"], **gk)
         r = sh(str(macos / "common"), *DAEMON_ARGS, "--help", check=False)
         step("bundled daemon accepts the app's exact arguments", r.returncode == 0,
              args=DAEMON_ARGS, exit=r.returncode, stderr=r.stderr.strip()[:300])

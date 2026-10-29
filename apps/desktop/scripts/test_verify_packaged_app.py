@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verify_packaged_app import daemon_restarted, log_holds_both_runs, names_packages  # noqa: E402
+from verify_packaged_app import daemon_restarted, gatekeeper_rejected, log_holds_both_runs, names_packages  # noqa: E402
 
 L = "listening on http://127.0.0.1:8192\n"
 RUN = lambda pid: f"common-desktop: started the daemon, pid {pid}\n" + L  # noqa: E731
@@ -71,6 +71,14 @@ class Notices(unittest.TestCase):
         self.assertFalse(names_packages(self.HEAD + similar, "rustls", "react"))
         in_licence_text = self.HEAD + self.REACT + "\n[T1]\n\nrustls 0.23 is licensed under any of ...\n"
         self.assertFalse(names_packages(in_licence_text, "rustls"))
+
+
+
+class Gatekeeper(unittest.TestCase):
+    def test_rejected_needs_a_failing_exit_and_the_word(self):
+        self.assertTrue(gatekeeper_rejected(3, "/x/Common.app: rejected\nsource=no usable signature"))
+        self.assertFalse(gatekeeper_rejected(0, "/x/Common.app: accepted\nsource=Notarized Developer ID"))
+        self.assertFalse(gatekeeper_rejected(1, "spctl: unknown error"))
 
 
 if __name__ == "__main__":
