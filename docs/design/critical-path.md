@@ -28,13 +28,17 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 - This Mac: available; the owner's app runs on 8192 (quit and relaunched only by the packaged check).
 - Sentinel: on Wi-Fi only (`eno2` has no cable). It dropped off the LAN between about 22:23 and 02:19
   local on 2026-10-23/24 without rebooting, and its SSH timed out again around 04:05. P1 needs a
-  stable link for uploads of hundreds of MB: a wired link is now the most useful owner action. It was
-  off the network again for most of 2026-10-24 and is unreachable on 2026-10-29.
+  stable link for uploads of hundreds of MB. It was off the network for most of 2026-10-24 and rebooted on
+  2026-10-28 (cause not visible without root). Likely cause of the drops: Ubuntu's default Wi-Fi power saving;
+  the owner turned it off on 2026-10-29 (`wifi.powersave = 2` in NetworkManager, `iw ... power_save off`; the lab
+  confirmed `Power save: off`, signal -58 dBm, link 351/390 Mbit/s). RTT from the Mac 6/23/103 ms
+  (min/avg/max, sentinel under load); P1's preflight re-measures it with both hosts quiet, and an Ethernet cable
+  remains the fix if the jitter stays.
 - Windows laptop and Kyle's Mac: offline.
 
 ## Owner actions that unblock something
 
-1. An Ethernet cable for sentinel before P1 (its Wi-Fi link has dropped twice in six hours).
+1. If sentinel's link still drops or jitters with power saving off: an Ethernet cable on its `eno2`.
 2. When convenient: the laptop and Kyle's Mac awake and on the network (milestones D and E).
 3. Mode B on CPU-only devices: a peer generation slows local tokens by 35–50% on a CPU engine (sentinel,
    determined in round 7). Keeping local priority needs preempting peer generations, which breaks
