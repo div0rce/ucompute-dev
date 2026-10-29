@@ -362,6 +362,7 @@ Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 - **Larger catalog models.** Qwen2.5 3B and 7B Q4_K_M, with an 8 GB boundary test on the Mac (owner approval for disk) and `common models recommend` (F-01-07).
 - **Second backend (F-01-06).** MLX according to the Core Lab plan, after the owner approves installs and weights.
 - **Updater (F-10-07).** Tauri updater with an owner-held Ed25519 key and a tampered-update test, after the hosting decision (B-007).
+- **Package-manager distribution (owner request, 2026-10-29).** Install, update and uninstall through the usual package managers, the whole lifecycle and not only install: Homebrew (a cask for the desktop app and a formula or cask for the `common` CLI and daemon), npm/yarn (a package that fetches the pinned, hash-checked binary for the platform, the pattern CLIs such as esbuild use), and later winget and apt. Each needs a public, versioned download with published checksums (B-007, Gate G), and Homebrew's cask rules expect a signed and notarized app (B-008), so it follows the first public release, not the private alpha. Each package gets its own verifier, as the DMG and the Linux tarball have, covering a clean install, an upgrade, an uninstall that keeps or removes data as documented, and the package's checksum. Owner's words, relayed by the website session: "we should be able to use shit like brew/npm/yarn to install this too. well i dont know if only install but like you know what i mean. full suite."
 
 ## Owner action queue (consolidated; none blocks M1–M3)
 
