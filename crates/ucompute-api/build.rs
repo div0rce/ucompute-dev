@@ -1,7 +1,7 @@
 //! UCOMPUTE_BUILD_COMMIT, served by /health so a two-machine run can check that both daemons were built from the
 //! same commit (WP-04 P1 preflight, privacy:F4). In a git checkout: HEAD, with "-dirty" when `git status
-//! --porcelain` lists anything. In a tree copied by `scripts/mac-host.sh sync` (no .git): the commit that script
-//! records in `.ucompute-sync-head`. Otherwise "unknown".
+//! --porcelain --untracked-files=no` lists anything. In a tree copied by `scripts/mac-host.sh sync` (no .git): the
+//! commit that script records in `.ucompute-sync-head`. Otherwise "unknown".
 use std::path::Path;
 use std::process::Command;
 
@@ -35,7 +35,8 @@ fn main() {
         }
         match (
             git(&root, &["rev-parse", "HEAD"]),
-            git(&root, &["status", "--porcelain"]),
+            // Untracked files are not part of the build, and the P1 preflight ignores them too.
+            git(&root, &["status", "--porcelain", "--untracked-files=no"]),
         ) {
             (Some(head), Some(st)) if st.is_empty() => head,
             (Some(head), Some(_)) => format!("{head}-dirty"),

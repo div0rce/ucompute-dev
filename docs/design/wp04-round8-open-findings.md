@@ -2,6 +2,8 @@
 
 Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
 
+**Status (2026-10-29): all 14 findings below, and the Core Lab items at the end, are fixed in 4ddec61 (WP-04 fix pass), each with its test; an adversarial verifier upheld every fix and found one further blocker (the P1 commit check failed on the runner's own untracked evidence folder), fixed in the same commit. Their Linux-only tests (confine, stingy head, the renamed rpc-server tests) run on sentinel after the second soak; `docs/VERIFICATION.md` has the results.**
+
 Round 8's five-lens review (exposure, authorization, privacy, failure, resources) raised 17 findings; two skeptics tried to
 refute each. The fix step fixed the three upheld findings it received (NX-1 critical: stage-side foreign clients with a
 non-loopback source; NX-2 high: the bridge matched only the accepted port; the head's 1 s tick read a stale privacy

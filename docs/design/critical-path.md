@@ -8,7 +8,7 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 
 | Workstream | Current priority | Next action |
 |---|---|---|
-| Engineering | WP-04 C5–C8 with the stage-side RPC filter (round 8, resumed 2026-10-29 after a weekly usage limit stopped it after C3 and C4) | Commit round 8 once its review and whole-tree check pass; then S1 SINGLE-HOST runs and P1 |
+| Engineering | WP-04: S1 SINGLE-HOST runs, then P1 (the round-8 findings and the lab's C5 items are fixed, 4ddec61) | Full suite on the merged tree; the lab scores the fix pass; S1 on this Mac; after the soak: the Linux suites, sentinel rebuilt from the same commit, then P1 |
 | Core Lab | Help WP-04: drop-ins, pre-registered numbers, scoring | Review the C2 and C5 diffs read-only; score P1 when its evidence exists |
 | Website | Candidate 1 published, received and re-verified through Access; site checks passed on 2026-10-29 (22 pages in three browsers, Lighthouse 99-100) | Idle until the next promotion record or snapshot |
 
@@ -35,6 +35,7 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
   (min/avg/max, sentinel under load); P1's preflight re-measures it with both hosts quiet, and an Ethernet cable
   remains the fix if the jitter stays.
 - Windows laptop: not available for now (owner, 2026-10-29: only sentinel and this MacBook). Its D-029/D-030 migration stopped part-way when it went off the network: the inventory (`C:\Users\jessg\ucompute-migration-2026-10-29\inventory.json`) is written; its app data and app logs are moved into `former-data\`; the old app's uninstaller ran. Not confirmed: the test tasks' re-creation under the new name, the move of the remaining folders (old CLI, test scripts, build tree, verifier folders) and the verification. When it is back, first install the keep-awake task (`scripts\windows-keep-awake.ps1 -Install`, the owner rule of 2026-10-29; not yet run on Windows), then read `C:\Users\jessg\laptop-migrate.log`, rerun the script (`laptop-migrate.ps1`, idempotent for areas already moved) and record the result; its three firewall rules under the former name are the owner's to remove. Milestone D's two-machine run waits for the laptop.
+- The second soak runs from the pre-rename tree and home on sentinel: collect it with the runner as it was at 37cd454 (`git show 37cd454:tests/soak/run_soak_linux.sh`, saved outside the repository), not with today's, which would check and remove the renamed home instead (Core Lab, 2026-10-29).
 - Sentinel holds a sleep and idle block inhibitor (`ucompute-keep-awake` user service, lingering on, 2026-10-29), which also stops the login screen's default 20-minute idle suspend after the desktop session ends. After a reboot with nobody logged in locally, polkit grants only the idle part until the owner logs in (the service retries each minute); masking sleep system-wide needs the owner (`sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`).
 - Kyle's Mac: offline.
 - Sentinel's local desktop: the owner's GNOME session (seat0, Wayland, Firefox open) has been logged in since before
