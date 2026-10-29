@@ -10,7 +10,7 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 |---|---|---|
 | Engineering | WP-04 C5–C8 with the stage-side RPC filter (round 8, resumed 2026-10-29 after a weekly usage limit stopped it after C3 and C4) | Commit round 8 once its review and whole-tree check pass; then S1 SINGLE-HOST runs and P1 |
 | Core Lab | Help WP-04: drop-ins, pre-registered numbers, scoring | Review the C2 and C5 diffs read-only; score P1 when its evidence exists |
-| Website | Candidate 1 published and received | The browser and Lighthouse rerun on sentinel when it is reachable |
+| Website | Candidate 1 published, received and re-verified through Access; site checks passed on 2026-10-29 (22 pages in three browsers, Lighthouse 99-100) | Idle until the next promotion record or snapshot |
 
 ## Milestones and what each waits on
 
