@@ -636,3 +636,24 @@ Spec section 29.5 row "Downloads and releases" and section 31: a private-alpha d
 - H-side P1 preflight dry run: a release build of a clean tracked tree with an untracked file served `/health` commit = HEAD; with a tracked change it served `-dirty`.
 - Change: every engine starts with `--cache-ram 0` (the adapter always sends `cache_prompt: false`, so the idle-slot save only held host RAM and, on a split, read R's KV back over the network; reserved from extra arguments). Rerun with it: the save towards H fell from 663,808-700,672 B per prompt switch to 64 B; decode per token unchanged. The first request on a new prompt still uploads its graphs (191,332 B and 8 switches to R), which the lab's decode-only subtraction would count against decode (to the stage −23 %, 0.94 turns): the P1 driver now sends a same-prompt max_tokens 1 warm-up before `loaded`, and `split_prereg.json` `checkpoints` is amended accordingly (before any P1 run).
 - Checks after the change: fmt; clippy `-D warnings` on runtime, network, api; runtime `process` 13 and `rpc_server` 4; `llamacpp_real` 9/9 and `real_engine` 11/11 on the real engine with the new flag; `split_single_host` 9/9 in three of four runs (one run had 1 failure under load right after clippy, output not kept, so the test is not identified; not reproduced in three reruns); two_machine offline suite 73 OK.
+
+## WP-08 promotion record: UCompute 0.1.1 private-alpha candidate 2, macOS on Apple Silicon (2026-10-29) — AWAITING THE OWNER'S APPROVAL
+
+Replaces candidate 1, withdrawn under D-030. A private-alpha build may go to testers only after this record exists **and the owner approves its SHA-256** (spec sections 29.5 and 31). Nothing has been distributed.
+
+| Field | Value |
+|---|---|
+| Artifact | `UCompute_0.1.1_aarch64.dmg` (app `UCompute.app`, bundle id `org.ucompute.desktop`, data folder `~/Library/Application Support/UCompute`) |
+| Bytes / SHA-256 | 6,425,890 / `c1166ba91cf07d0af7d57e3563a4f592b0de077fefc9e0725192aae38c42b937` |
+| Binaries in the DMG (signed copies) | `ucompute` `7011ae78ee1bbe40ee6a7af0132ba27aa2e4d3e1cb0813f9bdcec82cb9741289`; `ucompute-desktop` `fd4d28234165befa0c0785d46fc41afc6666be55011ab9c33909d5b985a01e4a` |
+| Version / source | 0.1.1, commit 7d4d194 with a clean tracked tree (`/health` reports it), `cd apps/desktop && pnpm tauri build --bundles app,dmg` (exit 0) |
+| Signature | Ad-hoc signed, not notarized (B-008): Gatekeeper refuses the first open of a downloaded copy (checked, `spctl` rejects); the tester uses System Settings › Privacy & Security › Open Anyway |
+| Platform / backend | macOS on Apple Silicon. Tested on this Mac only (Apple M2, 8 GB, macOS 26.2). Engine llama.cpp b11609 Metal, downloaded and hash-checked at first launch; every engine now starts with `--cache-ram 0` |
+| Changes since candidate 1 | the total rename (D-028, D-030: no compatibility with builds that carried the former name; a renamed device pairs again once); WP-04 fix pass (pooling code, still unreachable without the pooled-inference group setting and acknowledgement); `--cache-ram 0`; outdated `X-*-Target` headers refused |
+| **Gate A**, at 7d4d194 | `cargo fmt --all --check` 0; `cargo clippy --workspace --exclude ucompute-desktop --all-targets -D warnings` 0; `cargo deny check advisories licenses sources bans` ok; `gitleaks git` no leaks. Evidence: `docs/evidence/release-gate-7d4d194/` |
+| **Gate B**, at 7d4d194 | `cargo test --workspace --exclude ucompute-desktop --no-fail-fast` 602 passed, 1 failed, 5 ignored, real engines; the failure is the F-06-04 flood timing test, which also fails alone on this Mac now at load 12-27 from macOS background work; an ABBA with and without `--cache-ram 0` (A pass, B ×2.28, A ×1.41, B ×2.61) shows the flag is not the cause; desktop vitest 451/451; `verify_packaged_app.py` on this DMG **ALL PASS 19/19**: `docs/evidence/desktop-packaged-mac-m2-7d4d194.json`. SINGLE-HOST (one Mac) |
+| Gate C (Mesh) | Not covered by this candidate: no two-machine run with renamed builds yet (sentinel after its soak; the laptop when it is back). Testers must be told Mesh is experimental and that devices pair again after the rename |
+| Gates D, E, F, G | Not claimed (as for candidate 1) |
+| Installed on this Mac | Yes, replacing candidate 1: `docs/evidence/migration-mac-2026-10-29.md` |
+| Where it is | `~/UCompute-release-candidates/0.1.1-7d4d194/` (the DMG and `SHA256SUMS`). Not uploaded anywhere |
+| Approval | **Awaiting the owner**: approve this SHA-256 and name the cohort |

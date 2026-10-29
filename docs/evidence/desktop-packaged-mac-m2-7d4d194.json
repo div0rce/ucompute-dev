@@ -1,0 +1,198 @@
+{
+  "label": "SINGLE-HOST (one Mac); packaged binaries",
+  "steps": [
+    {
+      "step": "binaries are arm64 and link only system libraries",
+      "ok": true,
+      "archs": {
+        "ucompute": "arm64",
+        "ucompute-desktop": "arm64"
+      }
+    },
+    {
+      "step": "the app ships THIRD_PARTY_NOTICES naming the Rust crate rustls and the JS package react",
+      "ok": true,
+      "path": "<work>/mnt/UCompute.app/Contents/Resources/THIRD_PARTY_NOTICES.txt",
+      "bytes": 708142,
+      "sha256": "2116f009aebdb9772a0c59b0f27aec640c8d462a12eb5889daedd65299d85eb8"
+    },
+    {
+      "step": "app signature verifies (ad-hoc; no Developer ID, B-008)",
+      "ok": true,
+      "stderr": ""
+    },
+    {
+      "step": "Gatekeeper refuses a downloaded copy on first open, as the install notes say (ad-hoc signed; read-only spctl assessment, the Open Anyway approval stays manual)",
+      "ok": true,
+      "quarantine_propagated": true,
+      "spctl_exit": 3,
+      "spctl": "<work>/downloaded/UCompute.app: rejected",
+      "rejected": true
+    },
+    {
+      "step": "bundled daemon accepts the app's exact arguments",
+      "ok": true,
+      "args": [
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8192",
+        "--exit-with-parent"
+      ],
+      "exit": 0,
+      "stderr": ""
+    },
+    {
+      "step": "first launch: daemon healthy, started by the app with its exact arguments",
+      "ok": true,
+      "healthy_after_s": 3.357,
+      "sidecar": [
+        [
+          17115,
+          17103,
+          "<work>/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ]
+    },
+    {
+      "step": "fresh install provisioned the pinned engine inside the new HOME",
+      "ok": true,
+      "data_dir": "<work>/home/Library/Application Support/UCompute",
+      "engine": [
+        "b11609",
+        "llama-b11609-bin-macos-arm64.tar.gz"
+      ]
+    },
+    {
+      "step": "model pulled and hash-verified by the app's daemon",
+      "ok": true,
+      "bytes": 19077344,
+      "seconds": 2.2
+    },
+    {
+      "step": "first launch: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 429.3,
+      "total_s": 25.29
+    },
+    {
+      "step": "quit stops daemon and engine and frees the port",
+      "ok": true,
+      "app_exit_s": 0.217,
+      "daemon_gone_s": 0.0,
+      "engines": [
+        17172
+      ]
+    },
+    {
+      "step": "restart: one daemon, started by the new app process, no port conflict",
+      "ok": true,
+      "healthy_after_s": 2.318,
+      "sidecar": [
+        [
+          17213,
+          17205,
+          "<work>/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ]
+    },
+    {
+      "step": "restart: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 417.0,
+      "total_s": 0.67
+    },
+    {
+      "step": "restart: one engine",
+      "ok": true,
+      "engines": [
+        17245
+      ]
+    },
+    {
+      "step": "daemon killed (SIGKILL daemon only): the app restarts one daemon, /health within 10 s, its log holds both runs",
+      "ok": true,
+      "restarted_after_s": 1.664,
+      "sidecar": [
+        [
+          17256,
+          17205,
+          "<work>/Applications/UCompute.app/Contents/MacOS/ucompute serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+        ]
+      ],
+      "log": "<work>/home/Library/Logs/org.ucompute.desktop/daemon.log",
+      "log_bytes": 1060
+    },
+    {
+      "step": "daemon restarted: real inference through the app's daemon",
+      "ok": true,
+      "device": "MTL0 (Apple M2)",
+      "text": " named Benny was hopping in a field. He saw a big, red radish and he wanted to eat it. But the radish was too big",
+      "decode_tok_s": 655.6,
+      "total_s": 0.38
+    },
+    {
+      "step": "daemon restarted: one engine",
+      "ok": true,
+      "engines": [
+        17280
+      ]
+    },
+    {
+      "step": "crash (SIGKILL app): --exit-with-parent stops daemon and engine",
+      "ok": true,
+      "daemon_gone_s": 0.431
+    },
+    {
+      "step": "restart after crash: one daemon",
+      "ok": true,
+      "healthy_after_s": 1.92
+    },
+    {
+      "step": "final: no process from the install is running and port 8192 is free",
+      "ok": true,
+      "leftovers": []
+    }
+  ],
+  "dmg": {
+    "path": "target/release/bundle/dmg/UCompute_0.1.1_aarch64.dmg",
+    "sha256": "c1166ba91cf07d0af7d57e3563a4f592b0de077fefc9e0725192aae38c42b937",
+    "bytes": 6425890
+  },
+  "binaries_in_dmg": {
+    "ucompute": {
+      "sha256": "7011ae78ee1bbe40ee6a7af0132ba27aa2e4d3e1cb0813f9bdcec82cb9741289",
+      "archs": "arm64",
+      "libs": [
+        "/usr/lib/libiconv.2.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ]
+    },
+    "ucompute-desktop": {
+      "sha256": "fd4d28234165befa0c0785d46fc41afc6666be55011ab9c33909d5b985a01e4a",
+      "archs": "arm64",
+      "libs": [
+        "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
+        "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
+        "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+        "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libiconv.2.dylib",
+        "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+        "/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+        "/usr/lib/libobjc.A.dylib",
+        "/System/Library/Frameworks/ColorSync.framework/Versions/A/ColorSync",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices"
+      ]
+    }
+  },
+  "daemon_version": "ucompute 0.1.1"
+}

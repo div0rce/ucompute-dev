@@ -1,0 +1,6 @@
+fmt rc=0
+clippy rc=0
+deny rc=0
+gitleaks rc=0
+cargo-test rc=101
+vitest rc=0
