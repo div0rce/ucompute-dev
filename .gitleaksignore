@@ -1,7 +1,0 @@
-# gitleaks false positives: synthetic test fixtures, not secrets (reviewed 2026-10-24).
-# ucompute-observability (crates/common-observability at the fingerprinted commits) redaction tests feed fake sk- keys and a truncated PEM block to redact();
-# ucompute-api metrics test uses a canary prompt string named `secret`.
-5034fb68aef89eb1c3441142861c2047ea2296ab:crates/common-observability/src/lib.rs:generic-api-key:510
-5034fb68aef89eb1c3441142861c2047ea2296ab:crates/common-observability/src/lib.rs:generic-api-key:577
-5034fb68aef89eb1c3441142861c2047ea2296ab:crates/common-observability/src/lib.rs:private-key:533
-ca298bd23ef088013a6787cc02a9dc9f4cf7fc4f:crates/common-api/tests/api.rs:generic-api-key:311

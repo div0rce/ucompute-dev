@@ -1,8 +1,10 @@
 # Platform readiness plan (2026-10-23)
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 Working plan produced by an engineering-session workflow on 2026-10-23 (read-only audit and synthesis; not a decision record). Decisions live in docs/DECISIONS.md and docs/decisions/; status lives in docs/REQUIREMENTS.csv and docs/VERIFICATION.md.
 
-# UCompute (formerly Common): ranked milestone plan toward the definition of success
+# UCompute: ranked milestone plan toward the definition of success
 
 **Basis.** This plan is built from the four audit result sets (packaging and distribution, runtime and supervision, mesh, API fidelity). I also read HEAD `af1459c` read-only. That covered spec §2/§11/§31, the BLOCKERS list, the ledger rows F-03-01..04, F-06-06, F-08-04 and F-10-01, and the Core Lab's README and calibration runbook.
 
@@ -29,18 +31,18 @@ Working plan produced by an engineering-session workflow on 2026-10-23 (read-onl
 Requirement rows: F-01-01, F-01-02, F-01-03, F-01-04, U-03.
 
 **First steps (autonomous, after the current run ends)**
-1. On sentinel, run `scripts/mac-host.sh run 'cd ~/src/common && git status && git log -1'` (`MAC_HOST=192.168.1.167 MAC_USER=div0rce`). Confirm the checkout is at HEAD, or sync it.
+1. On sentinel, run `scripts/mac-host.sh run 'cd ~/src/ucompute && git status && git log -1'` (`MAC_HOST=192.168.1.167 MAC_USER=div0rce`). Confirm the checkout is at HEAD, or sync it.
 2. Fetch fixtures and run the real tests:
-   `COMMON_HOME=$HOME/.common-test COMMON_REQUIRE_FIXTURES=1 scripts/fetch-fixtures.sh && COMMON_HOME=$HOME/.common-test COMMON_REQUIRE_FIXTURES=1 cargo test -p common-runtime -p common-api -p common-hardware --no-fail-fast`
+   `UCOMPUTE_HOME=$HOME/.ucompute-test UCOMPUTE_REQUIRE_FIXTURES=1 scripts/fetch-fixtures.sh && UCOMPUTE_HOME=$HOME/.ucompute-test UCOMPUTE_REQUIRE_FIXTURES=1 cargo test -p ucompute-runtime -p ucompute-api -p ucompute-hardware --no-fail-fast`
 3. Run the golden CLI check:
-   `common setup && common run stories15M-q4_0 -p 'Once upon a time, a little rabbit' -n 32 --temp 0 --seed 42`
+   `ucompute setup && ucompute run stories15M-q4_0 -p 'Once upon a time, a little rabbit' -n 32 --temp 0 --seed 42`
    Compare against the golden text. Record `ldd llama-server`, the glibc version, the kernel, and the engine sha256 `f95cbb27…`.
 4. Code, small and testable on the Mac:
-   - Make `estimate_vs_measured.rs` fail instead of printing SKIP when `COMMON_REQUIRE_FIXTURES=1`.
+   - Make `estimate_vs_measured.rs` fail instead of printing SKIP when `UCOMPUTE_REQUIRE_FIXTURES=1`.
    - Add a Linux peak reader (`/proc/<pid>/status` VmHWM).
    - Default the thread count from `hardware.cpu.physical_cores` in `ModelManager::plan`, and fix the `run.rs:47` help text.
    - Re-run steps 2 and 3 on sentinel.
-5. Run `common bench` on sentinel at `-t 4` and at the new default. Commit the JSON to `benchmarks/results/` with a hardware manifest.
+5. Run `ucompute bench` on sentinel at `-t 4` and at the new default. Commit the JSON to `benchmarks/results/` with a hardware manifest.
 6. Make one documentation commit:
    - A VERIFICATION entry for this work.
    - B-004 updated, and spec §27.1 Linux row proposed as EXPERIMENTAL with OS, kernel, CPU and artifact hash.
@@ -67,21 +69,21 @@ Requirement rows: F-02-01, F-02-02, F-02-03, F-02-05, F-06-05, F-08-10, U-03.
 **First steps**
 1. Save the in-progress run's output under `docs/evidence/mesh-physical-2026-10-23-linux/` together with the link-local observation.
 2. Do read-only diagnosis:
-   - On sentinel, run `avahi-browse -rpt _common._udp` (no sudo).
-   - On the Mac, run `dns-sd -B _common._udp` and `dns-sd -L <instance> _common._udp`.
-   - Run HEAD `common serve --network -v` from Terminal with `RUST_LOG=mdns_sd=debug`. Comparing this with the app separates the app's Local Network privacy state from mdns-sd behaviour.
-3. Code changes in `crates/common-network/src/discovery.rs`:
+   - On sentinel, run `avahi-browse -rpt _ucompute._udp` (no sudo).
+   - On the Mac, run `dns-sd -B _ucompute._udp` and `dns-sd -L <instance> _ucompute._udp`.
+   - Run HEAD `ucompute serve --network -v` from Terminal with `RUST_LOG=mdns_sd=debug`. Comparing this with the app separates the app's Local Network privacy state from mdns-sd behaviour.
+3. Code changes in `crates/ucompute-network/src/discovery.rs`:
    - Advertise and rank only addresses in the bound family. With the default 0.0.0.0 bind, IPv6 is neither advertised nor ranked.
    - Treat a peer with only link-local addresses as "discovered, no reachable address", with a typed reason.
    - Add a unit test next to `rank_addrs_keeps_two_routable_addresses`.
-4. Fix the runner's B→A expectation now that Linux has an engine. Pre-pull the fixture on sentinel (`COMMON_HOME=$HOME/.common-acceptance`).
+4. Fix the runner's B→A expectation now that Linux has an engine. Pre-pull the fixture on sentinel (`UCOMPUTE_HOME=$HOME/.ucompute-acceptance`).
 5. Run `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce OUT=<dir> NO_MDNS=1 CROSS_HOLD=1 tests/distributed/two_machine/run_mac_linux.sh`. Then run it again with mDNS on.
    The run covers: pairing both ways with a refused wrong code first; revocation and re-pair; kill and restart detection within 6 s; hold, and Connect ending a hold; golden output from Linux CPU both as JSON and as a stream.
 6. Fix the `apply_peer_revocation` residual (disconnect the running Node under the net lock) with its test, then re-run the hold steps.
 7. Execute the Core Lab's handed-over calibration (`ucompute-core-lab/calibration/RUNBOOK.md`, `tools/calibrate.py`) against the Mac and sentinel daemons. Run the lab's driver unmodified, and with host B changed from the laptop tunnel to sentinel only if the runbook allows it. Hand the raw data back to the Core Lab. Do not analyse it in this repository.
 8. Commit the runner, the host document, the evidence and the record updates locally.
 
-**Needs the owner (non-blocking).** Only if the Local Network privacy prompt is implicated: the owner reads or toggles System Settings > Privacy & Security > Local Network for Common.app. Separately, a decision on adding `NSLocalNetworkUsageDescription` and `NSBonjourServices` to the bundle.
+**Needs the owner (non-blocking).** Only if the Local Network privacy prompt is implicated: the owner reads or toggles System Settings > Privacy & Security > Local Network for UCompute.app. Separately, a decision on adding `NSLocalNetworkUsageDescription` and `NSBonjourServices` to the bundle.
 
 **Evidence produced.** `docs/evidence/mesh-physical-2026-10-23-linux.md`, labelled TWO-MACHINE, ALL PASS with N/A only for unmet preconditions, naming the ffe1a47 app (or a HEAD binary) and sentinel at HEAD. The F-02-01 note records the root cause.
 
@@ -110,11 +112,11 @@ Requirement rows: F-02-01, F-02-02, F-02-03, F-02-05, F-06-05, F-08-10, U-03.
 
 **First steps.** Each item is small, test-first, and labelled REAL on the fixture.
 1. `ensure_loaded_for`: check liveness with `process::alive(pid)` before returning a cached handle. Map connection-refused to an engine-exited error, and bound restarts at 3 per 60 s. Add the real test `engine_killed_is_reloaded_on_fixture`.
-2. Add `common_hardware::available_memory()` and call it in `ModelManager::plan`. Add a unit test with an injected memory source.
-3. `download::fetch`: compare the bytes needed against a fresh free-disk reading, and map ENOSPC (28/112) to a typed error. Test on an `hdiutil create -size 64m` scratch image used as `COMMON_HOME`.
+2. Add `ucompute_hardware::available_memory()` and call it in `ModelManager::plan`. Add a unit test with an injected memory source.
+3. `download::fetch`: compare the bytes needed against a fresh free-disk reading, and map ENOSPC (28/112) to a typed error. Test on an `hdiutil create -size 64m` scratch image used as `UCOMPUTE_HOME`.
 4. Pass a `CancellationToken` into `pull` and add `DELETE /api/models/{id}/pull`. Make pulls single-writer per id. Add `cancel_mid_pull_keeps_partial_and_stops_network` and `duplicate_pull_is_single_writer`, plus a desktop Cancel button with a vitest case.
 5. Prune `logs/engine-*.log` to the newest N files. The bundle reads only the newest K files with a seek-from-end tail. Add a test with 1,000 synthetic logs.
-6. Add a common-cli integration test, following the `desktop_sidecar.rs:255` pattern: kill -9 the daemon mid-stream and mid-pull, then restart. Assert no orphan engine, no "running" jobs, and that the pull resumes. Document the client-visible contract in `docs/api/README.md`.
+6. Add a ucompute-cli integration test, following the `desktop_sidecar.rs:255` pattern: kill -9 the daemon mid-stream and mid-pull, then restart. Assert no orphan engine, no "running" jobs, and that the pull resumes. Document the client-visible contract in `docs/api/README.md`.
 7. Tool calls:
    - Add optional `tool_calls`, `tool_call_id` and `name` to `ChatMessage`, with `skip_serializing_if` so peer-wire JSON stays byte-identical. Add a mesh round-trip test.
    - Forward `tool_choice` and `parallel_tool_calls`.
@@ -123,12 +125,12 @@ Requirement rows: F-02-01, F-02-02, F-02-03, F-02-05, F-06-05, F-08-10, U-03.
    - Update openapi.json and B-013.
 8. Local API token:
    - Write a short ADR covering scopes (inference versus admin/mesh), file location (0600, next to `serve.json`) and how OpenAI clients pass `api_key`.
-   - Implement `--api-key-file` and `COMMON_API_KEY` for `serve`. The desktop and CLI read the token automatically.
+   - Implement `--api-key-file` and `UCOMPUTE_API_KEY` for `serve`. The desktop and CLI read the token automatically.
    - Mode-loosening routes need more than a body flag.
    - Add tests showing that token-less and cross-uid requests are refused.
    - Update the THREAT_MODEL rows.
 9. Slot and context default: measure qwen2.5-0.5b and 1.5b at 1, 2 and 4 concurrent requests on the Mac. Choose between n_ctx × slots and fewer slots. Add a real test that sends a 2,000-token history through the default ApiConfig. Feed the result into B-014; do not re-run the flood A/B.
-10. Run the whole set on the Mac (on mains power, under caffeinate) and on sentinel with `COMMON_REQUIRE_FIXTURES=1`. Add VERIFICATION entries.
+10. Run the whole set on the Mac (on mains power, under caffeinate) and on sentinel with `UCOMPUTE_REQUIRE_FIXTURES=1`. Add VERIFICATION entries.
 
 **Needs the owner (non-blocking).** Approval for the token ADR if it changes the documented API contract for integrators.
 
@@ -154,8 +156,8 @@ Requirement rows: F-02-01, F-02-02, F-02-03, F-02-05, F-06-05, F-08-10, U-03.
 - Rename and migration decision outstanding (D-021).
 
 **First steps (autonomous)**
-1. Add a `build.rs` that embeds the short commit and a dirty flag in `common --version` and `/api/status`. Version the app per build (`0.1.0-<n>`).
-2. Persist the daemon log: a size-capped `COMMON_HOME/logs/daemon.log` with one rotation, included in the diagnostics bundle after redaction.
+1. Add a `build.rs` that embeds the short commit and a dirty flag in `ucompute --version` and `/api/status`. Version the app per build (`0.1.0-<n>`).
+2. Persist the daemon log: a size-capped `UCOMPUTE_HOME/logs/daemon.log` with one rotation, included in the diagnostics bundle after redaction.
 3. In `lib.rs`, on an unexpected `Terminated`, respawn the sidecar with a max-3-in-60-s policy. Expose a "restarting" state to the UI.
 4. Extend `verify_packaged_app.py` with these stages:
    1. kill -9 the daemon only; `/health` must return within 10 s.
@@ -168,8 +170,8 @@ Requirement rows: F-02-01, F-02-02, F-02-03, F-02-05, F-06-05, F-08-10, U-03.
 7. Rebuild after M3 lands, then run the verifier (all stages) on this Mac. Optionally rebuild on sentinel's schedule so the Mac is free.
 
 **Needs the owner (non-blocking: steps 1–7 proceed without these)**
-- Create a standard (non-admin) test account on this Mac. In it, perform the UI-only path from a browser-downloaded or AirDropped DMG: Models > qwen2.5-0.5b > Download > Load > Chat. Record times and bandwidth, and capture `swift scripts/macos-ax-dump.swift common-desktop 40 Models` output and screenshots.
-- Decide whether to freeze the identifiers (`org.commoncompute.desktop`, Common data folders) before any external install, or to rename first with a tested migration.
+- Create a standard (non-admin) test account on this Mac. In it, perform the UI-only path from a browser-downloaded or AirDropped DMG: Models > qwen2.5-0.5b > Download > Load > Chat. Record times and bandwidth, and capture `swift scripts/macos-ax-dump.swift ucompute-desktop 40 Models` output and screenshots.
+- Decide whether to freeze the identifiers (bundle id, data folders) under the former name before any external install, or to rename first with a tested migration.
 - Decide on Apple Developer ID and notarization. This is paid, so it needs spec §4 authorization. Until then, any build is a disclosed unsigned private-alpha exception.
 
 **Evidence produced.**
@@ -189,9 +191,9 @@ Requirement rows: F-08-08, F-06-04, U-03, F-10-09.
 
 **First steps**
 1. Write `tests/soak/local_soak.py`, standard library only, loopback API only, fixed seed. It cycles load, unload, chat, stream, cancel, pull with cache hit, overload and engine-kill (from M3). Every 60 s it samples RSS, open file descriptors, log size, an error-code histogram and p95, written as JSONL.
-2. Run the soak for 24 h on sentinel (`COMMON_HOME=~/.common-soak`, its own port, no LAN listener). Run it for several hours on the Mac on mains power.
+2. Run the soak for 24 h on sentinel (`UCOMPUTE_HOME=~/.ucompute-soak`, its own port, no LAN listener). Run it for several hours on the Mac on mains power.
 3. On sentinel (a quiet 8-core host), run `peer_flood_throttled_through_daemon_single_host` with the shipped 4/3 defaults, labelled SINGLE-HOST Linux. Report run count and spread.
-4. Add a two-peer fairness test in `crates/common-api/tests/mesh.rs` (per-peer cap of ceil(peer_slots/n_active)) and pick the default from the measurements.
+4. Add a two-peer fairness test in `crates/ucompute-api/tests/mesh.rs` (per-peer cap of ceil(peer_slots/n_active)) and pick the default from the measurements.
 5. Run a long flood soak on sentinel aimed at reproducing B-015.
 
 **Needs the owner (non-blocking).** None.
@@ -210,17 +212,17 @@ Requirement rows: F-08-08, F-06-04, U-03, F-10-09.
 Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 
 **First steps**
-1. Draft `packaging/linux/common.service`:
-   `ExecStart=%h/.local/bin/common serve --host 127.0.0.1 --port 8192`, `Restart=on-failure`, and the default `KillMode=control-group`.
+1. Draft `packaging/linux/ucompute.service`:
+   `ExecStart=%h/.local/bin/ucompute serve --host 127.0.0.1 --port 8192`, `Restart=on-failure`, and the default `KillMode=control-group`.
 2. Write a tarball script that packages the binary built `--locked`, LICENSE, generated notices and the unit file, plus a SHA256SUMS file.
 3. Add `PR_SET_PDEATHSIG` for llama-server on Linux, with a test that SIGKILLs the daemon and finds no engine remaining.
 4. Port `verify_packaged_app.py` to a Linux verifier. It checks:
    - a fresh HOME and XDG dirs;
-   - that `common setup` provisions the pinned engine and `ldd` resolves;
+   - that `ucompute setup` provisions the pinned engine and `ldd` resolves;
    - golden CPU completion;
    - that `systemctl --user stop` frees port 8192 with no llama-server left;
    - kill -9 recovery;
-   - that uninstall keeps `~/.local/share/common` as documented.
+   - that uninstall keeps `~/.local/share/ucompute` as documented.
 5. Run it on sentinel (user units need no sudo). Record the result as an EXPERIMENTAL U-03 entry.
 
 **Needs the owner (non-blocking).**
@@ -256,7 +258,7 @@ Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 2. Write `scripts/windows-acl-check.ps1` on the Mac beforehand (Get-Acl, then open and replace attempts on `device.key`, `peers.json` and `config.json`).
 3. Sync HEAD and run `pnpm tauri build --bundles nsis` natively. Pin `bundle.windows.nsis.installMode` and `webviewInstallMode` in `tauri.conf.json`.
 4. Run `verify_windows_app.ps1` at the **default** install path with the app idle. Add the uninstall/reinstall stage (`uninstall.exe /S`) and the daemon-kill and upgrade stages from M4.
-5. Read the firewall rule (`Get-NetFirewallRule -DisplayName 'Common (paired devices)'`). Document or implement removal of the rule on uninstall. Run `scripts\windows-uia-dump.ps1`.
+5. Read the firewall rule (`Get-NetFirewallRule -DisplayName 'UCompute (paired devices)'`). Document or implement removal of the rule on uninstall. Run `scripts\windows-uia-dump.ps1`.
 6. Add a `cfg(windows)` Vulkan test mirroring the Metal one, run with and without forced GPU failure. Use AvailableBytes (free plus standby) for available memory and fill in `rss_bytes`. Run the M3 REAL tests natively.
 7. Run `WIN_HOST=<laptop> OUT=<dir> CROSS_HOLD=1 tests/distributed/two_machine/run_mac_windows.sh` with HEAD on both sides, then the `NO_MDNS=1` variant.
 8. Run the three-node check on the Mac, sentinel and the laptop: a revocation issued on A reaches C, with latency measured, and C refuses B's next dial. Use a small driver built from `mesh_two_machine.py` and `state.py`.
@@ -294,7 +296,7 @@ Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 **Needs the owner (non-blocking).**
 - A LAN packet capture (tcpdump needs root) on the Mac or sentinel, run by the owner or under a scoped approval.
 - `rtcwake` on sentinel (sudo).
-- Defining the CommonTestWifi network-switch action on the laptop (a network setting).
+- Defining the UComputeTestWifi network-switch action on the laptop (a network setting).
 
 **Evidence produced.** TWO-MACHINE reconnection timings, privacy counts with a capture scan (when approved), and fairness numbers.
 
@@ -336,11 +338,11 @@ Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 
 **Gaps closed.** F-03-01, F-03-02, F-03-03, F-03-04 (all NOT_STARTED); B-016 (RPC carriage overhead).
 
-**Preconditions.** M2 green (Mac/sentinel authenticated transport at HEAD) and M3 green (engine supervision). ADR-0003 rule: llama.cpp `rpc-server` is never exposed beyond loopback, and all cross-machine bytes go through Common's authenticated, encrypted transport.
+**Preconditions.** M2 green (Mac/sentinel authenticated transport at HEAD) and M3 green (engine supervision). ADR-0003 rule: llama.cpp `rpc-server` is never exposed beyond loopback, and all cross-machine bytes go through UCompute's authenticated, encrypted transport.
 
 **First steps**
 1. Read the Core Lab's `REPORT.md` addenda (RPC dataflow, `--tensor-split` mapping) and `HANDOFF-FROM-ENGINEERING.md`. Agree on the integration boundary with the Core Lab. Engineering owns the transport and runtime wiring; the lab owns the planner and split mapping. Nothing of the lab's is reimplemented.
-2. Prototype on the Mac and sentinel. A loopback-bound `rpc-server` on sentinel is reached only through a Common-authenticated stream. The Mac runs llama-server with `--rpc` pointing at its local end of that stream, using a fixed split taken from the Core Lab's mapping.
+2. Prototype on the Mac and sentinel. A loopback-bound `rpc-server` on sentinel is reached only through a UCompute-authenticated stream. The Mac runs llama-server with `--rpc` pointing at its local end of that stream, using a fixed split taken from the Core Lab's mapping.
 3. Write a correctness test: distributed versus local output with a fixed seed. Compare greedy tokens and logit tolerance on a fixture and on qwen2.5-0.5b.
 4. Measure memory per device (distributed memory evidence, F-03-02) and bytes on the wire. Compare against B-016's criterion.
 5. Failure semantics: kill the remote half mid-generation and record a typed terminal state, with no orphan on either host.
@@ -359,10 +361,10 @@ Requirement rows: F-10-01 (Linux), F-01-02, F-09-10, U-03.
 - **U-01, independent peer implementation (WP-07).** A profile plus test vectors from ADR-0003 and `close_codes_are_pinned_on_the_wire`, then a minimal Python aioquic peer on sentinel.
 - **NAT and relay (F-02-06).** Decide between an in-house relay and an iroh adapter in ADR-0003 first. The netns NAT matrix on sentinel needs owner-granted root.
 - **Linux desktop app (.deb/AppImage).** Needs owner-approved webkit2gtk installs on sentinel and a real desktop session for UI checks.
-- **Larger catalog models.** Qwen2.5 3B and 7B Q4_K_M, with an 8 GB boundary test on the Mac (owner approval for disk) and `common models recommend` (F-01-07).
+- **Larger catalog models.** Qwen2.5 3B and 7B Q4_K_M, with an 8 GB boundary test on the Mac (owner approval for disk) and `ucompute models recommend` (F-01-07).
 - **Second backend (F-01-06).** MLX according to the Core Lab plan, after the owner approves installs and weights.
 - **Updater (F-10-07).** Tauri updater with an owner-held Ed25519 key and a tampered-update test, after the hosting decision (B-007).
-- **Package-manager distribution (owner request, 2026-10-29).** Install, update and uninstall through the usual package managers, the whole lifecycle and not only install: Homebrew (a cask for the desktop app and a formula or cask for the `common` CLI and daemon), npm/yarn (a package that fetches the pinned, hash-checked binary for the platform, the pattern CLIs such as esbuild use), and later winget and apt. Each needs a public, versioned download with published checksums (B-007, Gate G), and Homebrew's cask rules expect a signed and notarized app (B-008), so it follows the first public release, not the private alpha. Each package gets its own verifier, as the DMG and the Linux tarball have, covering a clean install, an upgrade, an uninstall that keeps or removes data as documented, and the package's checksum. Owner's words, relayed by the website session: "we should be able to use shit like brew/npm/yarn to install this too. well i dont know if only install but like you know what i mean. full suite."
+- **Package-manager distribution (owner request, 2026-10-29).** Install, update and uninstall through the usual package managers, the whole lifecycle and not only install: Homebrew (a cask for the desktop app and a formula or cask for the `ucompute` CLI and daemon), npm/yarn (a package that fetches the pinned, hash-checked binary for the platform, the pattern CLIs such as esbuild use), and later winget and apt. Each needs a public, versioned download with published checksums (B-007, Gate G), and Homebrew's cask rules expect a signed and notarized app (B-008), so it follows the first public release, not the private alpha. Each package gets its own verifier, as the DMG and the Linux tarball have, covering a clean install, an upgrade, an uninstall that keeps or removes data as documented, and the package's checksum. Owner's words, relayed by the website session: "we should be able to use shit like brew/npm/yarn to install this too. well i dont know if only install but like you know what i mean. full suite."
 
 ## Owner action queue (consolidated; none blocks M1–M3)
 

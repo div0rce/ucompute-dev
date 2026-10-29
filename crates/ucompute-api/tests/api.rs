@@ -847,10 +847,9 @@ async fn cross_origin_and_foreign_host_requests_are_refused() {
         .to_str()
         .unwrap()
         .to_string();
-    for h in ["content-type", "x-ucompute-client-ref"] {
-        assert!(allowed.split(", ").any(|a| a == h), "{h} not in {allowed}");
-    }
-    assert!(!allowed.contains("x-common-"), "D-028: no former header: {allowed}");
+    let mut allowed: Vec<&str> = allowed.split(',').map(str::trim).collect();
+    allowed.sort_unstable();
+    assert_eq!(allowed, ["authorization", "content-type", "x-ucompute-client-ref"]);
     let r = c
         .post(srv.url("/api/unload"))
         .header("origin", "tauri://localhost")

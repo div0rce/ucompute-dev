@@ -1,5 +1,7 @@
 # Mac and Windows laptop on eduroam: pre-fix baseline acceptance run (2026-10-22, 21:48-22:00 UTC)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Two-machine evidence, daemon API run (not an app UI run).** The two-machine drivers drive the two installed apps'
 daemon APIs (loopback; the laptop's through an SSH tunnel), not their windows. The network is Rutgers eduroam, which
 drops multicast between clients, so every mDNS check is recorded N/A (`ok: null`), never PASS. This run used the builds
@@ -11,7 +13,7 @@ died at 22:05 UTC).
 | | A | B |
 |---|---|---|
 | Machine | MacBook Air, Apple M2, 8 GB, macOS 26.2, 10.75.79.236 | HP, Core Ultra 7 258V, Arc 140V, Windows 11, 10.75.120.9 (network profile Private) |
-| App | Desktop UI 2.0 packaged app from d9d8067, installed (daemon `623876ae…`) | native NSIS build from 593d4ea (`c8af273d…`), installed per user at `CommonVerify-593d4ea\app` with the approved firewall rule (40f78bd) |
+| App | Desktop UI 2.0 packaged app from d9d8067, installed (daemon `623876ae…`) | native NSIS build from 593d4ea (`c8af273d…`), installed per user at `UComputeVerify-593d4ea\app` with the approved firewall rule (40f78bd) |
 
 Command (from this Mac, at 95592b0 plus the then-uncommitted mesh and hold drivers):
 `WIN_HOST=10.75.120.9 OUT=<dir> NO_MDNS=1 bash tests/distributed/two_machine/run_mac_windows.sh`.
@@ -24,7 +26,7 @@ step results `results.json` and `console.txt`; runner log `runner.log`; both sid
 **Discovery and connection state** (`discovery/`): host names reported by each daemon; "last seen" advances while
 connected; pairing in both directions (A shows the code and B joins, then B shows and A joins), a wrong code refused
 (`pairing_failed`), the right code pairs, each side names the other by its host name ("JESS-HP", "mous").
-Graceful quit of B's app (CommonTestQuit): A sees B gone in 1.04 s with `closed_by_peer` (B's daemon closed the
+Graceful quit of B's app (UComputeTestQuit): A sees B gone in 1.04 s with `closed_by_peer` (B's daemon closed the
 connection itself, not the kill fallback), B's daemon and engine end in 3.5 s, A shows why B is unreachable, a dial
 at a dead hint fails in 8.1 s and does not replace the pinned address, B back 7.6 s after restart. Crash of B's app
 (Stop-Process -Force): A sees the loss in 4.6 s, B's processes end in 1.8 s, B back 8.2 s after restart. N/A: the five
@@ -65,5 +67,5 @@ the dead-hint dial in the quit step took 8.1 s); the 0.3-0.5 ms manual connect s
 
 `windows-acl.txt`: `Get-Acl` on the test install's identity files (`device.key`, `device.pub`, `peers.json`,
 `peers.json.lock`), `config.json` and `serve.json`: SYSTEM, BUILTIN\Administrators and the user only, all inherited
-from the user's profile folder. Common sets no explicit DACL on Windows, so a `COMMON_HOME` outside the profile would
+from the user's profile folder. UCompute sets no explicit DACL on Windows, so a `UCOMPUTE_HOME` outside the profile would
 inherit that folder's ACL. Not tested from a second account (creating one is the owner's decision). B-017 stays open.

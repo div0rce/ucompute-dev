@@ -17,7 +17,7 @@ A computing-network control center (`docs/design/desktop-ui-2-plan.md`): a rail 
 (Mod+1 … Mod+7), contextual toolbars, sortable dense tables (APG grid with cell focus and a column chooser), a
 resizable inspector with tabs, and a status bar fed only by real API fields. Window and rail say "UCompute",
 the product's name, as do the bundle, installers and data folders (`UCompute.app`, `org.ucompute.desktop`, `UCompute`
-data folders; D-028, no compatibility with the former name Common). Routes are `#/<section>[/<id>][?params]`; the old
+data folders; D-028, no compatibility with the former name). Routes are `#/<section>[/<id>][?params]`; the old
 routes stay as aliases: `#/home` → Dashboard, `#/peers` → Devices, `#/hardware` → this device's Hardware tab,
 `#/performance` → Jobs, `#/diagnostics` → Activity, `#/privacy` → Settings › Privacy.
 

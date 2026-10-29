@@ -3,14 +3,14 @@
         "step":  "silent install",
         "ok":  true,
         "facts":  {
-                      "app":  "common-desktop.exe",
+                      "app":  "ucompute-desktop.exe",
                       "installer_sha256":  "3befe29eb2e793e1f9e9fc2afdbb28c1be1f546563238d4471b1bbd4a2996d9a",
                       "files":  [
                                     {
-                                        "value":  "common-desktop.exe",
-                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\common-desktop.exe",
-                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app",
-                                        "PSChildName":  "common-desktop.exe",
+                                        "value":  "ucompute-desktop.exe",
+                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\ucompute-desktop.exe",
+                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app",
+                                        "PSChildName":  "ucompute-desktop.exe",
                                         "PSDrive":  {
                                                         "CurrentLocation":  "Windows\\System32",
                                                         "Name":  "C",
@@ -138,10 +138,10 @@
                                         "PSIsContainer":  false
                                     },
                                     {
-                                        "value":  "common.exe",
-                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\common.exe",
-                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app",
-                                        "PSChildName":  "common.exe",
+                                        "value":  "ucompute.exe",
+                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\ucompute.exe",
+                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app",
+                                        "PSChildName":  "ucompute.exe",
                                         "PSDrive":  {
                                                         "CurrentLocation":  "Windows\\System32",
                                                         "Name":  "C",
@@ -270,8 +270,8 @@
                                     },
                                     {
                                         "value":  "THIRD_PARTY_NOTICES.txt",
-                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\THIRD_PARTY_NOTICES.txt",
-                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app",
+                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\THIRD_PARTY_NOTICES.txt",
+                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app",
                                         "PSChildName":  "THIRD_PARTY_NOTICES.txt",
                                         "PSDrive":  {
                                                         "CurrentLocation":  "Windows\\System32",
@@ -401,8 +401,8 @@
                                     },
                                     {
                                         "value":  "uninstall.exe",
-                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\uninstall.exe",
-                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\CommonVerify-77262a5b\\app",
+                                        "PSPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\uninstall.exe",
+                                        "PSParentPath":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\jessg\\UComputeVerify-77262a5b\\app",
                                         "PSChildName":  "uninstall.exe",
                                         "PSDrive":  {
                                                         "CurrentLocation":  "Windows\\System32",
@@ -537,7 +537,7 @@
         "step":  "the install ships THIRD_PARTY_NOTICES next to the exe, naming rustls and react",
         "ok":  true,
         "facts":  {
-                      "path":  "C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\THIRD_PARTY_NOTICES.txt",
+                      "path":  "C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\THIRD_PARTY_NOTICES.txt",
                       "chars":  705815
                   }
     },
@@ -562,7 +562,7 @@
         "facts":  {
                       "healthy_after_s":  7.23,
                       "daemon":  [
-                                     "25164 parent 30796: \"\\\\?\\C:\\Users\\jessg\\CommonVerify-77262a5b\\app\\common.exe\" serve --host 127.0.0.1 --port 8192 --exit-with-parent"
+                                     "25164 parent 30796: \"\\\\?\\C:\\Users\\jessg\\UComputeVerify-77262a5b\\app\\ucompute.exe\" serve --host 127.0.0.1 --port 8192 --exit-with-parent"
                                  ]
                   }
     },
@@ -570,7 +570,7 @@
         "step":  "fresh install provisioned the pinned engine in the fresh data folder",
         "ok":  true,
         "facts":  {
-                      "dir":  "C:\\Users\\jessg\\CommonVerify-77262a5b\\localappdata\\Common\\backends\\llama.cpp"
+                      "dir":  "C:\\Users\\jessg\\UComputeVerify-77262a5b\\localappdata\\UCompute\\backends\\llama.cpp"
                   }
     },
     {

@@ -1,6 +1,6 @@
 # UCompute on Linux: user-level install (experimental)
 
-UCompute (formerly Common): the binary is `ucompute`, the unit `ucompute.service`. Daemon only: no desktop
+UCompute: the binary is `ucompute`, the unit `ucompute.service`. Daemon only: no desktop
 app, CPU engine only (llama.cpp b11609 Ubuntu x64 build, pinned and hash-checked, D-024). Tested on Ubuntu 26.04
 x86_64 only. No root needed.
 

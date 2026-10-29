@@ -1,5 +1,7 @@
 # GitHub: audit and proposal for private source synchronization (2026-10-29) — FOR OWNER APPROVAL
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 The owner asked (2026-10-29, engineering session) to replace local-only development with GitHub synchronization:
 private sync of committed source, feature branches, automated CI and reviewable pull requests, no history rewriting,
 without pushing uncommitted work or overwriting the existing public repository, and with private source sync, public
@@ -10,17 +12,17 @@ spec section 4 forbid any push or new remote until the owner authorizes it in wr
 
 | Item | Finding |
 |---|---|
-| Remotes | One: `origin` = `https://github.com/div0rce/common.git` |
-| `div0rce/common` on GitHub | **PUBLIC**, created 2026-10-14, last push 2026-10-14, 3 commits (`f2c2883` initial, `d5a593a` merge, `1ae8424` Apache-2.0 licence), branch `main` only. Nothing since has been pushed |
+| Remotes | One: `origin` = the existing public repository (`https://github.com/div0rce/ucompute.git` since its D-028 rename) |
+| The existing public repository on GitHub | **PUBLIC**, created 2026-10-14, last push 2026-10-14, 3 commits (`f2c2883` initial, `d5a593a` merge, `1ae8424` Apache-2.0 licence), branch `main` only. Nothing since has been pushed |
 | Local branches | `integration/recover-codex-m1` (canonical, 163 commits, HEAD 4cbd1ac); `main` and `mous/epic-bhabha-fcf66a` at 1ae8424 (the latter is the website session's worktree branch) |
 | Ancestry | `1ae8424` is an ancestor of HEAD: a new repository's `main` can start from HEAD with no rewrite |
 | Uncommitted work | None (round 8 is committed: dc6bfa3, 9dd5d27, fbc0e67) |
-| Size | 4.8 MiB pack; no blob over 1 MB; models and engines are never committed (`.common/` is ignored) |
+| Size | 4.8 MiB pack; no blob over 1 MB; models and engines are never committed (`.ucompute/` is ignored) |
 | Secrets | `gitleaks git` over the whole history: no leaks (four synthetic test fixtures recorded in `.gitleaksignore`, 21d3dd4) |
 | Dependency licences and advisories | `cargo deny check licenses sources advisories`: ok (TLS advisories fixed in b555109; four Linux-desktop-only unmaintained notices recorded in `deny.toml`) |
 | Personal and third-party data | In the tree and the history: Kyle's macOS username (3 files, 2 commits), Jess's Windows account name (5 files, 5 commits), the laptop's host name (19 files), home-LAN IP addresses (52 files, 27 commits), the owner's two email addresses (one older decisions entry), sentinel's SSH user. Acceptable in a private repository; **blocks public publication** of this history |
 | Licence and notices | `LICENSE` is Apache-2.0 but names no copyright holder; no `NOTICE` file (public-source readiness H5). Bundles ship generated THIRD_PARTY_NOTICES |
-| GitHub account | `div0rce`, authenticated with `repo` scope. `div0rce/ucompute` does not exist (name free). Other repositories: `ucompute-website` (private), `sentinel` (public, an unrelated project). The Core Lab repository has no remote |
+| GitHub account | `div0rce`, authenticated with `repo` scope. `div0rce/ucompute` does not exist (name free at the time of this audit). Other repositories: `ucompute-website` (private), `sentinel` (public, an unrelated project). The Core Lab repository has no remote |
 | CI | `.github/workflows/ci.yml` exists (Gate A and B jobs) and has never run |
 
 ## 2. Three actions, each authorized separately
@@ -38,7 +40,7 @@ Approving one never implies another.
 | Item | Proposed |
 |---|---|
 | Repository | `github.com/div0rce/ucompute`, **private**, created empty (`gh repo create div0rce/ucompute --private`), no template, no auto-generated files |
-| Existing public `div0rce/common` | **Left untouched**: no push, no rename, no deletion. Locally its remote is renamed `public-common` with pushing disabled (`git remote set-url --push public-common DISABLED`), so no command can reach it by accident |
+| Existing public repository | **Left untouched**: no push, no rename, no deletion. Locally its remote is renamed `public-ucompute` with pushing disabled (`git remote set-url --push public-ucompute DISABLED`), so no command can reach it by accident |
 | New `origin` | `git@github.com:div0rce/ucompute.git` |
 | First push | `git push origin <HEAD at approval>:refs/heads/main`, the full history of `integration/recover-codex-m1` (all commits, as they are). No other branch, no tags. The website worktree branch is not pushed |
 | Branch model | `main` is the integration branch. Work happens on feature branches (`fix/…`, `feat/…`, `wp04/…`), each merged by pull request after CI passes. No force-push, no history rewriting, ever; merges are merge commits or squash merges, never rewrites of `main` |
@@ -49,7 +51,7 @@ Approving one never implies another.
 | Policy change | AGENTS.md's "never push, never create a remote" becomes: push only to the private `origin` per the recorded decision; the public repository, publication and releases stay separately gated |
 
 What the owner would approve, in one line: *"I authorize private synchronization to a new private repository
-div0rce/ucompute as proposed in docs/release/github-sync-proposal-2026-10-29.md; div0rce/common stays untouched."*
+div0rce/ucompute as proposed in docs/release/github-sync-proposal-2026-10-29.md; the existing public repository stays untouched."*
 
 ## 4. Risks of public publication (for a later, separate decision)
 
@@ -62,5 +64,5 @@ div0rce/ucompute as proposed in docs/release/github-sync-proposal-2026-10-29.md;
   (`docs/design/wp04-round8-open-findings.md`) before they are fixed.
 - **Claims**: public text must follow the capability snapshot and the website's claim rules; the repository's README
   and docs would become public claims.
-- **The existing public `div0rce/common`** shows an empty Apache-2.0 project; whether to archive it, rename it or reuse
+- **The existing public repository** shows an empty Apache-2.0 project; whether to archive it, rename it or reuse
   it as the public home is part of that decision.

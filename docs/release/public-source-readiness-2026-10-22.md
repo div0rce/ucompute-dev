@@ -1,6 +1,8 @@
-# Public source readiness: div0rce/common (2026-10-22)
+# Public source readiness: div0rce/ucompute (2026-10-22)
 
-**Scope:** what has to happen before the public repository `div0rce/common` can show this work. This covers the source code only. Binary releases are a separate decision (section 3).
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
+**Scope:** what has to happen before the public repository `div0rce/ucompute` can show this work. This covers the source code only. Binary releases are a separate decision (section 3).
 
 **Inputs:** three read-only audits run on 2026-10-22 against branch `integration/recover-codex-m1` at HEAD `1004b3b`:
 1. Secrets and history
@@ -8,7 +10,7 @@
 3. Personal and sensitive data
 
 This synthesis re-checked the following against the repository:
-- The branch has 58 commits. Four of them are already public on `origin/main`, which is at `1ae8424` and contains only `LICENSE` and `PROJECT_COMMON_AUTONOMOUS_HANDOFF_V2.md`. The other 54 have never been pushed, and every commit is signed (`%G? = G`).
+- The branch has 58 commits. Four of them are already public on `origin/main`, which is at `1ae8424` and contains only `LICENSE` and `PROJECT_UCOMPUTE_AUTONOMOUS_HANDOFF_V2.md`. The other 54 have never been pushed, and every commit is signed (`%G? = G`).
 - The tree has 239 tracked files.
 - `deny.toml` has no `CDLA-Permissive-2.0`.
 - `README.md:76` says "bundled".
@@ -34,7 +36,7 @@ This synthesis re-checked the following against the repository:
 
 | # | Class | Blocker | Where (at 1004b3b) | Fix |
 |---|---|---|---|---|
-| G1 | Governance | Pushing is forbidden until the owner authorizes it in writing. D-020 explicitly excludes "any push of div0rce/common". | `docs/DECISIONS.md` D-008 and D-020, `docs/BLOCKERS.md` B-007, spec section 4 | Owner records a new D-entry with the exact scope of the push (section 5) and updates B-007 to match. |
+| G1 | Governance | Pushing is forbidden until the owner authorizes it in writing. D-020 explicitly excludes "any push of div0rce/ucompute". | `docs/DECISIONS.md` D-008 and D-020, `docs/BLOCKERS.md` B-007, spec section 4 | Owner records a new D-entry with the exact scope of the push (section 5) and updates B-007 to match. |
 | P1 | Privacy, third party | The owner of the second Mac (the M2 Pro). The tree contains that person's macOS username, their home LAN IP, the name of the SSH key file used for their Mac, their name, their machine's name and its real peer id. | Defaults at `scripts/mac-host.sh:10-16`. Everything in `docs/evidence/mesh-physical-2026-10-21.md` and `docs/evidence/mesh-physical-2026-10-21/`, including the packaged-app JSON (their name is in its file name, and their home path is at lines 48, 55 and 92). `docs/PROGRESS.md:9,88`. The commit message of `1004b3b`. | Make the script require environment variables with no defaults. Rename the person and their machine to "Mac B". Replace peer ids with placeholders and paths with `/Users/<user>/`. Rename the packaged-app JSON. Drop both `run*-raw.jsonl.gz` files: they hold about 500 matches inside gzip, out of reach of text replacement. Alternatively regenerate them redacted. |
 | P2 | Privacy and security, third party | The Windows account on the HP laptop: its username, its `.local` hostname and `C:/Users/...` paths. The same document also describes the SSH server, the administrator-trusted key and the open firewall ports on that machine. Together that is a map for targeting it. The dev Mac's public key, which links the two machines, is there too. | `scripts/windows-host.sh:9-13`, `docs/environment/windows-test-host.md:18,62,67,68,84` | Use environment variables with no defaults, and placeholders (`<user>`, `<host>.local`, `<your public key>`). Keep the generic setup steps and drop the facts specific to this host. |
 | P3 | Privacy, owner | The owner's two personal email addresses (which together give their full name and university), plus the live Cloudflare Access policy name, its login method, the protected hosts and a private chat quote | `docs/DECISIONS.md:35` (D-020); related private website details at `docs/VERIFICATION.md:260-266` | Reduce D-020 to its scope ("website infrastructure authorized by the owner on 2026-10-19; details private"). Generalize the VERIFICATION entry the same way. |
@@ -48,7 +50,7 @@ This synthesis re-checked the following against the repository:
 | | | **Home-folder, Codex chat-title and Claude scratchpad paths** (one of these includes a session id). They appear in: <br>• `docs/environment/ENVIRONMENT-Mac-2026-10-14T0848Z.md:159,169,244` <br>• `docs/PROGRESS.md:200` <br>• `docs/evidence/m3-single-host-2026-10-15.md:11,18,95,151` <br>• `docs/design/desktop-ui-2-plan.md:1039` <br>• `docs/design/ui2-research/api-inventory.md:3` <br>• the traceback in `run1-console.txt:11-20` | Generalize the paths. |
 | | | **Hardware identifiers** in the ENVIRONMENT file: the battery id (line 85), the model number (line 40) and a `/var/folders` path (line 91). | Remove them. |
 | | | **LAN and hotspot IPs** where they sit next to names. | Generalize them. |
-| | | **The owner's surname in two test fixtures**: `apps/desktop/src-tauri/src/firewall.rs:237` and `crates/common-network/src/pairing.rs:652`. | Change them after the UI 2.0 workflow finishes, since those folders are in use now. |
+| | | **The owner's surname in two test fixtures**: `apps/desktop/src-tauri/src/firewall.rs:237` and `crates/ucompute-network/src/pairing.rs:652`. | Change them after the UI 2.0 workflow finishes, since those folders are in use now. |
 | H2 | Hygiene, CI | **The first push will turn CI red.** `cargo deny` rejects `webpki-roots` (licence CDLA-Permissive-2.0) under the current `deny.toml` allowlist. | Owner decision (section 5). |
 | | | **The workflow has no `permissions:` block**, and its actions are pinned by tag rather than by SHA. | Add `permissions: contents: read`. |
 | H3 | Accuracy | `README.md:76` calls llama.cpp "the bundled inference engine". It is not bundled: it is pinned (`catalog/backends.json`, b11609) and downloaded on first run, with its licence checked. | Change "bundled" to "downloaded". |
@@ -61,7 +63,7 @@ These items are fine and can stay:
 - Commit author: "nasr" with the GitHub noreply address.
 - The `div0rce` handle.
 - The "Codex (GPT-6)" provenance notes, once their paths are generalized.
-- The fake test secrets in `crates/common-observability` and `crates/common-runtime`.
+- The fake test secrets in `crates/ucompute-observability` and `crates/ucompute-runtime`.
 - The test IPs in code and fixtures.
 - The expired one-time pairing codes.
 - The app-UI screenshots, after cropping the label as in H1.
@@ -71,7 +73,7 @@ These items are fine and can stay:
 
 These four items block publishing a dmg or msi. They do not affect the source push.
 
-1. **No third-party notices ship.** `Common.app` contains only the two binaries, the icon and `Info.plist`, and the JS bundle has had its licence comments stripped.
+1. **No third-party notices ship.** `UCompute.app` contains only the two binaries, the icon and `Info.plist`, and the JS bundle has had its licence comments stripped.
    - About 550 statically linked crates require their licence texts to ship. Three need specific handling:
      - `ring` (Apache-2.0 AND ISC, with BoringSSL code)
      - `webpki-roots` (CDLA-Permissive-2.0)
@@ -115,7 +117,7 @@ The push starts CI: a macOS-14 runner, the pinned fixture download from Hugging 
 
 ## 5. Owner decisions needed
 
-1. **Authorize the push in writing** in `docs/DECISIONS.md`. Spec section 4 and D-008 require this. The authorization should give its scope: one reviewed snapshot commit to `div0rce/common` `main`, and nothing else. Update B-007 to match. Under option A, this record goes into the snapshot.
+1. **Authorize the push in writing** in `docs/DECISIONS.md`. Spec section 4 and D-008 require this. The authorization should give its scope: one reviewed snapshot commit to `div0rce/ucompute` `main`, and nothing else. Update B-007 to match. Under option A, this record goes into the snapshot.
 2. **Choose the method:** A (recommended) or B.
 3. **Third parties: redact, or get their consent.** Redacting needs no contact with either person and can be done now. Keeping either name requires that person's explicit consent first.
 4. **The owner's own data:**

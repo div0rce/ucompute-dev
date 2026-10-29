@@ -1,0 +1,22 @@
+# gitleaks: the default rules, plus four synthetic test fixtures that are not secrets (reviewed 2026-10-24).
+# ucompute-observability redaction tests feed fake sk- keys and a truncated PEM block to redact() (5034fb6);
+# the ucompute-api metrics test uses a canary prompt string named `secret` (ca298bd).
+# Each is allowed only in the commit that introduced it and only as that exact string.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "redaction test fixtures (ucompute-observability)"
+condition = "AND"
+commits = ["5034fb68aef89eb1c3441142861c2047ea2296ab"]
+regexes = [
+  '''^sk-proj-ABCdef123456$''',
+  '''^sk-live-ZZtopSECRET1234567890$''',
+  '''^-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VwBCIEIGx\\n-----END PRIVATE KEY-----\\nafter"''',
+]
+
+[[allowlists]]
+description = "metrics test canary prompt (ucompute-api)"
+condition = "AND"
+commits = ["ca298bd23ef088013a6787cc02a9dc9f4cf7fc4f"]
+regexes = ['''^ZEBRA_SECRET_PROMPT_7731$''']

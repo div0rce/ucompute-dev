@@ -1,21 +1,23 @@
 # M3 SINGLE-HOST evidence run, 2026-10-15
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Every result here is SINGLE-HOST.** Both daemons ran on one Apple M2 MacBook Air (8 GB, macOS 26.2 arm64). This is not two-machine evidence, so it does not satisfy F-03-01, F-03-02 or Gate D (blocker B-002).
 
 **Result: all 8 steps passed. Nothing was retried and no product code was changed.**
 
 ## Setup
 - **Code under test:** HEAD `49f9148` plus 31 uncommitted modified files. The baseline `a146ba1` named in the task is an ancestor of HEAD. The run tests the working tree as it was built.
-- **Build:** `cargo build -p common-cli`. It finished in 9.69 s (debug profile; release builds were not allowed). I copied the binary to `m3-evidence/bin/common` (sha256 `875a345c…0ad2ba1`) so that other agents rebuilding `target/` could not change it mid-run.
-- **Two COMMON_HOMEs:** `m3-evidence/{a,b}`. In each:
-  - `backends` is a symlink to `/Users/nasr/repos/common/.common/backends`.
+- **Build:** `cargo build -p ucompute-cli`. It finished in 9.69 s (debug profile; release builds were not allowed). I copied the binary to `m3-evidence/bin/ucompute` (sha256 `875a345c…0ad2ba1`) so that other agents rebuilding `target/` could not change it mid-run.
+- **Two UCOMPUTE_HOMEs:** `m3-evidence/{a,b}`. In each:
+  - `backends` is a symlink to `/Users/nasr/repos/ucompute/.ucompute/backends`.
   - `models/blobs/sha256-6696…1739` is a hard link to the existing stories15M-q4_0 blob (same APFS volume).
   - The manifest was copied.
   - Each home generated its own identity. Nothing was downloaded.
 - **Daemons:**
-  - A: `COMMON_HOME=$E/a $E/bin/common serve --port 18301 --network --serve-peers --listen-port 18401 -v`
-  - B: `COMMON_HOME=$E/b $E/bin/common serve --port 18302 --network --serve-peers --listen-port 18402 -v`
-  - `E=/private/tmp/claude-501/-Users-nasr-repos-common/a9002575-f6f8-460a-ae76-955170ae1acf/scratchpad/m3-evidence`
+  - A: `UCOMPUTE_HOME=$E/a $E/bin/ucompute serve --port 18301 --network --serve-peers --listen-port 18401 -v`
+  - B: `UCOMPUTE_HOME=$E/b $E/bin/ucompute serve --port 18302 --network --serve-peers --listen-port 18402 -v`
+  - `E=/private/tmp/claude-501/-Users-nasr-repos-ucompute/a9002575-f6f8-460a-ae76-955170ae1acf/scratchpad/m3-evidence`
   - The API listened on 127.0.0.1. The peer endpoint used the product default bind `0.0.0.0` (UDP 18401/18402). With the macOS firewall off, that port was reachable on the LAN at 192.168.1.176 during the run; it is QUIC and only accepts pinned keys.
 - **Driver:** `M3_DIR=$E python3 -I tests/distributed/single_host/m3_evidence.py step1 … step7 | stop`. This is a new file and uses only the Python standard library. It logs every HTTP call (UTC timestamp, an equivalent `curl` line, status, response body, ms) to `$E/raw/<step>.jsonl`.
 - **Peer ids:** A = `89a854ab…f2bf13213a` (89a8-54ab-41e2), B = `f33dfaf7…2ac4b4ce` (f33d-faf7-ec28).
@@ -92,7 +94,7 @@ Before this step, B re-paired with A (join 200) and re-added A to its group. Bot
 ## Step 8: packet capture
 `tcpdump` needs sudo, so I did not run it. Instead:
 
-`COMMON_HOME=/Users/nasr/repos/common/.common COMMON_REQUIRE_FIXTURES=1 cargo test -p common-network --test remote_single_host -- --nocapture`
+`UCOMPUTE_HOME=/Users/nasr/repos/ucompute/.ucompute UCOMPUTE_REQUIRE_FIXTURES=1 cargo test -p ucompute-network --test remote_single_host -- --nocapture`
 
 Exit 0. Verbatim output:
 ```
@@ -120,7 +122,7 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 This is an in-process UDP relay capture, not a kernel packet capture. **PASS**
 
 ## Daemon RSS, MB (SINGLE-HOST)
-| Point | A `common` | A `llama-server` | B `common` |
+| Point | A `ucompute` | A `llama-server` | B `ucompute` |
 |---|---|---|---|
 | After start, idle | 18.2 | — | 18.0 |
 | After step 4 (model loaded, 3 remote runs) | 16.4 | 93.5 | 15.0 |
@@ -138,8 +140,8 @@ This is an in-process UDP relay capture, not a kernel packet capture. **PASS**
 3. **Two QUIC connections per pair.** Both sync loops dial each other, so there is one inbound and one outbound connection (B's audit: `peer_disconnected {connections:2}`). It works, but the duplicate costs keep-alive traffic and an extra `serve_peer` task.
 4. **Denied requests are not audited.** A request refused by `policy_denied` writes no audit entry on B. This matches the rule that only off-device actions are audited; noted for F-06-10 reviewers.
 5. **Cold remote TTFT is engine startup.** The 13.4 s is the engine starting on A (`load_ms=12624`, first Metal init). It is not transport cost: reload after restart took 222 ms, and warm TTFT is about 4–5 ms.
-6. **Odd engine log line.** It reads `offloaded=7 total=6`, meaning more layers offloaded than exist. This is a cosmetic counting issue in common-runtime and outside this task.
-7. **Leftover engine from the desktop app.** Before the run, an orphaned `llama-server` (pid 23456, ppid 1, running 19 h, qwen2.5-0.5b) from the desktop app's data directory `~/Library/Application Support/Common` was holding memory. I left it alone. The desktop app's orphan reaper should stop it on its next start.
+6. **Odd engine log line.** It reads `offloaded=7 total=6`, meaning more layers offloaded than exist. This is a cosmetic counting issue in ucompute-runtime and outside this task.
+7. **Leftover engine from the desktop app.** Before the run, an orphaned `llama-server` (pid 23456, ppid 1, running 19 h, qwen2.5-0.5b) from the desktop app's data directory `~/Library/Application Support/UCompute` was holding memory. I left it alone. The desktop app's orphan reaper should stop it on its next start.
 
 ## Not done or unverifiable here
 - Anything that needs two physical machines: real-LAN mDNS, real network latency, Gate D, F-03-01 and F-03-02 (B-002).
@@ -148,6 +150,6 @@ This is an in-process UDP relay capture, not a kernel packet capture. **PASS**
 - No signature changes, no new dependencies, no git operations.
 
 
-- The driver script is the only repo change: `/Users/nasr/repos/common/tests/distributed/single_host/m3_evidence.py` (untracked, new directory).
+- The driver script is the only repo change: `/Users/nasr/repos/ucompute/tests/distributed/single_host/m3_evidence.py` (untracked, new directory).
 - Raw outputs are outside the repo, under `$E/raw/`: `00-build.txt`, `00-git-state.txt`, `step1.jsonl` … `step7.jsonl`, `step5-b-audit-check.txt`, `step6-audit-tail.txt`, `stop.jsonl`, `daemon-a.log`, `daemon-b.log`, `08-cargo-test.txt`.
 - Node state (identity, peers, config, audit, engine logs) is in `$E/a` and `$E/b`; peer ids and timestamps are in `$E/state.json`.

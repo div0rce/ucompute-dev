@@ -1,7 +1,9 @@
 # 24 h local soak on Linux (sentinel), 2026-10-24/25 — SINGLE-HOST: FAIL (1 untyped error in about 556,000 burst requests)
 
-`tests/soak/run_soak_linux.sh start 24` on sentinel (Ubuntu 26.04 x86_64, i9-9900K) with `target/release/common`
-built at 0b0c1a4 (the round 6 and 7 runtime), its own home `~/.common-soak` (engine and models linked from the
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
+`tests/soak/run_soak_linux.sh start 24` on sentinel (Ubuntu 26.04 x86_64, i9-9900K) with `target/release/ucompute`
+built at 0b0c1a4 (the round 6 and 7 runtime), its own home `~/.ucompute-soak` (engine and models linked from the
 acceptance home), port 18500, no peer endpoint; `tests/soak/local_soak.py` with seed 20261023, an engine SIGKILL
 every 50 cycles and 40-request overload bursts. 08:38 UTC 2026-10-24 to 08:37 UTC 2026-10-25, collected on 2026-10-29
 (sentinel was off the network in between). Raw samples: `linux-soak-2026-10-24/soak.jsonl.gz` (1,431 one-minute rows).

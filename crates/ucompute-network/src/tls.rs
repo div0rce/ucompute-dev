@@ -513,16 +513,16 @@ mod tests {
         assert_eq!(map_conn_error(&e).code, ErrorCode::PeerUnauthorized, "{e:?}");
     }
 
-    /// D-028: nothing but the current ids is accepted. A peer offering only a former id (`common/1`
-    /// for the workload endpoint, `common-pair/1` for the pairing one) or another endpoint's id is
-    /// refused inside the handshake.
+    /// Nothing but the current ids is accepted. A peer offering only another id (an older version, a
+    /// foreign `other/1` or `other-pair/1`) or another endpoint's id is refused inside the handshake.
     #[tokio::test]
     async fn wrong_alpn_fails() {
         for (server_alpn, offered) in [
             (ALPN_WORKLOAD, &b"ucompute/0"[..]),
-            (ALPN_WORKLOAD, b"common/1"),
+            (ALPN_WORKLOAD, b"other/1"),
             (ALPN_WORKLOAD, ALPN_PAIRING),
-            (ALPN_PAIRING, b"common-pair/1"),
+            (ALPN_PAIRING, b"other-pair/1"),
+            (ALPN_PAIRING, b"ucompute-pair/0"),
             (ALPN_PAIRING, ALPN_WORKLOAD),
         ] {
             let (s, c) = (key(), key());

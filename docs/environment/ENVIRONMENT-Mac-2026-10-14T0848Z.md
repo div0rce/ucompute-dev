@@ -1,5 +1,7 @@
 # Environment — Mac
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 - Captured (UTC): 2026-10-14T0848Z
 - Script: scripts/inspect-env.sh (read-only)
 - OS kernel: Darwin 25.2.0 arm64
@@ -88,7 +90,7 @@ Now drawing from 'AC Power'
 
 ## Metal device (MTLDevice)
 
-**MTLDevice probe (swift)** — `swift /var/folders/kd/y0p61xc13zn_kwdpg38kw9h00000gn/T/common_metal.ENnnU8coyF.swift`
+**MTLDevice probe (swift)** — `swift /var/folders/kd/y0p61xc13zn_kwdpg38kw9h00000gn/T/ucompute_metal.ENnnU8coyF.swift`
 
 ```
 name: Apple M2
@@ -166,7 +168,7 @@ stable-aarch64-apple-darwin (default)
 active toolchain
 ----------------
 name: 1.98.0-aarch64-apple-darwin
-active because: overridden by '/Users/nasr/repos/common/rust-toolchain.toml'
+active because: overridden by '/Users/nasr/repos/ucompute/rust-toolchain.toml'
 installed targets:
   aarch64-apple-darwin
 ```
@@ -241,7 +243,7 @@ Default route interface: `en0`
 ## Existing model files
 
 ```
-    19077344  /Users/nasr/Documents/Codex/2026-10-14/referenced-chatgpt-conversation-this-is-an/outputs/common/models/stories15M-q4_0.gguf
+    19077344  /Users/nasr/Documents/Codex/2026-10-14/referenced-chatgpt-conversation-this-is-an/outputs/ucompute/models/stories15M-q4_0.gguf
 ```
 
 | Known model store | Size |

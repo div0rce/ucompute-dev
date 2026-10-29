@@ -1,5 +1,7 @@
 # Mac and Linux on home Wi-Fi: the fixed builds on two machines (2026-10-23, 18:31-18:53 UTC)
 
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Two-machine evidence, daemon API run (not an app UI run).** The first physical run of the code of fix rounds 1-5.
 The drivers in `tests/distributed/two_machine/` drive the two daemons' loopback APIs (the Linux one through an SSH
 tunnel); no window is driven. The owner's home Wi-Fi carries mDNS, so discovery is checked, not N/A.
@@ -7,11 +9,11 @@ tunnel); no window is driven. The owner's home Wi-Fi carries mDNS, so discovery 
 | | A | B |
 |---|---|---|
 | Machine | `sentinel`: Ubuntu 26.04 LTS x86_64, Intel Core i9-9900K, 14 GiB, Wi-Fi, 192.168.1.167 (`docs/environment/linux-test-host.md`) | MacBook Air, Apple M2, 8 GB, macOS 26.2, Wi-Fi, 192.168.1.176 |
-| Software | `common serve --network --serve-peers` built on sentinel from ce54da1 (mesh code identical to ffe1a47; ce54da1 adds the Linux engine pin, D-024), `COMMON_HOME=~/.common-acceptance` (its own identity `edb3c91c…`) | the installed packaged app from ffe1a47 (daemon `afe3ea22…`, verified ALL PASS that day, `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json`) |
+| Software | `ucompute serve --network --serve-peers` built on sentinel from ce54da1 (mesh code identical to ffe1a47; ce54da1 adds the Linux engine pin, D-024), `UCOMPUTE_HOME=~/.ucompute-acceptance` (its own identity `edb3c91c…`) | the installed packaged app from ffe1a47 (daemon `afe3ea22…`, verified ALL PASS that day, `docs/evidence/desktop-packaged-mac-m2-ffe1a47.json`) |
 | Engine | llama.cpp b11609 Ubuntu CPU build, provisioned and hash-verified by the daemon on first start | llama.cpp b11609 macOS arm64 (Metal) |
 
 Command: `LINUX_HOST=192.168.1.167 LINUX_USER=div0rce OUT=<dir> CROSS_HOLD=1 tests/distributed/two_machine/run_mac_linux.sh`.
-CROSS_HOLD starts two throwaway daemons C and D on the Mac (the installed app's `common` binary, fresh homes), so the
+CROSS_HOLD starts two throwaway daemons C and D on the Mac (the installed app's `ucompute` binary, fresh homes), so the
 cross-hold step involves A on Linux and B, C and D on the one Mac. Both sides were saved before and put back after each
 run (`state.py`, PASS every time). Raw calls, step results and runner logs: `mesh-physical-2026-10-23-linux/run-*/`.
 

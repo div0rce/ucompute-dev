@@ -130,7 +130,7 @@ def main():
         for n, v, lic in bad:
             print(f"licence not allowed by deny.toml: {n} {v}: {lic or '(none declared)'}", file=sys.stderr)
         return 1
-    texts, lines = {}, ["Third-party software in this build of UCompute (formerly Common).", ""]
+    texts, lines = {}, ["Third-party software in this build of UCompute.", ""]
     for n, v, lic, url, files in entries:
         refs = []
         for f in files:

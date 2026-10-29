@@ -1,5 +1,7 @@
 # Research-Frontier Feasibility Reviews
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 > Imported from the M0 Research Phase Report (2026-10-13). Research baseline, not independently verified. Markers: ✅ primary-confirmed, ⚠️ secondary/partial, `unknown/unverified`. Determinations are **provisional**: per spec section 21, each requires a literature review, an executed experimental protocol, and an honest feasibility determination. Only the literature step has been done here, partially.
 
 ## (a) F-06-12 — Cryptographic verification of arbitrary inference
@@ -44,7 +46,7 @@ No GPU CC mode on consumer GeForce or Apple hardware as far as the research foun
 Feasible only as an enterprise-federation backend on rented H100/H200/Blackwell CC instances. Not feasible for consumer LAN pooling.
 
 ### Protocol
-Common worker in a TDX CVM with an H100 in CC mode; TTFT and decode with CC on vs off at batch 1/8/32; verify attestation end to end. **Blocked:** no such hardware; any rental requires explicit cost approval (spec section 4).
+UCompute worker in a TDX CVM with an H100 in CC mode; TTFT and decode with CC on vs off at batch 1/8/32; verify attestation end to end. **Blocked:** no such hardware; any rental requires explicit cost approval (spec section 4).
 
 ## (c) Activation and prompt privacy in pipeline-parallel inference
 

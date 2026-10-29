@@ -1,7 +1,9 @@
 # Second 24 h local soak on Linux (sentinel), 2026-10-29/30 — SINGLE-HOST: RUNNING, interference documented
 
-Same build and setup as `linux-soak-2026-10-24.md` (`target/release/common` at 0b0c1a4 in `~/src/common`, home
-`~/.common-soak`, port 18500, seed 20261023, a kill every 50 cycles, 40-request bursts), with the driver recording every
+> Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
+Same build and setup as `linux-soak-2026-10-24.md` (`target/release/ucompute` at 0b0c1a4 in `~/src/ucompute`, home
+`~/.ucompute-soak`, port 18500, seed 20261023, a kill every 50 cycles, 40-request bursts), with the driver recording every
 untyped result's detail (c26c0a1). Started 07:42:38 UTC 2026-10-29; ends about 07:43 UTC 2026-10-30. Bounds unchanged
 (`tests/soak/local_soak.py` `verdict`): zero untyped errors; every golden completion golden; every engine kill golden
 again within 30 s; no orphaned engine; RSS growth after the first hour <= 64 MiB; open-files growth <= 16.

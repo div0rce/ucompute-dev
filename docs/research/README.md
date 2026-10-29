@@ -1,10 +1,12 @@
 # M0 Research Baseline — Provenance
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 **Status of this material: research baseline, not independently verified truth.**
 
 | Field | Value |
 |---|---|
-| Origin | "Common — M0 Research Phase Report", produced 2026-10-13 by a Claude research agent in the claude.ai chat that received the handoff spec |
+| Origin | "UCompute — M0 Research Phase Report", produced 2026-10-13 by a Claude research agent in the claude.ai chat that received the handoff spec |
 | Access date for all cited sources | 2026-10-13 |
 | Imported into repo | 2026-10-14 |
 | Re-verification performed on import | None. Content was transcribed and reorganized only. |
@@ -15,7 +17,7 @@
 - ⚠️ secondary-source or partially confirmed
 - `unknown/unverified` no primary evidence obtained
 
-All benchmark figures are as published by their authors. **None were replicated by Common.** Nothing in these files claims Common is superior to any project (spec section 5).
+All benchmark figures are as published by their authors. **None were replicated by UCompute.** Nothing in these files claims UCompute is superior to any project (spec section 5).
 
 ## Files
 

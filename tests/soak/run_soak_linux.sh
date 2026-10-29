@@ -4,8 +4,6 @@
 # Mac sleeping does not end them. (Transient systemd user units did not survive: with lingering off and no desktop
 # login, the user manager stops them when the last SSH session closes, 2026-10-29.) The daemon is `target/release/ucompute` in ~/src/ucompute (sync and build it first), with its own home
 # ~/.ucompute-soak (engine and models linked from ~/.ucompute-acceptance), port 18500 and no peer endpoint.
-# The soak started on 2026-10-29 runs a pre-rename build (~/src/common, ~/.common-soak): its collect step
-# needs this script as of 37cd454 saved beside this one (only the folder it removes differs).
 #
 #   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh start [HOURS [local_soak.py args...]]   # default 24
 #   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh status

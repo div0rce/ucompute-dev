@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn revocation_requires_issuer_and_target_in_a_common_group() {
+    fn revocation_requires_issuer_and_target_in_a_shared_group() {
         let (_t, p) = paths();
         let s = PeerStore::open(&p).unwrap();
         let a = DeviceIdentity::generate().unwrap(); // group member

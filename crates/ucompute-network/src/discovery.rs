@@ -765,7 +765,7 @@ mod tests {
         }
     }
 
-    /// D-028: one service type, the renamed one; the former `_common._udp` is neither advertised nor browsed.
+    /// One service type, `_ucompute._udp`; no other is advertised or browsed.
     #[test]
     fn only_the_ucompute_service_type() {
         assert_eq!(SERVICE_TYPE, "_ucompute._udp.local.");

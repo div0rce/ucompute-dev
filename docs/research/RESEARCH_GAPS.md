@@ -1,5 +1,7 @@
 # Research Gaps and Testable Differentiation Hypotheses
 
+Names: this record uses the current names (D-030). What it describes ran under the former name; the original text is in git history (commit cab8a09 and earlier).
+
 > Imported from the M0 Research Phase Report (2026-10-13). Research baseline, not independently verified. Markers: ✅ primary-confirmed, ⚠️ secondary/partial, `unknown/unverified`. No hypothesis below has been tested. Do not assert any of them as a result until its benchmark has run on matched hardware (spec sections 5, 10).
 
 ## 2.1 When does cross-device partitioning help?
@@ -34,7 +36,7 @@ Scheduler consequence (feeds F-04-03, F-04-04, F-03-11): default to local; distr
 ### G1 — Unified UX + genuine trusted-LAN pooling + authenticated pairing and encryption
 - **Gap:** Exo has UX and partitioning but reportedly binds an unauthenticated API to all interfaces ⚠️ (secondary; verify). llama.cpp RPC has no auth or encryption. prima.cpp has no UX or security layer.
 - **H1:** An authenticated, encrypted (QUIC/TLS 1.3 or Noise) activation channel adds ≤5% to decode TPOT vs plaintext TCP for the same 2-node layer split on 1 GbE.
-- **Benchmark:** same two machines, same GGUF (e.g., Llama-3.1-8B Q4_K_M), same split point; llama.cpp RPC (plaintext) vs Common (encrypted). Report TTFT, prefill tok/s, decode tok/s, bytes/token. 10 runs, 95% CIs.
+- **Benchmark:** same two machines, same GGUF (e.g., Llama-3.1-8B Q4_K_M), same split point; llama.cpp RPC (plaintext) vs UCompute (encrypted). Report TTFT, prefill tok/s, decode tok/s, bytes/token. 10 runs, 95% CIs.
 - **Falsified if:** overhead > 5%.
 - **Also measure:** time-to-first-successful-pooled-token for novice users (task study, n ≥ 10) vs Exo and llama.cpp RPC.
 - Registry: F-02-03, F-03-01, F-10-05.

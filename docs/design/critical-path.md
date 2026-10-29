@@ -34,7 +34,9 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
   confirmed `Power save: off`, signal -58 dBm, link 351/390 Mbit/s). RTT from the Mac 6/23/103 ms
   (min/avg/max, sentinel under load); P1's preflight re-measures it with both hosts quiet, and an Ethernet cable
   remains the fix if the jitter stays.
-- Windows laptop and Kyle's Mac: offline.
+- Windows laptop: not available for now (owner, 2026-10-29: only sentinel and this MacBook). Its D-029/D-030 migration stopped part-way when it went off the network: the inventory (`C:\Users\jessg\ucompute-migration-2026-10-29\inventory.json`) is written; its app data and app logs are moved into `former-data\`; the old app's uninstaller ran. Not confirmed: the test tasks' re-creation under the new name, the move of the remaining folders (old CLI, test scripts, build tree, verifier folders) and the verification. When it is back, first install the keep-awake task (`scripts\windows-keep-awake.ps1 -Install`, the owner rule of 2026-10-29; not yet run on Windows), then read `C:\Users\jessg\laptop-migrate.log`, rerun the script (`laptop-migrate.ps1`, idempotent for areas already moved) and record the result; its three firewall rules under the former name are the owner's to remove. Milestone D's two-machine run waits for the laptop.
+- Sentinel holds a sleep and idle block inhibitor (`ucompute-keep-awake` user service, lingering on, 2026-10-29), which also stops the login screen's default 20-minute idle suspend after the desktop session ends. After a reboot with nobody logged in locally, polkit grants only the idle part until the owner logs in (the service retries each minute); masking sleep system-wide needs the owner (`sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`).
+- Kyle's Mac: offline.
 - Sentinel's local desktop: the owner's GNOME session (seat0, Wayland, Firefox open) has been logged in since before
   the second soak; `who` does not list it. P1's preflight requires no other session (OD-10). The owner asked
   engineering on 2026-10-29 to end it itself: right before P1, after the soak has ended, find div0rce's seat0 session
