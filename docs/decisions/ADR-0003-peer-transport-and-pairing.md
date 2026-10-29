@@ -354,3 +354,16 @@ Error frames carry the code. For engine and filesystem codes the message is gene
 - The revocation audience map is in memory (9.9).
 - Hold and refusal residuals from the 2026-10-22 security checks were closed in 780c2b9 (9.3, 9.8, 9.9). Left, LOW: a peer-sourced revocation closes connections only on the connection's Node during a Sharing restart (9.9); a device revoked or unpaired by its peer is redialled by `supervise` with backoff capped at 30 s (9.8; only tests call `supervise`; the daemon's sync loop redials every pinned device with backoff up to 300 s, as before); a genuinely newer-major device that closes before its Hello reads `peer_unauthorized` with an update hint, not `protocol_incompatible` (9.3).
 - The QR carries one address; a multi-homed host may pick the wrong LAN.
+
+### 9.16 Frozen protocol identifiers (D-028, D-029, 2026-10-29)
+The rename replaced every Common identifier with no compatibility layer (D-028): a Common build and a UCompute build
+share no ALPN and refuse each other in the TLS handshake. The sections above keep the names they were written with;
+the code now uses `ucompute/1` and `ucompute-pair/1` (ALPNs), `ucompute-pair:v1:` (pairing payload),
+`ucompute-pair/1 confirm` (pairing key-export label), `ucompute/1 capabilities\0` and `ucompute-revocation/1`
+(signature contexts, still distinct from each other and from the mDNS advert's `v=1` canonical form),
+`_ucompute._udp` (mDNS) and `ucompute.v1` (protobuf package; field numbers and wire bytes unchanged, the Hello and
+Capabilities field `common_version` is now `ucompute_version`). These are frozen interface names (D-029): they change
+only with a protocol major version recorded here, never with the product's name. Versioning between UCompute builds
+is unchanged: major in the ALPN, `min(minor)` negotiation, typed `protocol_incompatible`. Tests:
+`crates/ucompute-network/src/tls.rs` refuses `common/1`, `common-pair/1` and `ucompute/0`;
+`crates/ucompute-network/src/pairing.rs` refuses `common-pair:v1:` and `ucompute-pair:v2:` payloads by name.
