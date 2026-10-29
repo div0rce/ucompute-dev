@@ -22,7 +22,13 @@ public static extern uint SetThreadExecutionState(uint esFlags);
 '@
 $ES_CONTINUOUS = [uint32]"0x80000000"
 $ES_SYSTEM_REQUIRED = [uint32]"0x00000001"
-[void][UCompute.Power]::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
+# On a Modern Standby (S0 low power idle) laptop the display turning off enters standby whatever the system
+# request says, so the -Forever hold also keeps the display on (ES_DISPLAY_REQUIRED). The screen stays lit;
+# Win+L still locks it.
+$ES_DISPLAY_REQUIRED = [uint32]"0x00000002"
+$flags = $ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED
+if ($Forever) { $flags = $flags -bor $ES_DISPLAY_REQUIRED }
+[void][UCompute.Power]::SetThreadExecutionState($flags)
 try {
     if ($Forever) { [System.Threading.Thread]::Sleep([System.Threading.Timeout]::Infinite) }
     # /s: cmd strips only the outer quote pair we add, so a command with several quoted paths runs as written.
