@@ -1,9 +1,11 @@
-# Gate A (build) + Gate B (inference) on real fixtures. Runs once the owner authorizes pushing (B-007).
+# Gate A (build) + Gate B (inference). Pull requests and pushes to main run on Linux only: macOS minutes count 10x
+# against a private repository's free quota, so the macOS job runs only when dispatched by hand (D-028).
 name: ci
 on:
   push:
-    branches: [main, "integration/**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["macos-14","ubuntu-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -60,3 +62,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
+
+  python:
+    name: offline Python suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python3 -m unittest discover -s tests/distributed/two_machine
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: python3 -m unittest discover -s tests/soak
+
+  secrets:
+    name: secrets scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+

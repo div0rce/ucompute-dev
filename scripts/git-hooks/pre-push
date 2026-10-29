@@ -1,0 +1,21 @@
+#!/bin/sh
+# D-028: main changes only through pull requests; no force-push; nothing is pushed to the public repository.
+# Enabled per clone with: git config core.hooksPath scripts/git-hooks
+url="$2"
+case "$url" in
+  *div0rce/ucompute.git|*div0rce/ucompute|*div0rce/common.git|*div0rce/common)
+    echo "pre-push: $url is the public repository; publishing there needs its own owner decision" >&2; exit 1 ;;
+esac
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ] && [ "${UCOMPUTE_SEED_PUSH:-}" != 1 ]; then
+    echo "pre-push: main changes only through pull requests (push a feature branch instead)" >&2; exit 1
+  fi
+  if [ "$local_sha" = "$zero" ]; then
+    echo "pre-push: deleting $remote_ref is not allowed from here" >&2; exit 1
+  fi
+  if [ "$remote_sha" != "$zero" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    echo "pre-push: $remote_ref would be rewritten (not a fast-forward); history is never rewritten" >&2; exit 1
+  fi
+done
+exit 0

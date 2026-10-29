@@ -35,7 +35,7 @@ cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 1. Build, lint, test. Record commands and results in `docs/VERIFICATION.md`.
 2. Update ledger rows you touched in `docs/REQUIREMENTS.csv`; run `python3 scripts/gen_registry.py` then `python3 scripts/validate_registry.py`.
 3. Append a dated entry to `docs/PROGRESS.md`: implemented / verified / blocked / infeasible counts, evidence links, limitations, exact next commands.
-4. Commit locally if tests pass. **Never push, never create a remote**, unless the owner explicitly authorizes it in writing in this repo (`docs/DECISIONS.md`).
+4. Commit if tests pass, on a feature branch; push the branch to the private `origin` (`div0rce/ucompute-dev`) and open a pull request (D-028). `main` changes only through pull requests with CI; never force-push or rewrite history (`scripts/git-hooks/pre-push`, enabled with `git config core.hooksPath scripts/git-hooks`). Never push to the public repository (`div0rce/ucompute`): publication is a separate owner decision, and so is every downloadable release.
 
 ## Status rules (enforced by `scripts/validate_registry.py`)
 - Allowed: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `IMPLEMENTED_UNVERIFIED`, `VERIFIED`, `INFEASIBLE_WITH_EVIDENCE`.

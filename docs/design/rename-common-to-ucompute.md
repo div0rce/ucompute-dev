@@ -1,4 +1,12 @@
-# Rename: Common → UCompute in code, files, paths and repositories (D-027)
+# Rename: Common → UCompute in code, files, paths and repositories (D-027, D-028)
+
+**D-028 (owner, 2026-10-29) supersedes the transition column below:** there is no compatibility layer. No old protocol
+names, variables, headers or folder migration are kept; every device is reinstalled with renamed builds and paired
+again once. Every current file stops saying "common" as a name, including test helper modules (`tests/common/` becomes
+`tests/support/`) and the fixture folder (`.common/` becomes `.ucompute/`). GitHub: public `div0rce/ucompute` (the
+renamed `div0rce/common`, nothing new pushed), private `div0rce/ucompute-dev` (origin). The local directory moves to
+`/Users/nasr/repos/ucompute` without a symlink, last. The rest of this plan (what changes, what stays historical,
+the order) still applies.
 
 D-021 kept code identifiers as `common` until after physical acceptance. On 2026-10-29 the owner asked to "complete the
 transition from common --> ucompute with the repos and file name and path and all". This plan does it without
