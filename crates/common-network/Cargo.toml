@@ -36,3 +36,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# SIGSTOP/SIGCONT for a real hung stage, and pid liveness, in tests/rpc_single_host.rs.
+libc = { workspace = true }

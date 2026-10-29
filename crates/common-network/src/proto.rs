@@ -2,7 +2,7 @@
 //! Mirrors `proto/common/v1/control.proto`; hand-maintained prost structs (no protoc at build time).
 //! Unknown fields and unknown `oneof` variants are skipped by prost decoding (F-08-10), see
 //! `unknown_field_tolerated` and `unknown_oneof_variant_tolerated`.
-use crate::MAX_CONTROL_FRAME;
+use crate::{MAX_CONTROL_FRAME, MAX_RPC_FRAME};
 use common_core::{CommonError, ErrorCode, Result};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -117,9 +117,58 @@ pub struct RemoteChunk {
     pub done: bool,
 }
 
+/// Minor 2 (WP-04, ADR-0005 D4): the first frame of a new bidirectional stream, from the head H
+/// to the stage host R, asking R to host blocks `[layer_start, layer_end)` of `n_layer` in one
+/// `ggml-rpc-server`. The stream stays open for the session's life; its FIN or reset (or the
+/// connection's loss) ends the session, so there is no close message.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RpcSessionOpen {
+    /// 16 random bytes chosen by H; names the session in `RpcTunnelOpen`.
+    #[prost(bytes = "vec", tag = "1")]
+    pub session_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub model_sha256: String,
+    /// The pinned llama.cpp release, e.g. "b11609"; R refuses any other.
+    #[prost(string, tag = "3")]
+    pub engine_release: String,
+    #[prost(uint32, tag = "4")]
+    pub layer_start: u32,
+    #[prost(uint32, tag = "5")]
+    pub layer_end: u32,
+    #[prost(uint32, tag = "6")]
+    pub n_layer: u32,
+    /// H's estimate of the bytes R will hold.
+    #[prost(uint64, tag = "7")]
+    pub est_bytes: u64,
+    #[prost(uint32, tag = "8")]
+    pub ttl_s: u32,
+}
+
+/// R's answer on the session stream; a refusal is an `ErrorMsg` instead.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RpcSessionAccept {
+    #[prost(bytes = "vec", tag = "1")]
+    pub session_id: Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub granted_bytes: u64,
+    #[prost(uint32, tag = "3")]
+    pub threads: u32,
+    /// The ggml device R's stage runs on, e.g. "CPU".
+    #[prost(string, tag = "4")]
+    pub device: String,
+}
+
+/// The first frame of a tunnel stream: one TCP connection of H's engine to its bridge. Every
+/// byte after it is raw ggml RPC, both ways; TCP FIN maps to stream FIN, TCP RST to reset.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RpcTunnelOpen {
+    #[prost(bytes = "vec", tag = "1")]
+    pub session_id: Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct ControlMessage {
-    #[prost(oneof = "control_message::Body", tags = "1, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "control_message::Body", tags = "1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
     pub body: Option<control_message::Body>,
 }
 pub mod control_message {
@@ -143,6 +192,15 @@ pub mod control_message {
         RemoteChunk(super::RemoteChunk),
         #[prost(message, tag = "8")]
         Cancel(super::Cancel),
+        /// Minor 2. Sent only when the negotiated minor is at least [`crate::RPC_SESSION_MINOR`]:
+        /// a minor-1 build decodes these as an unknown variant (no body) and refuses the stream
+        /// with "expected RemoteRequest".
+        #[prost(message, tag = "10")]
+        RpcSessionOpen(super::RpcSessionOpen),
+        #[prost(message, tag = "11")]
+        RpcSessionAccept(super::RpcSessionAccept),
+        #[prost(message, tag = "12")]
+        RpcTunnelOpen(super::RpcTunnelOpen),
     }
 }
 #[derive(Clone, PartialEq, prost::Message)]
@@ -154,6 +212,21 @@ pub struct Cancel {
 impl From<control_message::Body> for ControlMessage {
     fn from(body: control_message::Body) -> Self {
         ControlMessage { body: Some(body) }
+    }
+}
+
+/// The RPC session and tunnel frames (minor 2) are small: a receiver refuses one whose body is
+/// over [`MAX_RPC_FRAME`] with `FrameTooLarge`, whatever bound the stream's first frame was read
+/// under (`MAX_CONTROL_FRAME`, before the body is known). Other bodies pass.
+pub fn check_rpc_frame(msg: &ControlMessage) -> Result<()> {
+    use control_message::Body;
+    let rpc = matches!(
+        msg.body,
+        Some(Body::RpcSessionOpen(_) | Body::RpcSessionAccept(_) | Body::RpcTunnelOpen(_))
+    );
+    match msg.encoded_len() {
+        len if rpc && len > MAX_RPC_FRAME => Err(too_large(len, MAX_RPC_FRAME)),
+        _ => Ok(()),
     }
 }
 
@@ -293,6 +366,136 @@ mod tests {
             request_id: "r1".into(),
         }))
         .await;
+        round_trip(Body::RpcSessionOpen(max_session_open())).await;
+        round_trip(Body::RpcSessionOpen(RpcSessionOpen::default())).await;
+        round_trip(Body::RpcSessionAccept(RpcSessionAccept {
+            session_id: vec![0x5A; 16],
+            granted_bytes: 1 << 33,
+            threads: 6,
+            device: "CPU".into(),
+        }))
+        .await;
+        round_trip(Body::RpcTunnelOpen(RpcTunnelOpen {
+            session_id: vec![0x5A; 16],
+        }))
+        .await;
+    }
+
+    /// The largest `RpcSessionOpen` a head sends: every number at its maximum.
+    fn max_session_open() -> RpcSessionOpen {
+        RpcSessionOpen {
+            session_id: vec![0x5A; 16],
+            model_sha256: "f".repeat(64),
+            engine_release: "b11609".into(),
+            layer_start: u32::MAX,
+            layer_end: u32::MAX,
+            n_layer: u32::MAX,
+            est_bytes: u64::MAX,
+            ttl_s: u32::MAX,
+        }
+    }
+
+    #[test]
+    fn tunnel_open_frame_over_1kib_is_frame_too_large() {
+        let tunnel = |n: usize| ControlMessage::from(Body::RpcTunnelOpen(RpcTunnelOpen { session_id: vec![0; n] }));
+        // The largest body that fits passes, one byte more is refused.
+        let fits = (0..MAX_RPC_FRAME)
+            .rev()
+            .map(tunnel)
+            .find(|m| m.encoded_len() == MAX_RPC_FRAME)
+            .unwrap();
+        check_rpc_frame(&fits).unwrap();
+        let session_id = match fits.body {
+            Some(Body::RpcTunnelOpen(t)) => t.session_id,
+            _ => unreachable!(),
+        };
+        let over = tunnel(session_id.len() + 1);
+        assert_eq!(over.encoded_len(), MAX_RPC_FRAME + 1);
+        assert_eq!(check_rpc_frame(&over).unwrap_err().code, ErrorCode::FrameTooLarge);
+        // Read under the control-frame bound (the body is unknown before it is read), it decodes.
+        assert!(over.encoded_len() < MAX_CONTROL_FRAME);
+        let over_accept = ControlMessage::from(Body::RpcSessionAccept(RpcSessionAccept {
+            device: "x".repeat(MAX_RPC_FRAME),
+            ..Default::default()
+        }));
+        assert_eq!(
+            check_rpc_frame(&over_accept).unwrap_err().code,
+            ErrorCode::FrameTooLarge
+        );
+        let mut over_open = max_session_open();
+        over_open.engine_release = "x".repeat(MAX_RPC_FRAME);
+        let over_open = ControlMessage::from(Body::RpcSessionOpen(over_open));
+        assert_eq!(check_rpc_frame(&over_open).unwrap_err().code, ErrorCode::FrameTooLarge);
+        // Every legitimate frame is far below the bound.
+        let open = ControlMessage::from(Body::RpcSessionOpen(max_session_open()));
+        assert!(open.encoded_len() < 160, "{}", open.encoded_len());
+        check_rpc_frame(&open).unwrap();
+        check_rpc_frame(&tunnel(16)).unwrap();
+        // Only the RPC bodies are bound: a 2 KiB Mode B chunk passes.
+        let chunk = ControlMessage::from(Body::RemoteChunk(RemoteChunk {
+            event_json: "y".repeat(2 * MAX_RPC_FRAME),
+            ..Default::default()
+        }));
+        check_rpc_frame(&chunk).unwrap();
+    }
+
+    /// The ControlMessage of a minor-1 build (tags 1 and 3..=9; a oneof is plain optional fields
+    /// on the wire), to show what a deployed minor-1 peer decodes.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct Minor1Control {
+        #[prost(message, optional, tag = "1")]
+        hello: Option<Hello>,
+        #[prost(message, optional, tag = "3")]
+        status: Option<Status>,
+        #[prost(message, optional, tag = "4")]
+        error: Option<ErrorMsg>,
+        #[prost(message, optional, tag = "5")]
+        revocation: Option<RevocationMsg>,
+        #[prost(message, optional, tag = "6")]
+        remote_request: Option<RemoteRequest>,
+        #[prost(message, optional, tag = "7")]
+        remote_chunk: Option<RemoteChunk>,
+        #[prost(message, optional, tag = "8")]
+        cancel: Option<Cancel>,
+        #[prost(message, optional, tag = "9")]
+        capabilities: Option<SignedCapabilities>,
+    }
+
+    /// A minor-1 peer that receives a minor-2 RPC frame decodes no body (so `handle_stream`
+    /// refuses it with "expected RemoteRequest", ADR-0005 D4), and minor 2 kept every minor-1 tag.
+    #[test]
+    fn minor_1_peer_sees_rpc_frames_as_unknown() {
+        for body in [
+            Body::RpcSessionOpen(max_session_open()),
+            Body::RpcSessionAccept(RpcSessionAccept::default()),
+            Body::RpcTunnelOpen(RpcTunnelOpen {
+                session_id: vec![1; 16],
+            }),
+        ] {
+            let bytes = ControlMessage::from(body).encode_to_vec();
+            assert_eq!(
+                Minor1Control::decode(bytes.as_slice()).unwrap(),
+                Minor1Control::default()
+            );
+        }
+        let req = RemoteRequest {
+            request_id: "r1".into(),
+            ..Default::default()
+        };
+        let bytes = ControlMessage::from(Body::RemoteRequest(req.clone())).encode_to_vec();
+        assert_eq!(
+            Minor1Control::decode(bytes.as_slice()).unwrap().remote_request,
+            Some(req)
+        );
+        let caps = SignedCapabilities {
+            record: vec![1],
+            signature: vec![2],
+        };
+        let bytes = ControlMessage::from(Body::Capabilities(caps.clone())).encode_to_vec();
+        assert_eq!(
+            Minor1Control::decode(bytes.as_slice()).unwrap().capabilities,
+            Some(caps)
+        );
     }
 
     #[tokio::test]
@@ -423,8 +626,10 @@ mod tests {
         let (proto, reserved) = proto_fields(include_str!("../../../proto/common/v1/control.proto"));
         // The parser saw every message (a parser that finds nothing would pass vacuously).
         let messages: std::collections::BTreeSet<&str> = rust.iter().map(|(m, _, _)| m.as_str()).collect();
-        assert_eq!(messages.len(), 10, "{messages:?}");
+        assert_eq!(messages.len(), 13, "{messages:?}");
         assert!(rust.contains(&("ControlMessage".into(), "capabilities".into(), 9)));
+        assert!(rust.contains(&("ControlMessage".into(), "rpc_tunnel_open".into(), 12)));
+        assert!(rust.contains(&("RpcSessionOpen".into(), "ttl_s".into(), 8)));
         assert!(rust.contains(&("SignedCapabilities".into(), "signature".into(), 2)));
         let missing: Vec<_> = rust.difference(&proto).collect();
         let extra: Vec<_> = proto.difference(&rust).collect();

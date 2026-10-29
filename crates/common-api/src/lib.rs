@@ -23,6 +23,7 @@ mod jobs;
 pub mod mesh;
 pub mod metrics;
 mod openai;
+pub mod split;
 
 use admission::Admission;
 use axum::extract::rejection::JsonRejection;
@@ -160,6 +161,8 @@ pub struct AppState {
     meta_cache: Mutex<HashMap<String, Arc<GgufMetadata>>>,
     /// Bounds concurrent downloads (`MAX_PULLS`).
     pulls: Arc<Semaphore>,
+    /// The pooled session this device heads, if any (WP-04, [`split`]).
+    split: Mutex<Option<split::Active>>,
 }
 
 impl AppState {
@@ -182,7 +185,21 @@ impl AppState {
         let audit = Arc::new(Audit::open(&paths)?);
         let settings = mesh::SettingsCell::load(&paths, &config)?;
         let peer_quota = settings.peer_quota();
-        let peer_serve = peer_quota.serve_options(load_options(&config), admission.slots(), admission.max_concurrent);
+        let mut peer_serve =
+            peer_quota.serve_options(load_options(&config), admission.slots(), admission.max_concurrent);
+        // WP-04: this device as a stage host. The policy decides who may use it (pooled inference
+        // with a pinned peer in a group that allows it, Sharing on), `rpc::Stage` the platform.
+        peer_serve.rpc = split::engine_release().ok().map(|release| {
+            let mut stage = common_network::rpc::Stage::new(
+                manager.paths.backends().join("llama.cpp").join(&release),
+                paths.logs(),
+                release,
+                common_runtime::llamacpp::rpc_server::stage_threads(manager.hardware.cpu.physical_cores),
+            );
+            // one memory sample for both roles (tests fix the manager's)
+            stage.available_memory = manager.available_memory;
+            Arc::new(stage)
+        });
         Ok(Self {
             jobs: peer_serve.jobs.clone(),
             store: manager.store.clone(),
@@ -209,7 +226,18 @@ impl AppState {
             peer_serve,
             meta_cache: Mutex::new(HashMap::new()),
             pulls: Arc::new(Semaphore::new(MAX_PULLS)),
+            split: Mutex::new(None),
         })
+    }
+
+    /// This device as a pooled-inference stage host (WP-04), when the platform has a pinned engine.
+    pub fn stage(&self) -> Option<&Arc<common_network::rpc::Stage>> {
+        self.peer_serve.rpc.as_ref()
+    }
+
+    /// The pooled session this device heads (never held across an await).
+    pub fn split_slot(&self) -> std::sync::MutexGuard<'_, Option<split::Active>> {
+        self.split.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Load options every API load uses: the engine gets exactly `max_concurrent` slots, so

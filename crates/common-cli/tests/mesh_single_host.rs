@@ -992,3 +992,95 @@ fn private_key_absent_from_real_logs_and_bundle_single_host() {
         );
     }
 }
+
+/// WP-04 C6, SINGLE-HOST: `common run --split` goes through the running daemon, prints the
+/// daemon's pooling disclosure and sends nothing until the user answers yes. A no ends it with
+/// `policy_denied`; a yes reaches the licence gate (stories15M's licence is unknown, B-011, and
+/// nothing lifts the gate here), still before any connection. The peer is pinned at an address
+/// nothing listens on, in a group that allows pooling.
+#[test]
+fn run_split_shows_the_disclosure_and_needs_a_yes_single_host() {
+    let Some(real) = fixtures() else { return };
+    let h = Home::new("split", &real);
+    let peer = common_identity::DeviceIdentity::generate().unwrap().id;
+    let store = common_identity::PeerStore::open(&common_core::Paths::at(&h.root)).unwrap();
+    store
+        .pin(common_identity::PeerRecord {
+            id: peer,
+            name: "stage".into(),
+            paired_at_utc: common_identity::utc_now(),
+            last_seen_utc: None,
+            last_addr: Some("127.0.0.1:1".into()),
+        })
+        .unwrap();
+    store
+        .upsert_group(common_identity::Group {
+            name: "pool".into(),
+            members: vec![peer],
+            policy: common_identity::GroupPolicy {
+                allow_remote_inference: false,
+                allow_pooled_inference: true,
+            },
+        })
+        .unwrap();
+    h.ok(&["privacy", "trusted-devices", "--yes"]);
+    // no daemon: refused, nothing opened
+    let args = [
+        "run",
+        MODEL,
+        "-p",
+        PROMPT,
+        "-n",
+        "4",
+        "--split",
+        &peer.to_hex(),
+        "--split-at",
+        "3",
+    ];
+    let err = h.fails_with(&args, "policy_denied");
+    assert!(err.contains("`common serve`"), "{err}");
+    let (api, pa) = (free_tcp_port(), free_udp_port().to_string());
+    let (mut d, _lines) = h.spawn(&[
+        "serve",
+        "--port",
+        &api.to_string(),
+        "--network",
+        "--listen-port",
+        &pa,
+        "--listen-addr",
+        "127.0.0.1",
+        "--no-mdns",
+    ]);
+    wait_http(api, &mut d);
+    let answer = |reply: &str| {
+        let mut c = h
+            .cmd(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(reply.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(1));
+        text(&o.stderr)
+    };
+    let no = answer("n\n");
+    assert!(no.contains("Pooling splits one model between this device and"), "{no}");
+    assert!(
+        no.contains("error[policy_denied]") && no.contains("not accepted"),
+        "{no}"
+    );
+    let yes = answer("y\n");
+    assert!(yes.contains("Pooling splits one model"), "{yes}");
+    assert!(
+        yes.contains("error[policy_denied]") && yes.contains("licence (unknown)"),
+        "{yes}"
+    );
+    let audit = std::fs::read_to_string(h.root.join("logs/audit.jsonl")).unwrap_or_default();
+    assert!(
+        !audit.contains("session_open") && !audit.contains("peer_connected"),
+        "{audit}"
+    );
+    terminate(d, "daemon");
+}

@@ -126,6 +126,7 @@ async fn split_load_places_layers_as_planned_single_host() {
         stages: stages.clone(),
         n_layer,
         no_mmap: false,
+        engine_pid: Default::default(),
     });
     let loaded = backend.load_llama(req).await.unwrap();
     let info = loaded.info().clone();

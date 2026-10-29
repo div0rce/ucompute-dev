@@ -222,11 +222,87 @@ pub struct GgufMetadata {
     pub data_offset: u64,
 }
 
+/// Tensor data bytes by where a layer split puts them (WP-04): each block `blk.N.*`, the input
+/// (`token_embd.*` and any tensor outside a block, such as `rope_freqs`), and the output layer
+/// (`output.*`, `output_norm.*`). They sum to the file's tensor data.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LayerBytes {
+    pub blocks: Vec<u64>,
+    pub input: u64,
+    pub output: u64,
+}
+
+impl LayerBytes {
+    /// Blocks `[first, end)`.
+    pub fn range(&self, first: u32, end: u32) -> u64 {
+        self.blocks
+            .iter()
+            .skip(first as usize)
+            .take(end.saturating_sub(first) as usize)
+            .sum()
+    }
+}
+
 impl GgufMetadata {
     /// Size of one KV-cache token across all layers in bytes for the given element size.
     pub fn kv_bytes_per_token(&self, bytes_per_element: f32) -> f64 {
         let head_dim = self.embedding_length.checked_div(self.head_count).unwrap_or(0);
         2.0 * self.block_count as f64 * self.head_count_kv as f64 * head_dim as f64 * bytes_per_element as f64
+    }
+
+    /// Each tensor's bytes are the gap to the next offset (the last runs to the end of the data,
+    /// `file_size - data_offset`), as `feasibility::tensor_bytes`, so no type table is needed.
+    pub fn layer_bytes(&self, file_size: u64) -> LayerBytes {
+        let data = file_size.saturating_sub(self.data_offset);
+        let mut offsets: Vec<u64> = self.tensors.iter().map(|t| t.offset).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let mut out = LayerBytes {
+            blocks: vec![0; self.block_count as usize],
+            ..Default::default()
+        };
+        for t in &self.tensors {
+            let next = offsets.partition_point(|&o| o <= t.offset);
+            let end = offsets.get(next).copied().unwrap_or(data).min(data);
+            let bytes = end.saturating_sub(t.offset);
+            let block = t
+                .name
+                .strip_prefix("blk.")
+                .and_then(|r| r.split('.').next()?.parse::<usize>().ok());
+            match block {
+                Some(b) if b < out.blocks.len() => out.blocks[b] += bytes,
+                _ if t.name.starts_with("output") => out.output += bytes,
+                _ => out.input += bytes,
+            }
+        }
+        out
+    }
+
+    /// A layer split proves its placement by each device's share of a KV cache that is the same
+    /// for every block (`llamacpp::split::check_buffers`). Err names why this model's is not:
+    /// sliding-window attention (Gemma 2/3 and the like), per-layer head counts, or recurrent or
+    /// hybrid state (Mamba, RWKV, ...). Refused before any session or upload.
+    pub fn uniform_kv(&self) -> std::result::Result<(), String> {
+        let arch = &self.architecture;
+        let key = |k: &str| self.kv.contains_key(&format!("{arch}.{k}"));
+        let why = if key("attention.sliding_window") || key("attention.sliding_window_pattern") {
+            "sliding-window attention"
+        } else if matches!(
+            self.kv.get(&format!("{arch}.attention.head_count_kv")),
+            Some(GgufValue::Array(_))
+        ) {
+            "a different number of KV heads per layer"
+        } else if self.kv.keys().any(|k| {
+            k.strip_prefix(arch.as_str())
+                .is_some_and(|r| r.starts_with(".ssm.") || r.starts_with(".wkv.") || r.starts_with(".shortconv."))
+        }) {
+            "recurrent or hybrid layers"
+        } else {
+            return Ok(());
+        };
+        Err(format!(
+            "{arch} models have {why}, so their KV cache is not the same for every layer; a layer split cannot prove its placement for them yet"
+        ))
     }
 }
 
@@ -689,7 +765,7 @@ pub(crate) mod tests {
     }
     pub(crate) const STORIES15M: &str = "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739";
     const STORIES260K: &str = "270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d";
-    const QWEN05_Q4KM: &str = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db";
+    pub(crate) const QWEN05_Q4KM: &str = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db";
 
     fn code(r: Result<GgufMetadata>) -> ErrorCode {
         r.expect_err("expected an error").code
@@ -916,6 +992,53 @@ pub(crate) mod tests {
         assert_eq!(m.file_type, Some(QuantType::Q4KM));
         assert!(m.has_chat_template);
         assert_eq!(m.vocab_size, Some(151_936));
+    }
+
+    /// WP-04 C6: every tensor byte is in exactly one place (a block, the input or the output), on
+    /// the REAL fixtures and the SYNTHETIC file.
+    #[test]
+    fn layer_bytes_sum_to_tensor_data() {
+        let bytes = synthetic_llama();
+        let m = parse_metadata(&bytes).unwrap();
+        let lb = m.layer_bytes(bytes.len() as u64);
+        assert_eq!((lb.input, lb.output, lb.blocks.len()), (64, 0, 6), "{lb:?}");
+        for (sha, n, out_min) in [(STORIES15M, 6, 1), (QWEN05_Q4KM, 24, 100_000_000)] {
+            let Some(p) = fixture(sha) else { continue };
+            let m = read_metadata(&p).unwrap();
+            let size = std::fs::metadata(&p).unwrap().len();
+            let lb = m.layer_bytes(size);
+            let total: u64 = lb.blocks.iter().sum::<u64>() + lb.input + lb.output;
+            assert_eq!(total, size - m.data_offset, "{sha}: {lb:?}");
+            assert_eq!(lb.blocks.len(), n);
+            assert!(lb.blocks.iter().all(|&b| b > 0), "{lb:?}");
+            assert!(lb.input > 0 && lb.output >= out_min, "{lb:?}");
+            assert_eq!(lb.range(0, n as u32), lb.blocks.iter().sum::<u64>());
+            assert_eq!(lb.range(1, 3), lb.blocks[1] + lb.blocks[2]);
+            assert!(m.uniform_kv().is_ok(), "{sha}");
+        }
+    }
+
+    /// WP-04 C6 watch item: models whose KV differs per layer are refused before any upload.
+    #[test]
+    fn non_uniform_kv_models_are_refused_for_a_split() {
+        let mut m = parse_metadata(&synthetic_llama()).unwrap();
+        assert_eq!(m.uniform_kv(), Ok(()));
+        for (k, v) in [
+            ("llama.attention.sliding_window", GgufValue::U32(4096)),
+            (
+                "llama.attention.head_count_kv",
+                GgufValue::Array(vec![GgufValue::U32(2)]),
+            ),
+            ("llama.ssm.state_size", GgufValue::U32(16)),
+        ] {
+            let mut x = m.clone();
+            x.kv.insert(k.into(), v);
+            let e = x.uniform_kv().unwrap_err();
+            assert!(e.contains("not the same for every layer"), "{k}: {e}");
+        }
+        // another architecture's keys do not count
+        m.kv.insert("gemma2.attention.sliding_window".into(), GgufValue::U32(4096));
+        assert_eq!(m.uniform_kv(), Ok(()));
     }
 
     /// xorshift64* with a fixed seed: the fuzz run is deterministic.

@@ -129,7 +129,7 @@
         "tags": ["common"],
         "summary": "Daemon status",
         "description": "Never waits on a model load (the slot is read without blocking). `engine.state` is `loading` while a load runs (`loading_model_id`, `loading_for_ms`), else `ready` with a model loaded, else `idle`. `loaded` is the loaded model as of the last moment no load or request held the slot.",
-        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "type": "object", "properties": { "version": { "type": "string" }, "uptime_seconds": { "type": "integer" }, "engine": { "$ref": "#/components/schemas/EngineState" }, "loaded": { "oneOf": [{ "$ref": "#/components/schemas/LoadedModel" }, { "type": "null" }] }, "queue": { "type": "object", "properties": { "inflight": { "type": "integer" }, "queued": { "type": "integer" }, "max_concurrent": { "type": "integer" }, "max_queue": { "type": "integer" } } } } } } } } }
+        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "type": "object", "properties": { "version": { "type": "string" }, "uptime_seconds": { "type": "integer" }, "engine": { "$ref": "#/components/schemas/EngineState" }, "loaded": { "oneOf": [{ "$ref": "#/components/schemas/LoadedModel" }, { "type": "null" }] }, "split": { "type": ["object", "null"], "description": "The pooled session this device heads: `peer`, `session`, `model_id`, `split_at`, `split_mode`, `stages`, `stage_device`, plaintext RPC bytes `to_r` and `to_h`, direction `switches`, and `ended` (the error code once it ended). Ids and counts only." }, "queue": { "type": "object", "properties": { "inflight": { "type": "integer" }, "queued": { "type": "integer" }, "max_concurrent": { "type": "integer" }, "max_queue": { "type": "integer" } } } } } } } } }
       }
     },
     "/api/models": {
@@ -372,9 +372,11 @@
       "LoadedModelInfo": {
         "type": "object",
         "properties": {
-          "model_id": { "type": "string" }, "model_sha256": { "type": "string" }, "backend_name": { "type": "string" }, "backend_version": { "type": "string" }, "device_requested": { "type": "string" }, "device_actual": { "type": "string" }, "offloaded_layers": { "type": "integer" }, "total_layers": { "type": "integer" }, "n_ctx": { "type": "integer" }, "threads": { "type": "integer" }, "parallel_slots": { "type": "integer" }, "fallback_reason": { "type": ["string", "null"] }, "context_note": { "type": ["string", "null"], "description": "Set when the planner changed what was asked for: context capped to the trained context, reduced to fit memory, or the KV cache downgraded." }, "load_ms": { "type": "number" }, "pid": { "type": ["integer", "null"] }
+          "model_id": { "type": "string" }, "model_sha256": { "type": "string" }, "backend_name": { "type": "string" }, "backend_version": { "type": "string" }, "device_requested": { "type": "string" }, "device_actual": { "type": "string" }, "offloaded_layers": { "type": "integer" }, "total_layers": { "type": "integer" }, "n_ctx": { "type": "integer" }, "threads": { "type": "integer" }, "parallel_slots": { "type": "integer" }, "fallback_reason": { "type": ["string", "null"] }, "context_note": { "type": ["string", "null"], "description": "Set when the planner changed what was asked for: context capped to the trained context, reduced to fit memory, or the KV cache downgraded." }, "load_ms": { "type": "number" }, "pid": { "type": ["integer", "null"] },
+          "split": { "oneOf": [{ "type": "array", "items": { "$ref": "#/components/schemas/SplitStage" } }, { "type": "null" }], "description": "A split load's stages as the engine log proved them; null for a local load." }
         }
       },
+      "SplitStage": { "type": "object", "properties": { "device": { "type": "string", "description": "`RPC0` is the other device; `CPU` this device's CPU; else this device's GPU (`MTL0`)." }, "first_block": { "type": "integer" }, "end_block": { "type": "integer" } } },
       "Sampling": {
         "type": "object",
         "properties": {
@@ -389,7 +391,10 @@
           "stream_options": { "type": "object", "properties": { "include_usage": { "type": "boolean" } } },
           "response_format": { "type": "object", "properties": { "type": { "type": "string", "enum": ["text", "json_object", "json_schema"] }, "json_schema": { "type": "object", "properties": { "name": { "type": "string" }, "schema": { "type": "object" } } } } },
           "n": { "type": "integer", "const": 1 },
-          "target": { "type": "string", "default": "local", "description": "Common extension. `local` runs here. `peer:<peer id or short label>` runs the whole request on that paired device (remote execution; the device decrypts and reads the prompt). Allowed only when privacy is `trusted_group`, networking is on and the device is pinned, not revoked and in a group allowing remote inference; otherwise 403 `policy_denied` / `peer_unauthorized` / `peer_revoked` before anything runs or connects. Every response echoes `target`." }
+          "target": { "type": "string", "default": "local", "description": "Common extension. `local` runs here. `peer:<peer id or short label>` runs the whole request on that paired device (remote execution; the device decrypts and reads the prompt). Allowed only when privacy is `trusted_group`, networking is on and the device is pinned, not revoked and in a group allowing remote inference; otherwise 403 `policy_denied` / `peer_unauthorized` / `peer_revoked` before anything runs or connects. `split:<peer id or short label>` splits the model's blocks between this device and that one (pooled inference, WP-04): it needs a group allowing pooled inference on both devices, `split_at`, `acknowledged: true`, a model licence of Apache-2.0 or MIT (the other device receives its part of the weights) and a model whose KV cache is the same for every layer. It never falls back to a local run: when the other device leaves, the request fails with `peer_lost` (or `policy_denied`, `peer_revoked`, `peer_held` when that is why). Every response echoes `target`." },
+          "split_at": { "type": "integer", "minimum": 1, "description": "Split targets only (required): the first block of the second stage, between 1 and the model's block count minus 1." },
+          "split_mode": { "type": "string", "enum": ["pooled", "same_backend"], "default": "pooled", "description": "Split targets only. `pooled`: the other device holds blocks [0, split_at), this device's GPU the rest and the output layer. `same_backend`: this device's CPU holds [0, split_at), the other device the rest and the output layer." },
+          "acknowledged": { "type": "boolean", "default": false, "description": "Split targets only: the caller accepted the pooling disclosure. Without it: 403 `policy_denied` whose message is the disclosure text." }
         },
         "required": ["model"]
       },
@@ -407,7 +412,8 @@
           "id": { "type": "string" }, "object": { "const": "chat.completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
           "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "message": { "type": "object", "properties": { "role": { "const": "assistant" }, "content": { "type": ["string", "null"] }, "tool_calls": { "type": "array", "items": { "type": "object" } } } }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
           "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" },
-          "target": { "type": "string", "description": "Where it ran: `local` or `peer:<peer id>`." }
+          "target": { "type": "string", "description": "Where it ran: `local`, `peer:<peer id>` or `split:<peer id>`." },
+          "placement": { "type": "object", "description": "Split targets only: the placement the engine's log proved (`devices`, `stages`) and the pooled session id.", "properties": { "devices": { "type": "string" }, "stages": { "type": "array", "items": { "$ref": "#/components/schemas/SplitStage" } }, "session": { "type": "string" } } }
         }
       },
       "CompletionRequest": {
@@ -422,7 +428,8 @@
           "id": { "type": "string" }, "object": { "const": "text_completion" }, "created": { "type": "integer" }, "model": { "type": "string" },
           "choices": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "text": { "type": "string" }, "logprobs": { "type": "null" }, "finish_reason": { "type": "string" } } } },
           "usage": { "$ref": "#/components/schemas/Usage" }, "timings": { "$ref": "#/components/schemas/Timings" },
-          "target": { "type": "string", "description": "Where it ran: `local` or `peer:<peer id>`." }
+          "target": { "type": "string", "description": "Where it ran: `local`, `peer:<peer id>` or `split:<peer id>`." },
+          "placement": { "type": "object", "description": "Split targets only: the placement the engine's log proved (`devices`, `stages`) and the pooled session id.", "properties": { "devices": { "type": "string" }, "stages": { "type": "array", "items": { "$ref": "#/components/schemas/SplitStage" } }, "session": { "type": "string" } } }
         }
       },
       "EmbeddingsRequest": {

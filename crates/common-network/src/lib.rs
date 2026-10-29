@@ -1,8 +1,9 @@
 //! Peer networking (ADR-0003).
 //!
-//! Invariants (tested): the only socket this crate owns is the quinn `Endpoint` (no plaintext
-//! path; `tests/invariants.rs::no_plaintext_mode_exists` greps `src/` for any TCP or raw UDP
-//! socket type); TLS 1.3 only; raw public keys both ways; the workload endpoint accepts only
+//! Invariants (tested): the only network socket this crate owns is the quinn `Endpoint` (no
+//! plaintext path; `tests/invariants.rs::no_plaintext_mode_exists` greps `src/` for any TCP or raw
+//! UDP socket type outside `rpc.rs`, whose TCP is loopback only: the pooled-inference bridge and
+//! stage connect, ADR-0005 D4); TLS 1.3 only; raw public keys both ways; the workload endpoint accepts only
 //! pinned, non-revoked peers inside the TLS handshake; the pairing endpoint exists only during a
 //! pairing window; nothing listens unless `NetworkConfig.enabled`.
 //!
@@ -27,6 +28,8 @@ pub mod health;
 pub mod pairing;
 pub mod proto;
 pub mod remote;
+pub mod rpc;
+pub mod rpc_meter;
 pub mod tls;
 pub mod transport;
 
@@ -37,12 +40,21 @@ use std::net::{IpAddr, Ipv4Addr};
 pub const ALPN_WORKLOAD: &[u8] = b"common/1";
 pub const ALPN_PAIRING: &[u8] = b"common-pair/1";
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 1;
+pub const PROTOCOL_MINOR: u32 = 2;
 /// From this minor a device that holds its peer (E5, `transport::Node::hold`) answers the peer's
 /// Capabilities with `ErrorMsg{code: "peer_held"}` and the two exchange revocations (ADR-0003 D7)
 /// before the holder closes with `CLOSE_HELD`; with an older peer it sends its Hello, verifies the
 /// peer's Capabilities, then closes with `CLOSE_HELD` (no `ErrorMsg`, no exchange).
 pub const HELD_EXCHANGE_MINOR: u32 = 1;
+/// From this minor the `RpcSessionOpen`, `RpcSessionAccept` and `RpcTunnelOpen` bodies exist
+/// (WP-04, ADR-0005 D4). A device sends them only when the connection's negotiated minor (the min
+/// of both Hellos) is at least this; below it, a split refuses on this side with
+/// `protocol_incompatible` and the peer never receives them.
+pub const RPC_SESSION_MINOR: u32 = 2;
+const _: () = assert!(PROTOCOL_MINOR >= RPC_SESSION_MINOR, "this build speaks the RPC minor");
+/// Bound on an RPC session or tunnel frame (`proto::check_rpc_frame`); the largest legitimate
+/// one (`RpcSessionOpen` with every number at its maximum) is under 160 bytes (tested).
+pub const MAX_RPC_FRAME: usize = 1 << 10;
 /// Hard bound on one control frame.
 pub const MAX_CONTROL_FRAME: usize = 1 << 20;
 /// Bound on the Capabilities control frame: signed record plus signature (F-02-04).

@@ -40,14 +40,15 @@ use tokio_util::sync::CancellationToken;
 
 pub struct RemoteOutcome;
 
-/// Request streams one connection may have open at once (SD-12). The next one is answered with
-/// `overloaded` and closed without being read.
+/// Mode B request streams one connection may have open at once (SD-12). The next `RemoteRequest`
+/// is answered with `overloaded`. Pooled-session streams have their own budget (`rpc`: one session
+/// per device, `rpc::MAX_TUNNELS` tunnels in it), and QUIC caps the streams open at once.
 pub const MAX_STREAMS_PER_CONNECTION: usize = 8;
 
 /// Longest peer-supplied string that is echoed into an error message.
 const MAX_ECHO: usize = 200;
 
-fn short(s: &str) -> String {
+pub(crate) fn short(s: &str) -> String {
     s.chars().take(MAX_ECHO).collect()
 }
 
@@ -86,7 +87,7 @@ fn check_privacy(privacy: &str) -> Result<()> {
 }
 
 /// The stable code string of an `ErrorMsg` back to a typed code; unknown strings are `Internal`.
-fn parse_code(code: &str) -> ErrorCode {
+pub(crate) fn parse_code(code: &str) -> ErrorCode {
     serde_json::from_value(serde_json::Value::String(code.into())).unwrap_or(ErrorCode::Internal)
 }
 
@@ -298,6 +299,9 @@ pub struct ServeOptions {
     pub peer_slots: Arc<Semaphore>,
     /// Where each served request is listed (`kind: served_for_peer`); the daemon's `/api/jobs`.
     pub jobs: Arc<Jobs>,
+    /// This device as a pooled-inference stage host (WP-04); None refuses every pooled session
+    /// after the policy check.
+    pub rpc: Option<Arc<crate::rpc::Stage>>,
 }
 
 impl ServeOptions {
@@ -311,6 +315,7 @@ impl ServeOptions {
             quotas: Arc::new(Quotas::new(cfg)),
             engine_slots: None,
             jobs: Jobs::new(),
+            rpc: None,
         }
     }
 }
@@ -424,7 +429,7 @@ fn peer_message(e: &CommonError) -> String {
     }
 }
 
-async fn refuse(send: &mut SendStream, e: &CommonError) {
+pub(crate) async fn refuse(send: &mut SendStream, e: &CommonError) {
     let msg = Body::Error(ErrorMsg {
         code: e.code.as_str().into(),
         message: peer_message(e),
@@ -573,25 +578,19 @@ async fn execute(
     Ok((usage, outcome))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream(
     conn: Arc<PeerConnection>,
     manager: Arc<ModelManager>,
     policy: Arc<PolicyEngine>,
     audit: Arc<Audit>,
     opts: ServeOptions,
+    req: RemoteRequest,
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
 ) {
     let peer = conn.peer_id;
     let started = Instant::now();
-    let req = match read_frame(&mut recv, MAX_CONTROL_FRAME).await {
-        Ok(Some(ControlMessage {
-            body: Some(Body::RemoteRequest(r)),
-        })) => r,
-        Ok(Some(_)) => return refuse(&mut send, &CommonError::invalid("expected RemoteRequest")).await,
-        Ok(None) => return,
-        Err(e) => return refuse(&mut send, &e).await,
-    };
     if !is_request_id(&req.request_id) {
         return refuse(
             &mut send,
@@ -693,31 +692,64 @@ pub async fn serve_peer_with(
 ) -> Result<()> {
     let limit = Arc::new(Semaphore::new(MAX_STREAMS_PER_CONNECTION));
     loop {
-        let (mut send, recv) = match conn.conn.accept_bi().await {
+        let (send, recv) = match conn.conn.accept_bi().await {
             Ok(s) => s,
             Err(ConnectionError::ApplicationClosed(_)) | Err(ConnectionError::LocallyClosed) => return Ok(()),
             Err(e) => return Err(map_conn_error(&e)),
         };
         let in_flight = conn.in_flight();
-        let Ok(permit) = limit.clone().try_acquire_owned() else {
-            let e = CommonError::new(
-                ErrorCode::Overloaded,
-                format!("more than {MAX_STREAMS_PER_CONNECTION} requests in flight on one connection; retry later"),
-            );
-            tokio::spawn(async move { refuse(&mut send, &e).await });
-            continue;
-        };
-        let (conn, manager, policy, audit, opts) = (
+        let (conn, manager, policy, audit, opts, limit) = (
             conn.clone(),
             manager.clone(),
             policy.clone(),
             audit.clone(),
             opts.clone(),
+            limit.clone(),
         );
         tokio::spawn(async move {
-            let _held = (permit, in_flight);
-            handle_stream(conn, manager, policy, audit, opts, send, recv).await;
+            let _held = in_flight;
+            dispatch(conn, manager, policy, audit, opts, limit, send, recv).await;
         });
+    }
+}
+
+/// The first frame decides what a stream is: a Mode B request (within the connection's
+/// [`MAX_STREAMS_PER_CONNECTION`]) or a pooled session or tunnel (`rpc`, bounded to
+/// `MAX_RPC_FRAME`).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch(
+    conn: Arc<PeerConnection>,
+    manager: Arc<ModelManager>,
+    policy: Arc<PolicyEngine>,
+    audit: Arc<Audit>,
+    opts: ServeOptions,
+    limit: Arc<Semaphore>,
+    mut send: SendStream,
+    mut recv: RecvStream,
+) {
+    let first = match read_frame(&mut recv, MAX_CONTROL_FRAME).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return,
+        Err(e) => return refuse(&mut send, &e).await,
+    };
+    if let Err(e) = crate::proto::check_rpc_frame(&first) {
+        return refuse(&mut send, &e).await;
+    }
+    match first.body {
+        Some(Body::RemoteRequest(req)) => {
+            let Ok(_permit) = limit.try_acquire_owned() else {
+                let e = CommonError::new(
+                    ErrorCode::Overloaded,
+                    format!("more than {MAX_STREAMS_PER_CONNECTION} requests in flight on one connection; retry later"),
+                );
+                return refuse(&mut send, &e).await;
+            };
+            handle_stream(conn, manager, policy, audit, opts, req, send, recv).await
+        }
+        Some(b @ (Body::RpcSessionOpen(_) | Body::RpcTunnelOpen(_))) => {
+            crate::rpc::serve(opts.rpc.clone(), conn, policy, audit, b, send, recv).await
+        }
+        _ => refuse(&mut send, &CommonError::invalid("expected RemoteRequest")).await,
     }
 }
 

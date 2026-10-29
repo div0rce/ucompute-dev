@@ -214,8 +214,21 @@ pub async fn shutdown_signal() -> Stop {
     }
 }
 
-/// Stop `llama-server` processes started from `binary` whose owner is gone: a `common` that died
-/// without unwinding (SIGKILL, crash) leaves its engine behind with the whole model resident. The
+/// The supervised binaries of the pinned engine: the inference server and the split stage's RPC
+/// server (WP-04 C3). Either one, left behind by a dead daemon, holds memory and, for the RPC server,
+/// a loopback listener nothing guards any more.
+const ENGINE_BINARIES: [&str; 2] = ["llama-server", "ggml-rpc-server"];
+
+/// [`reap_orphaned_engines`] for every binary in [`ENGINE_BINARIES`] under `engine_dir`.
+pub fn reap_orphans_in(engine_dir: &Path) -> Vec<u32> {
+    ENGINE_BINARIES
+        .iter()
+        .flat_map(|name| reap_orphaned_engines(&backend::binary(engine_dir, name)))
+        .collect()
+}
+
+/// Stop engine processes (`llama-server`, `ggml-rpc-server`) started from `binary` whose owner is
+/// gone: a `common` that died without unwinding (SIGKILL, crash) leaves its engine behind with the whole model resident. The
 /// orphan is adopted by pid 1 or, on Linux, by a subreaper (`systemd --user`), so the parent's pid
 /// alone does not tell; see [`orphans`]. Returns the pids signalled.
 /// ponytail: `ps` scan matched on argv[0]; a user's own detached start of the pinned binary counts
@@ -240,7 +253,7 @@ pub fn reap_orphaned_engines(binary: &Path) -> Vec<u32> {
             .filter(|&pid| unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 })
             .collect();
         if !killed.is_empty() {
-            tracing::warn!(pids = ?killed, "stopped orphaned llama-server engines left by an earlier run");
+            tracing::warn!(pids = ?killed, binary = %binary.display(), "stopped orphaned engine processes left by an earlier run");
         }
         killed
     }
@@ -401,7 +414,7 @@ pub async fn context() -> Result<ModelManager> {
         );
         backend::ensure_backend(&paths, &pin, &mut progress("engine")).await?
     };
-    reap_orphaned_engines(&backend::binary(&engine_dir, "llama-server"));
+    reap_orphans_in(&engine_dir);
     let backend = common_runtime::backend_by_name("llama.cpp", engine_dir, paths.clone())
         .ok_or_else(|| CommonError::internal("llama.cpp adapter missing"))?;
     Ok(ModelManager::new(paths.clone(), Store::new(paths), backend, hardware))
@@ -751,6 +764,35 @@ mod tests {
             (256, 0.7, 0.95, Device::Auto, None, None)
         );
         assert!(Cli::try_parse_from(["common", "run", "m"]).is_err(), "-p is required");
+        // WP-04: --split needs --split-at, and both conflict with a local placement or a peer
+        let cli = Cli::try_parse_from([
+            "common",
+            "run",
+            "m",
+            "-p",
+            "x",
+            "--split",
+            "ab12-cd34-ef56",
+            "--split-at",
+            "3",
+            "--same-backend",
+        ])
+        .unwrap();
+        let Cmd::Run(a) = cli.cmd else { panic!("not run") };
+        assert_eq!(
+            (a.split.as_deref(), a.split_at, a.same_backend),
+            (Some("ab12-cd34-ef56"), Some(3), true)
+        );
+        for bad in [
+            &["--split", "p"][..],
+            &["--split-at", "3"],
+            &["--same-backend"],
+            &["--split", "p", "--split-at", "3", "--peer", "p"],
+            &["--split", "p", "--split-at", "3", "--device", "cpu"],
+        ] {
+            let argv = [&["common", "run", "m", "-p", "x"][..], bad].concat();
+            assert!(Cli::try_parse_from(argv).is_err(), "{bad:?}");
+        }
         let cli = Cli::try_parse_from(["common", "replay", "/tmp/r/manifest.json", "--json"]).unwrap();
         assert!(matches!(cli.cmd, Cmd::Replay(ref r) if r.manifest == Path::new("/tmp/r/manifest.json")));
     }
@@ -839,10 +881,22 @@ garbage line
     #[cfg(unix)]
     #[test]
     fn reaper_stops_detached_engine() {
+        detached_binary_is_reaped("llama-server");
+    }
+
+    /// WP-04 C3: a split stage's `ggml-rpc-server` orphaned by a dead daemon is reaped too.
+    #[cfg(unix)]
+    #[test]
+    fn reaper_stops_orphaned_rpc_server() {
+        detached_binary_is_reaped("ggml-rpc-server");
+    }
+
+    #[cfg(unix)]
+    fn detached_binary_is_reaped(name: &str) {
         // A space in the path, as under ~/Library/Application Support.
-        let dir = std::env::temp_dir().join(format!("common-cli reap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("common-cli reap-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("llama-server");
+        let bin = dir.join(name);
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &bin).unwrap();
         let ok = std::process::Command::new("sh")
             .arg("-c")
@@ -856,7 +910,7 @@ garbage line
         assert!(ok, "detached spawn");
         let deadline = Instant::now() + Duration::from_secs(10);
         let killed = loop {
-            let k = reap_orphaned_engines(&bin);
+            let k = reap_orphans_in(&dir);
             if !k.is_empty() || Instant::now() > deadline {
                 break k;
             }
@@ -871,7 +925,7 @@ garbage line
             !common_runtime::llamacpp::process::alive(pid),
             "pid {pid} still alive after SIGTERM"
         );
-        assert!(reap_orphaned_engines(&bin).is_empty(), "nothing left to reap");
+        assert!(reap_orphans_in(&dir).is_empty(), "nothing left to reap");
         let _ = std::fs::remove_dir_all(dir);
     }
 

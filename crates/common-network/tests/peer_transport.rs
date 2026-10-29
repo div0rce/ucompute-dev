@@ -17,6 +17,7 @@ use common_network::transport::{
 };
 use common_network::{
     ALPN_WORKLOAD, HELD_EXCHANGE_MINOR, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    RPC_SESSION_MINOR,
 };
 use futures_util::future::BoxFuture;
 use prost::Message;
@@ -795,6 +796,129 @@ async fn minor_negotiation_is_min() {
         other => panic!("expected Capabilities, got {:?}", other.map(|m| m.body.is_some())),
     }
     assert!(conn.close_reason().is_none());
+}
+
+/// Minor 2 (WP-04) against a deployed minor-1 build, SINGLE-HOST: this build advertises the RPC
+/// minor, and each direction negotiates the min, 1, so the connection is below
+/// [`RPC_SESSION_MINOR`] and a split is never attempted on it (ADR-0005 D4).
+#[tokio::test]
+async fn negotiated_minor_is_min_of_both_single_host() {
+    let old = RPC_SESSION_MINOR - 1;
+    // Inbound: a minor-1 connector.
+    let (a, b) = pair();
+    let nb = b.start().await;
+    let (_ep, _conn, mut send, _recv, theirs) =
+        raw_after_hello(&a, nb.local_addr().unwrap(), hello(&a, PROTOCOL_MAJOR, old)).await;
+    assert_eq!(theirs.minor, PROTOCOL_MINOR);
+    assert!(theirs.minor >= RPC_SESSION_MINOR, "this build speaks the RPC minor");
+    write_frame(&mut send, &caps_frame(&a)).await.unwrap();
+    let accepted = timeout(Duration::from_secs(5), nb.accept()).await.unwrap().unwrap();
+    assert_eq!(accepted.negotiated_minor, old);
+
+    // Outbound: this build dials a minor-1 acceptor.
+    let na = a.start().await;
+    let server = b.raw_server();
+    let addr = server.local_addr().unwrap();
+    let b_id = b.id();
+    let caps = caps_frame(&b);
+    let srv = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+        let theirs = match read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap() {
+            Some(ControlMessage {
+                body: Some(Body::Hello(h)),
+            }) => h,
+            other => panic!("expected Hello, got {:?}", other.map(|m| m.body.is_some())),
+        };
+        let h = Hello {
+            major: PROTOCOL_MAJOR,
+            minor: old,
+            common_version: "0.1.0".into(),
+            peer_id: b_id.0.to_vec(),
+            nonce: vec![2; 16],
+        };
+        write_frame(&mut send, &Body::Hello(h).into()).await.unwrap();
+        let _ = read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await.unwrap();
+        write_frame(&mut send, &caps).await.unwrap();
+        let _ = timeout(Duration::from_secs(5), conn.closed()).await;
+        theirs.minor
+    });
+    let out = na.connect(addr, b.id()).await.unwrap();
+    assert_eq!(out.negotiated_minor, old);
+    out.conn.close(0u32.into(), b"done");
+    assert_eq!(srv.await.unwrap(), PROTOCOL_MINOR);
+}
+
+/// WP-04 against a minor-1 build, SINGLE-HOST: a pooled session is refused on this side with
+/// `protocol_incompatible` and an update hint, before any stream is opened, even with pooling
+/// allowed by policy (ADR-0005 D4). The minor-1 acceptor never sees a stream.
+#[tokio::test]
+async fn rpc_session_refused_by_minor_1_peer_single_host() {
+    let (a, b) = pair();
+    a.peers
+        .upsert_group(common_identity::Group {
+            name: "pool".into(),
+            members: vec![b.id()],
+            policy: common_identity::GroupPolicy {
+                allow_remote_inference: true,
+                allow_pooled_inference: true,
+            },
+        })
+        .unwrap();
+    let policy = Arc::new(common_policy::PolicyEngine::new(
+        common_policy::PolicyConfig {
+            network_enabled: true,
+            serve_peers: true,
+            ..Default::default()
+        },
+        a.peers.clone(),
+    ));
+    let na = Node::start(
+        Peer::config(),
+        a.identity.clone(),
+        a.peers.clone(),
+        policy,
+        a.audit.clone(),
+    )
+    .await
+    .unwrap();
+    let server = b.raw_server();
+    let addr = server.local_addr().unwrap();
+    let b_id = b.id();
+    let caps = caps_frame(&b);
+    let srv = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+        let _ = read_frame(&mut recv, MAX_CONTROL_FRAME).await.unwrap();
+        let h = Hello {
+            major: PROTOCOL_MAJOR,
+            minor: RPC_SESSION_MINOR - 1,
+            common_version: "0.1.0".into(),
+            peer_id: b_id.0.to_vec(),
+            nonce: vec![2; 16],
+        };
+        write_frame(&mut send, &Body::Hello(h).into()).await.unwrap();
+        let _ = read_frame(&mut recv, MAX_CAPABILITIES_BYTES).await.unwrap();
+        write_frame(&mut send, &caps).await.unwrap();
+        // any stream the dialler opens after the handshake
+        timeout(Duration::from_secs(2), conn.accept_bi()).await.is_ok()
+    });
+    let out = na.connect(addr, b.id()).await.unwrap();
+    assert_eq!(out.negotiated_minor, RPC_SESSION_MINOR - 1);
+    let spec = common_network::rpc::SplitSpec {
+        privacy: common_policy::PrivacyMode::TrustedGroup.into(),
+        layer_end: 1,
+        n_layer: 2,
+        ..Default::default()
+    };
+    let e = common_network::rpc::SplitSession::open(&na, out.clone(), spec)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::ProtocolIncompatible, "{e}");
+    assert!(e.message.contains("without pooled inference"), "{e}");
+    assert_eq!(e.hint.as_deref(), Some("update Common on that device"));
+    assert!(!srv.await.unwrap(), "no stream reached the minor-1 peer");
+    assert!(!audit_kinds(&a).contains(&"session_open".to_string()));
 }
 
 /// F-08-10 old/new interop: a newer peer (higher minor) sends a Capabilities record carrying a

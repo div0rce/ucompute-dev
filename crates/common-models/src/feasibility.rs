@@ -115,6 +115,55 @@ pub fn estimate(meta: &GgufMetadata, file_size: u64, n_ctx: u32, kv: KvType) -> 
     }
 }
 
+/// One device's part of a layer split (WP-04): blocks `[first, end)`, plus the input embedding
+/// (always on the head, which also keeps the tokenizer) and/or the output layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageRange {
+    pub first: u32,
+    pub end: u32,
+    pub input: bool,
+    pub output: bool,
+}
+
+/// [`estimate`] for one stage of a split: its blocks' weights (plus the input or output layer when
+/// it holds them), its share of the KV cache, and the process baseline (the tokenizer tables only
+/// on the stage with the input). The compute buffer is the whole model's, an upper bound.
+// ponytail: whole-model compute buffer per stage; calibrate a per-stage figure from P1 if it matters.
+pub fn estimate_stage(meta: &GgufMetadata, file_size: u64, n_ctx: u32, kv: KvType, s: StageRange) -> MemoryEstimate {
+    let full = estimate(meta, file_size, n_ctx, kv);
+    let lb = meta.layer_bytes(file_size);
+    let n = u64::from(meta.block_count.max(1));
+    let blocks = u64::from(s.end.min(meta.block_count).saturating_sub(s.first));
+    // a tied output reads token_embd, so the output stage gets its own copy (see `estimate`)
+    let tied = !meta.tensors.iter().any(|t| t.name == "output.weight");
+    let weights_bytes = lb
+        .range(s.first, s.end)
+        .saturating_add(if s.input { lb.input } else { 0 })
+        .saturating_add(match (s.output, tied) {
+            (false, _) => 0,
+            (true, false) => lb.output,
+            (true, true) => {
+                lb.output + tensor_bytes(meta, file_size.saturating_sub(meta.data_offset), "token_embd.weight")
+            }
+        });
+    let kv_cache_bytes = full.kv_cache_bytes * blocks / n;
+    let overhead_bytes = if s.input {
+        full.overhead_bytes
+    } else if cfg!(target_os = "macos") {
+        calibration::OVERHEAD_GPU_BYTES
+    } else {
+        calibration::OVERHEAD_CPU_BYTES
+    };
+    MemoryEstimate {
+        weights_bytes,
+        kv_cache_bytes,
+        compute_buffer_bytes: full.compute_buffer_bytes,
+        overhead_bytes,
+        total_bytes: weights_bytes + kv_cache_bytes + full.compute_buffer_bytes + overhead_bytes,
+        n_ctx,
+    }
+}
+
 /// Size of tensor `name` in the file: the gap to the next tensor offset (or to the end of the
 /// data section), so no per-type block-size table is needed. 0 when the tensor is absent.
 fn tensor_bytes(meta: &GgufMetadata, data_bytes: u64, name: &str) -> u64 {
@@ -236,6 +285,55 @@ mod tests {
             (zero.weights_bytes, zero.kv_cache_bytes, zero.compute_buffer_bytes),
             (0, 0, 0)
         );
+    }
+
+    /// WP-04 C6: a stage needs its blocks, its KV share and a baseline, never the whole model; the
+    /// two stages of a split together hold every weight once (plus a tied output's copy).
+    #[test]
+    fn stage_estimate_below_full_model() {
+        for sha in [crate::gguf::tests::STORIES15M, crate::gguf::tests::QWEN05_Q4KM] {
+            let Some(p) = crate::gguf::tests::fixture(sha) else {
+                continue;
+            };
+            let m = crate::read_metadata(&p).unwrap();
+            let size = std::fs::metadata(&p).unwrap().len();
+            let n = m.block_count;
+            let k = n / 2;
+            let full = estimate(&m, size, 128, KvType::F16);
+            let head = |first, end, output| StageRange {
+                first,
+                end,
+                input: true,
+                output,
+            };
+            let remote = |first, end, output| StageRange {
+                first,
+                end,
+                input: false,
+                output,
+            };
+            // configuration P: R holds [0,k), the head [k,n) plus the output; C: the reverse
+            for (h, r) in [
+                (head(k, n, true), remote(0, k, false)),
+                (head(0, k, false), remote(k, n, true)),
+            ] {
+                let (eh, er) = (
+                    estimate_stage(&m, size, 128, KvType::F16, h),
+                    estimate_stage(&m, size, 128, KvType::F16, r),
+                );
+                for e in [&eh, &er] {
+                    assert!(e.total_bytes < full.total_bytes, "{sha}: {e:?} vs {full:?}");
+                    assert!(e.weights_bytes < full.weights_bytes, "{sha}");
+                    assert_eq!(
+                        e.total_bytes,
+                        e.weights_bytes + e.kv_cache_bytes + e.compute_buffer_bytes + e.overhead_bytes
+                    );
+                }
+                assert_eq!(eh.kv_cache_bytes + er.kv_cache_bytes, full.kv_cache_bytes, "{sha}");
+                assert_eq!(eh.weights_bytes + er.weights_bytes, full.weights_bytes, "{sha}");
+                assert!(er.overhead_bytes < eh.overhead_bytes, "the tokenizer stays on the head");
+            }
+        }
     }
 
     #[test]

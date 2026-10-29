@@ -19,6 +19,9 @@ pub struct Metrics {
     /// `common_remote_requests_total{peer}`: requests this device sent to a paired device (Mode B),
     /// by the peer's short label. Counts only, never text.
     pub remote_requests: IntCounterVec,
+    /// `common_rpc_tunnel_bytes_total{dir}`: plaintext RPC bytes this process pumped through pooled
+    /// tunnels (WP-04), `to_r` head→stage and `to_h` stage→head, either role. Bytes only.
+    pub rpc_tunnel_bytes: IntCounterVec,
 }
 
 impl Default for Metrics {
@@ -78,6 +81,14 @@ impl Metrics {
             &["peer"],
         )
         .expect("static metric");
+        let rpc_tunnel_bytes = IntCounterVec::new(
+            Opts::new(
+                "common_rpc_tunnel_bytes_total",
+                "Plaintext RPC bytes pumped through pooled-inference tunnels, by direction.",
+            ),
+            &["dir"],
+        )
+        .expect("static metric");
         for m in [
             Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(rejected.clone()),
@@ -88,6 +99,7 @@ impl Metrics {
             Box::new(queue_depth.clone()),
             Box::new(inflight.clone()),
             Box::new(remote_requests.clone()),
+            Box::new(rpc_tunnel_bytes.clone()),
         ] {
             registry.register(m).expect("unique metric names");
         }
@@ -102,6 +114,7 @@ impl Metrics {
             queue_depth,
             inflight,
             remote_requests,
+            rpc_tunnel_bytes,
         }
     }
 
@@ -121,6 +134,11 @@ impl Metrics {
     pub fn render(&self, queued: usize, inflight: usize) -> String {
         self.queue_depth.set(queued as i64);
         self.inflight.set(inflight as i64);
+        let (to_r, to_h) = common_network::rpc::tunnel_bytes_total();
+        for (dir, total) in [("to_r", to_r), ("to_h", to_h)] {
+            let c = self.rpc_tunnel_bytes.with_label_values(&[dir]);
+            c.inc_by(total.saturating_sub(c.get()));
+        }
         let mut buf = Vec::new();
         // Encoding into a Vec cannot fail; an empty page is the only fallback anyway.
         let _ = TextEncoder::new().encode(&self.registry.gather(), &mut buf);
@@ -162,6 +180,9 @@ mod tests {
             "common_requests_rejected_total{reason=\"queue_full\"} 0",
             "common_requests_rejected_total{reason=\"queue_timeout\"} 0",
             "common_remote_requests_total{peer=\"abcd-ef01-2345\"} 1",
+            "# TYPE common_rpc_tunnel_bytes_total counter",
+            "common_rpc_tunnel_bytes_total{dir=\"to_r\"}",
+            "common_rpc_tunnel_bytes_total{dir=\"to_h\"}",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }

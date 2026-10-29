@@ -302,8 +302,10 @@ pub fn check_buffers(p: &BufferProof, stages: &[(&str, usize, usize)], n_layer: 
     }
     let order: Vec<&str> = p.devices.iter().map(|(d, _)| d.as_str()).collect();
     let planned: Vec<&str> = stages.iter().map(|s| s.0).collect();
-    if order != planned {
-        return Err(format!("devices in the log {order:?}, the plan {planned:?}"));
+    // a CPU stage is the blocks left on this host's CPU: no `using device` line, a CPU KV buffer
+    let devices: Vec<&str> = planned.iter().copied().filter(|d| *d != CPU_STAGE).collect();
+    if order != devices {
+        return Err(format!("devices in the log {order:?}, the plan {devices:?}"));
     }
     let per_layer = total / f64::from(layers);
     if per_layer < 0.05 {
@@ -347,9 +349,16 @@ pub fn stage_tuples(s: &crate::types::Split) -> Vec<(&str, usize, usize)> {
         .collect()
 }
 
+/// The stage device name for blocks kept on this host's CPU (configuration C, ADR-0005 D2). It can
+/// only be the first stage: llama.cpp offloads the last `-ngl` layers.
+pub const CPU_STAGE: &str = "CPU";
+
 /// The split branch of the engine command line: `--rpc` over loopback ports, the mapping
 /// (`--device`, `--tensor-split`, `--split-mode layer`), `-ngl 999` (with Common's `--fit off`, the
 /// mapping is exact only when every layer is offloaded) and `-lm none` when no mmap is asked.
+/// A first [`CPU_STAGE`] of `k` blocks instead offloads `-ngl (n + 1 - k)`, maps the other stages
+/// over the offloaded layers, and adds `--no-op-offload`: op offload would copy the CPU blocks'
+/// weights to the first device, the remote stage, for every large batch.
 /// Err names what is wrong with the plan.
 pub fn launch_args(s: &crate::types::Split) -> Result<Vec<String>, String> {
     if s.rpc_ports.is_empty() || s.rpc_ports.contains(&0) {
@@ -386,9 +395,28 @@ pub fn launch_args(s: &crate::types::Split) -> Result<Vec<String>, String> {
     }) {
         return Err(format!("{} has no RPC port", t.device));
     }
+    let tuples = stage_tuples(s);
+    if tuples.iter().skip(1).any(|t| t.0 == CPU_STAGE) {
+        return Err("the CPU stage must be the first".into());
+    }
     let mut a = vec!["--rpc".to_string(), rpc_endpoints(&s.rpc_ports)];
-    a.extend(rpc_split_args(&stage_tuples(s), s.n_layer as usize)?);
-    a.extend(["-ngl".to_string(), "999".to_string()]);
+    match tuples.split_first() {
+        Some((&(CPU_STAGE, 0, k), rest)) if rest.first().is_some_and(|r| r.1 == k) => {
+            let n = s.n_layer as usize;
+            let shifted: Vec<_> = rest.iter().map(|&(d, x, y)| (d, x - k, y - k)).collect();
+            a.extend(rpc_split_args(&shifted, n - k)?);
+            a.extend([
+                "-ngl".to_string(),
+                (n + 1 - k).to_string(),
+                "--no-op-offload".to_string(),
+            ]);
+        }
+        Some((&(CPU_STAGE, ..), _)) => return Err("a CPU stage needs blocks [0,k) and a stage from k".into()),
+        _ => {
+            a.extend(rpc_split_args(&tuples, s.n_layer as usize)?);
+            a.extend(["-ngl".to_string(), "999".to_string()]);
+        }
+    }
     if s.no_mmap {
         a.extend(["-lm".to_string(), "none".to_string()]);
     }
@@ -648,6 +676,63 @@ mod tests {
         let c = parse_buffers(LV4_C);
         assert!(c.kv_mib.iter().any(|(d, _)| d == "RPC1"), "{c:?}");
         assert_eq!(check_buffers(&c, &[("RPC0", 0, 3), ("RPC1", 3, 6)], 6), Ok(()));
+    }
+
+    /// Configuration C (ADR-0005 D2): blocks [0,k) stay on this host's CPU, the remote stage takes
+    /// [k,n) plus the output. The `-ngl` and tensor-split arithmetic follows llama.cpp's rule.
+    #[test]
+    fn cpu_stage_offloads_only_the_remote_layers() {
+        let plan = |stages: &[(&str, u32, u32)]| crate::types::Split {
+            rpc_ports: vec![50052],
+            stages: stages
+                .iter()
+                .map(|&(d, a, b)| crate::types::SplitStage {
+                    device: d.into(),
+                    first_block: a,
+                    end_block: b,
+                })
+                .collect(),
+            n_layer: 24,
+            no_mmap: false,
+            engine_pid: Default::default(),
+        };
+        let a = launch_args(&plan(&[(CPU_STAGE, 0, 10), ("RPC0", 10, 24)])).unwrap();
+        let ngl = a.iter().position(|x| x == "-ngl").unwrap();
+        assert_eq!(a[ngl + 1], "15", "n + 1 - k: blocks 10..24 and the output layer");
+        assert!(a.contains(&"--no-op-offload".to_string()), "{a:?}");
+        let dev = a.iter().position(|x| x == "--device").unwrap();
+        assert_eq!(a[dev + 1], "RPC0", "no CPU device name reaches the engine: {a:?}");
+        // configuration P keeps every layer offloaded
+        let p = launch_args(&plan(&[("RPC0", 0, 10), ("MTL0", 10, 24)])).unwrap();
+        assert!(p.windows(2).any(|w| w == ["-ngl", "999"]) && !p.contains(&"--no-op-offload".to_string()));
+        for bad in [
+            &[("RPC0", 0, 10), (CPU_STAGE, 10, 24)][..],
+            &[(CPU_STAGE, 0, 24)],
+            &[(CPU_STAGE, 0, 10), ("RPC0", 11, 24)],
+        ] {
+            assert!(launch_args(&plan(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    /// SYNTHETIC `-lv 4` lines in b11609's format for configuration C (the real proof is
+    /// `split_completion_golden_64_tokens_single_host`): the CPU stage has no `using device` line
+    /// and its KV share is the CPU buffer.
+    #[test]
+    fn cpu_stage_is_proved_by_its_kv_share_synthetic() {
+        let log = "0.00.079.542 I llama_prepare_model_devices: using device RPC0 (127.0.0.1:49167) (unknown id) - 5460 MiB free
+0.00.096.977 I llama_kv_cache:        CPU KV buffer size =     0.56 MiB
+0.00.097.340 I llama_kv_cache: RPC0[127.0.0.1:49167] KV buffer size =     1.12 MiB
+0.00.097.357 I llama_kv_cache: size =    1.69 MiB (   256 cells,   6 layers,  1/1 seqs), K (f16):    0.84 MiB, V (f16):    0.84 MiB
+";
+        let p = parse_buffers(log);
+        assert_eq!(check_buffers(&p, &[(CPU_STAGE, 0, 2), ("RPC0", 2, 6)], 6), Ok(()));
+        assert!(check_buffers(&p, &[(CPU_STAGE, 0, 3), ("RPC0", 3, 6)], 6).is_err());
+        assert!(
+            check_buffers(&p, &[("RPC0", 0, 6)], 6)
+                .unwrap_err()
+                .contains("KV buffer on CPU"),
+            "unplanned CPU layers are refused"
+        );
     }
 
     #[test]

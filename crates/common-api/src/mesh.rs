@@ -149,6 +149,8 @@ impl PeerQuota {
             engine_slots: Some(engine_slots),
             peer_slots: Arc::new(tokio::sync::Semaphore::new(self.peer_slots(engine_slot_count))),
             jobs: common_observability::jobs::Jobs::new(),
+            // set by `AppState::new` (WP-04 stage host)
+            rpc: None,
         }
     }
 }

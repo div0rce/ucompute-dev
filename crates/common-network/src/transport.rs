@@ -1356,6 +1356,10 @@ mod tests {
         );
         assert_eq!(negotiate(&hello(1, 3), &hello(1, 7)).unwrap(), 3);
         assert_eq!(negotiate(&hello(1, 7), &hello(1, 3)).unwrap(), 3);
+        // This build against a deployed minor-1 build: below the RPC minor either way (WP-04).
+        let (this, old) = (hello(1, PROTOCOL_MINOR), hello(1, crate::RPC_SESSION_MINOR - 1));
+        assert_eq!(negotiate(&this, &old).unwrap(), crate::RPC_SESSION_MINOR - 1);
+        assert_eq!(negotiate(&old, &this).unwrap(), crate::RPC_SESSION_MINOR - 1);
         let mut long = hello(3, 0);
         long.common_version = "v".repeat(10_000);
         assert!(negotiate(&hello(1, 0), &long).unwrap_err().message.len() < 300);

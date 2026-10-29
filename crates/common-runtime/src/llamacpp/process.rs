@@ -621,6 +621,7 @@ mod tests {
                 .collect(),
             n_layer: 6,
             no_mmap: false,
+            engine_pid: Default::default(),
         });
         r
     }

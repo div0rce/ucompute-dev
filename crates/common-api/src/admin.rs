@@ -99,6 +99,8 @@ pub async fn status(State(st): State<Arc<AppState>>) -> axum::Json<Value> {
             "last_exit": e.last_exit,
         },
         "loaded": e.loaded,
+        // WP-04: the pooled session this device heads (ids and byte counts only)
+        "split": st.split_slot().as_ref().map(crate::split::Active::status),
         "queue": {
             "inflight": st.admission.inflight(),
             "queued": st.admission.queued(),
@@ -289,6 +291,8 @@ pub async fn shutdown(State(st): State<Arc<AppState>>) -> (StatusCode, axum::Jso
 
 pub async fn unload(State(st): State<Arc<AppState>>) -> std::result::Result<StatusCode, ApiError> {
     st.manager.unload().await?;
+    // WP-04: the pooled session goes with its engine, so the stage's rpc-server stops now
+    crate::split::close(&st);
     Ok(StatusCode::NO_CONTENT)
 }
 

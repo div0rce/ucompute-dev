@@ -4,7 +4,10 @@
 //! the manifest records `scope = remote_single_peer` and the peer id; it never claims more than
 //! one physical device, because this CLI cannot know whether the peer is another machine. The
 //! sending side is audited like the daemon's `target: peer:<id>` (`remote_request`, `sent` then
-//! `finished`; ids and counts only).
+//! `finished`; ids and counts only). `run --split <peer> --split-at k` splits the model with one
+//! paired device (WP-04 pooled inference) through the running `common serve`, which owns the
+//! session: the daemon's disclosure is shown and needs an explicit yes, and the manifest records
+//! `scope = pooled_with_peer`, still one physical device claimed.
 
 use crate::mesh::Mesh;
 use crate::{context, shutdown_signal, Device, Stop};
@@ -36,6 +39,15 @@ pub struct RunArgs {
     /// Run on this paired device (id or short label) instead of here; needs `common privacy trusted-devices`
     #[arg(long, conflicts_with_all = ["device", "threads", "ctx"])]
     pub peer: Option<String>,
+    /// Split the model with this paired device (pooled inference through the running `common serve`); it receives its part of the weights and data from which your prompt and the reply can be rebuilt
+    #[arg(long, conflicts_with_all = ["peer", "device", "threads", "ctx"], requires = "split_at")]
+    pub split: Option<String>,
+    /// With --split: the first block of the second stage (1 to the model's block count minus 1)
+    #[arg(long, requires = "split")]
+    pub split_at: Option<u32>,
+    /// With --split: this device's CPU holds the first blocks and the other device the rest and the output layer (default: the other device holds the first blocks, this device's GPU the rest)
+    #[arg(long, requires = "split")]
+    pub same_backend: bool,
     /// Maximum tokens to generate
     #[arg(short = 'n', long = "max-tokens", default_value_t = 256)]
     pub max_tokens: u32,
@@ -213,6 +225,9 @@ async fn execute(a: &RunArgs, echo: bool) -> Result<(RunManifest, PathBuf, Outco
     if let Some(peer) = &a.peer {
         return execute_remote(a, peer, echo).await;
     }
+    if let Some(peer) = &a.split {
+        return execute_split(a, peer, echo).await;
+    }
     let started = Instant::now();
     let m = context().await?;
     let model = load(
@@ -329,6 +344,94 @@ async fn execute_remote(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManif
     let host = common_hardware::probe()?.host_summary();
     let manifest = manifest(host, &info, a, seed, &out, metrics, Some(rec.id));
     let path = write_manifest(&mesh.paths, &manifest)?;
+    Ok((manifest, path, out))
+}
+
+/// A split through the running daemon (WP-04): the daemon checks the policy, shows the disclosure
+/// (ADR-0005 D8) until it is accepted here, opens the session and loads the split engine. Nothing
+/// runs without the daemon, and nothing falls back to a local run.
+async fn execute_split(a: &RunArgs, peer: &str, echo: bool) -> Result<(RunManifest, PathBuf, Outcome)> {
+    let started = Instant::now();
+    let paths = Paths::from_env();
+    let daemon = crate::mesh::Daemon::find(&paths).await?.ok_or_else(|| {
+        CommonError::new(
+            ErrorCode::PolicyDenied,
+            "pooled inference runs through `common serve`, which is not running",
+        )
+        .with_hint("start `common serve`, then retry")
+    })?;
+    let seed = a.seed.unwrap_or_else(random_seed);
+    let mut body = serde_json::json!({
+        "model": a.model, "max_tokens": a.max_tokens, "temperature": a.temp, "top_p": a.top_p, "seed": seed,
+        "target": format!("split:{peer}"), "split_at": a.split_at,
+        "split_mode": if a.same_backend { "same_backend" } else { "pooled" }, "acknowledged": false,
+    });
+    let path = if a.chat {
+        body["messages"] = serde_json::json!([{"role": "user", "content": a.prompt}]);
+        "/v1/chat/completions"
+    } else {
+        body["prompt"] = a.prompt.clone().into();
+        "/v1/completions"
+    };
+    // a split load uploads the other device's part first: allow the daemon's whole load timeout
+    let wait = common_runtime::manager::SPLIT_LOAD_BASE * 2;
+    let v = match daemon
+        .call_for(reqwest::Method::POST, path, Some(body.clone()), wait)
+        .await
+    {
+        Err(e)
+            if e.code == ErrorCode::PolicyDenied && e.hint.as_deref().is_some_and(|h| h.contains("acknowledged")) =>
+        {
+            eprintln!("{}", e.message);
+            eprint!("Split this model with that device? [y/N] ");
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+                return Err(CommonError::new(
+                    ErrorCode::PolicyDenied,
+                    "pooling was not accepted; nothing was sent",
+                ));
+            }
+            body["acknowledged"] = true.into();
+            daemon.call_for(reqwest::Method::POST, path, Some(body), wait).await?
+        }
+        r => r?,
+    };
+    let choice = &v["choices"][0];
+    let text = choice["text"]
+        .as_str()
+        .or_else(|| choice["message"]["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    if echo {
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
+    let out = Outcome {
+        text,
+        usage: serde_json::from_value(v["usage"].clone()).unwrap_or_default(),
+        timings: serde_json::from_value(v["timings"].clone()).unwrap_or_default(),
+        ..Default::default()
+    };
+    let remote = v["target"]
+        .as_str()
+        .and_then(|t| t.strip_prefix("split:"))
+        .and_then(|h| PeerId::parse_hex(h).ok());
+    let status = daemon.call(reqwest::Method::GET, "/api/status", None).await?;
+    let info: LoadedModelInfo = serde_json::from_value(status["loaded"].clone()).unwrap_or_default();
+    let metrics = RunMetrics {
+        load_ms: Some(info.load_ms),
+        time_to_first_token_ms: out.timings.time_to_first_token_ms,
+        prefill_tokens_per_second: out.timings.prompt_tokens_per_second,
+        decode_tokens_per_second: out.timings.decode_tokens_per_second,
+        total_ms: started.elapsed().as_secs_f64() * 1000.0,
+        peak_rss_bytes: None,
+    };
+    let host = common_hardware::probe()?.host_summary();
+    let mut manifest = manifest(host, &info, a, seed, &out, metrics, remote);
+    // one model across this device and the peer's stage; this CLI cannot prove the peer is another machine
+    manifest.base.scope = "pooled_with_peer".into();
+    let path = write_manifest(&paths, &manifest)?;
     Ok((manifest, path, out))
 }
 
@@ -473,6 +576,9 @@ fn replay_args(m: &RunManifest) -> Result<RunArgs> {
         prompt,
         // A replay always runs here: the point is to check this host against the record.
         peer: None,
+        split: None,
+        split_at: None,
+        same_backend: false,
         max_tokens: m.base.max_tokens,
         device: if m.base.device_actual == "cpu" {
             Device::Cpu
@@ -781,6 +887,9 @@ mod tests {
             model: "m".into(),
             prompt: "secret".into(),
             peer: None,
+            split: None,
+            split_at: None,
+            same_backend: false,
             max_tokens: 8,
             device: Device::Cpu,
             ctx: None,

@@ -14,6 +14,8 @@
 
 pub mod logparse;
 pub mod process;
+pub mod rpc_server;
+pub mod sockets;
 pub mod split;
 pub mod sse;
 
@@ -95,6 +97,10 @@ impl LlamaCppBackend {
         let env = process::engine_environment(req);
         let mut child = process::spawn(&self.server_binary(), &args, env, &log_path)?;
         tracing::info!(pid = child.id(), port, gpu, log = %log_path.display(), "llama-server started");
+        // before the engine dials its `--rpc` ports: the bridge carries only this pid's connections
+        if let (Some(split), Some(pid)) = (&req.split, child.id()) {
+            split.engine_pid.set(pid);
+        }
         let client = reqwest::Client::builder().no_proxy().build().map_err(transport)?;
         if let Err(e) = process::wait_ready(&mut child, &client, port, deadline, &log_path, &api_key).await {
             process::stop(child).await;
@@ -1140,6 +1146,7 @@ http.server.HTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_fo
                     .collect(),
                 n_layer: 6,
                 no_mmap: false,
+                engine_pid: Default::default(),
             }),
         }
     }
@@ -1180,6 +1187,29 @@ http.server.HTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_fo
         let s = starts(&log);
         assert_eq!(s.len(), 2, "{s:?}");
         assert!(s[1].contains("--device none"), "{s:?}");
+    }
+
+    /// The RPC bridge's owner check and per-load byte cap (ADR-0005 D4, D6) read the split
+    /// engine's pid from `Split::engine_pid`: it is set at every start, including the one retry
+    /// after a lost port race (`couldn't bind`), which is a second start against the same RPC
+    /// servers and so a second load. FAKE engine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn split_publishes_each_engine_start_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, model, log) = fake_engine(dir.path(), "couldn't bind HTTP server socket\n", false);
+        let req = split_req(&model, &[("RPC0", 0, 3), ("MTL0", 3, 6)]);
+        let sink = req.split.as_ref().unwrap().engine_pid.clone();
+        assert_eq!(sink.get(), None);
+        assert!(backend.load_llama(req).await.is_err());
+        let s = starts(&log);
+        assert_eq!(s.len(), 2, "the port-race retry: {s:?}");
+        let pid: u32 = s[1].split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(
+            sink.get(),
+            Some((pid, 2)),
+            "the second start, counted as the second load"
+        );
     }
 
     /// A ready split engine whose `-lv 4` log (real b11609 lines: RPC0 holds [0,3), MTL0 [3,6))

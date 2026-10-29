@@ -4,8 +4,11 @@
 //!
 //! Common extension `target` (body field or `X-Common-Target` header): `"local"` (default) or
 //! `"peer:<peer id or short label>"` runs the whole request on one paired device (Mode B, remote
-//! execution, never pooled inference). `PolicyEngine::evaluate` decides before admission, load or
-//! any network activity (I-05); every response carries `"target"` so nothing runs elsewhere silently.
+//! execution, never pooled inference). `"split:<peer>"` splits the model's blocks between this
+//! device and that one (WP-04 pooled inference, [`crate::split`]; body fields `split_at`,
+//! `split_mode`, `acknowledged`), and its responses also carry `"placement"` as the engine log
+//! proved it. `PolicyEngine::evaluate` decides before admission, load or any network activity
+//! (I-05); every response carries `"target"` so nothing runs elsewhere silently.
 
 use crate::admission::Rejected;
 use crate::{ApiError, AppState, Json};
@@ -197,8 +200,10 @@ pub struct ChatRequest {
     /// Accepted for compatibility; the runtime has no field for it yet, so it is not forwarded.
     #[allow(dead_code)]
     pub tool_choice: Option<Value>,
-    /// Common extension: `"local"` or `"peer:<id>"` (see the module docs).
+    /// Common extension: `"local"`, `"peer:<id>"` or `"split:<id>"` (see the module docs).
     pub target: Option<String>,
+    #[serde(flatten)]
+    pub split: crate::split::SplitParams,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +213,8 @@ pub struct CompletionRequest {
     #[serde(flatten)]
     pub sampling: Sampling,
     pub target: Option<String>,
+    #[serde(flatten)]
+    pub split: crate::split::SplitParams,
 }
 
 #[derive(Deserialize)]
@@ -224,11 +231,12 @@ fn require_model(model: &Option<String>) -> Result<String> {
     }
 }
 
-/// Where a request runs: this device or one paired peer.
+/// Where a request runs: this device, one paired peer, or split between the two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Local,
     Peer(PeerId),
+    Split(PeerId),
 }
 
 impl Target {
@@ -237,6 +245,7 @@ impl Target {
         match self {
             Target::Local => "local".into(),
             Target::Peer(id) => format!("peer:{}", id.to_hex()),
+            Target::Split(id) => format!("split:{}", id.to_hex()),
         }
     }
 }
@@ -247,10 +256,11 @@ fn parse_target(st: &AppState, body: Option<&str>, headers: &HeaderMap) -> Resul
     let s = body.or_else(|| headers.get("x-common-target").and_then(|v| v.to_str().ok()));
     match s.map(str::trim) {
         None | Some("") | Some("local") => Ok(Target::Local),
-        Some(s) => match s.strip_prefix("peer:") {
-            Some(id) => Ok(Target::Peer(st.resolve_peer(id)?)),
-            None => Err(CommonError::invalid(
-                "target must be \"local\" or \"peer:<peer id or short label>\"",
+        Some(s) => match (s.strip_prefix("peer:"), s.strip_prefix("split:")) {
+            (Some(id), _) => Ok(Target::Peer(st.resolve_peer(id)?)),
+            (_, Some(id)) => Ok(Target::Split(st.resolve_peer(id)?)),
+            _ => Err(CommonError::invalid(
+                "target must be \"local\", \"peer:<peer id or short label>\" or \"split:<peer id or short label>\"",
             )),
         },
     }
@@ -313,8 +323,10 @@ struct Format {
     model: String,
     created: u64,
     include_usage: bool,
-    /// `"local"` or `"peer:<hex>"`, in every envelope.
+    /// `"local"`, `"peer:<hex>"` or `"split:<hex>"`, in every envelope.
     target: String,
+    /// A split's placement as its engine log proved it, in every envelope (WP-04).
+    placement: Option<Value>,
 }
 
 fn usage_json(u: &Usage) -> Value {
@@ -334,6 +346,7 @@ impl Format {
             created: now_secs(),
             include_usage,
             target: target.label(),
+            placement: None,
         }
     }
 
@@ -342,7 +355,11 @@ impl Format {
             Kind::Chat => "chat.completion.chunk",
             Kind::Text => "text_completion",
         };
-        json!({"id": self.id, "object": object, "created": self.created, "model": self.model, "choices": choices, "target": self.target})
+        let mut v = json!({"id": self.id, "object": object, "created": self.created, "model": self.model, "choices": choices, "target": self.target});
+        if let Some(p) = &self.placement {
+            v["placement"] = p.clone();
+        }
+        v
     }
 
     fn chunk(&self, delta: Value, finish: Option<&str>) -> Value {
@@ -519,25 +536,26 @@ type Started = (GenerateStream, CancellationToken, Option<OwnedSemaphorePermit>)
 #[allow(clippy::too_many_arguments)]
 async fn run(
     st: Arc<AppState>,
-    fmt: Format,
+    mut fmt: Format,
     model_id: &str,
     input: Input,
     sampling: &Sampling,
     tools: Option<Value>,
     target: Target,
+    split: &crate::split::SplitParams,
     client_ref: Option<String>,
 ) -> std::result::Result<Response, ApiError> {
     // I-05: the routing decision comes first, before admission, any load or any network activity.
     // Local is always allowed; a peer needs trusted_group privacy, networking on and a pinned,
-    // non-revoked peer in a group allowing remote inference (typed denial with the plain reason).
+    // non-revoked peer in a group allowing remote inference (typed denial with the plain reason);
+    // a split needs a group allowing pooled inference, which remote inference does not grant.
     let privacy = st.settings().privacy;
-    let exec = match target {
-        Target::Local => ExecutionTarget::Local,
-        Target::Peer(id) => ExecutionTarget::Peer(id),
+    let (exec, workload) = match target {
+        Target::Local => (ExecutionTarget::Local, WorkloadKind::RemoteInference),
+        Target::Peer(id) => (ExecutionTarget::Peer(id), WorkloadKind::RemoteInference),
+        Target::Split(id) => (ExecutionTarget::Peer(id), WorkloadKind::PooledInference),
     };
-    st.policy()
-        .evaluate(privacy, exec, WorkloadKind::RemoteInference)
-        .into_result()?;
+    st.policy().evaluate(privacy, exec, workload).into_result()?;
     // Untrusted schema is checked before admission: a grammar bomb never takes a slot or a load.
     json_schema_of(sampling.response_format.as_ref())?;
     // Listed from here on (E3), so a request waiting for a slot or a load shows with its client_ref.
@@ -556,6 +574,7 @@ async fn run(
     let started = match target {
         Target::Peer(id) => start_remote(&st, model_id, input, sampling, tools, id, privacy, &job).await,
         Target::Local => start_local(&st, model_id, input, sampling, tools, &job).await,
+        Target::Split(id) => start_split(&st, model_id, input, sampling, tools, id, split, &job, &mut fmt).await,
     };
     let (gen, cancel, permit) = started.inspect_err(|e| job.fail(e.error.code.as_str()))?;
     let gen = crate::jobs::track(gen, job);
@@ -583,7 +602,16 @@ async fn start_local(
     job.started();
     let model = st.manager.ensure_loaded(model_id, st.load_options()).await?;
     job.loaded(&model.info().device_actual);
-    let input = match input {
+    let req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    // Child of the server's shutdown token: Ctrl-C ends this generation too (see `serve_on`).
+    let cancel = st.shutdown.child_token();
+    let gen = model.generate(req, cancel.clone()).await?;
+    Ok((gen, cancel, Some(permit)))
+}
+
+/// Chat with the model's template when its file has one, else a plain prompt.
+fn local_input(st: &AppState, model_id: &str, input: Input) -> Result<PromptInput> {
+    Ok(match input {
         Input::Raw(p) => PromptInput::Raw(p),
         Input::Chat(msgs) => {
             let (manifest, blob) = st.store.resolve(model_id)?;
@@ -593,13 +621,64 @@ async fn start_local(
                 PromptInput::Raw(plain_prompt(&msgs))
             }
         }
-    };
-    let req = sampling.to_generate(input, tools)?;
-    // Child of the server's shutdown token: Ctrl-C ends this generation too (see `serve_on`).
+    })
+}
+
+/// WP-04 pooled inference: admission (the split engine is this device's), the split engine with
+/// `peer` ([`crate::split::ensure`]), then the generation. When the session ends mid-request its
+/// split engine is stopped and the generation fails with the session's reason (`peer_lost`,
+/// `policy_denied`, ...), never a local rerun (ADR-0005 D7). `fmt` gets the placement the engine
+/// log proved.
+#[allow(clippy::too_many_arguments)]
+async fn start_split(
+    st: &Arc<AppState>,
+    model_id: &str,
+    input: Input,
+    sampling: &Sampling,
+    tools: Option<Value>,
+    peer: PeerId,
+    split: &crate::split::SplitParams,
+    job: &JobHandle,
+    fmt: &mut Format,
+) -> std::result::Result<Started, ApiError> {
+    // shape and consent before a slot is taken
+    if split.split_at.is_none() || !split.acknowledged {
+        crate::split::ensure(st, model_id, peer, split).await?;
+    }
+    let permit = admit(st).await?;
+    job.started();
+    let (model, session) = crate::split::ensure(st, model_id, peer, split).await?;
+    let info = model.info();
+    job.loaded(&info.device_actual);
+    fmt.placement = Some(json!({"devices": info.device_actual, "stages": info.split, "session": session.session_id()}));
+    let req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    // The session's end stops the split engine (`split::ensure`'s watcher), which ends this stream.
     let cancel = st.shutdown.child_token();
-    let gen = model.generate(req, cancel.clone()).await?;
+    let gen = match model.generate(req, cancel.clone()).await {
+        Ok(g) => g,
+        Err(e) => return Err(session.failure().unwrap_or(e).into()),
+    };
+    // An error while the session is ending (the engine's RPC connections reset a little before the
+    // session's reason is known) is the session's reason.
+    let gen = gen
+        .then(move |ev| {
+            let session = session.clone();
+            async move {
+                match ev {
+                    Err(e) => Err(match tokio::time::timeout(SESSION_END_GRACE, session.ended()).await {
+                        Ok(reason) => reason,
+                        Err(_) => e,
+                    }),
+                    ok => ok,
+                }
+            }
+        })
+        .boxed();
     Ok((gen, cancel, Some(permit)))
 }
+
+/// How long a split generation's error waits for its session's reason (ADR-0005 D7).
+const SESSION_END_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Mode B: the whole request on `peer` over the authenticated transport, streamed back exactly
 /// like a local run. Called only after `evaluate` allowed it; `generate_remote` re-checks the
@@ -681,6 +760,7 @@ pub async fn chat(
         &req.sampling,
         req.tools,
         target,
+        &req.split,
         crate::jobs::client_ref(&headers),
     )
     .await
@@ -708,6 +788,7 @@ pub async fn completions(
         &req.sampling,
         None,
         target,
+        &req.split,
         client_ref,
     )
     .await
@@ -1049,6 +1130,7 @@ mod tests {
             created: 5,
             include_usage: true,
             target: "local".into(),
+            placement: None,
         };
         let evs = f.stream_events(Ok(GenerateEvent::Token {
             text: "Hi".into(),
@@ -1143,6 +1225,7 @@ mod tests {
             created: 0,
             include_usage: false,
             target: "local".into(),
+            placement: None,
         }
         .final_json(&c);
         assert!(v["choices"][0]["message"]["content"].is_null());
@@ -1167,6 +1250,13 @@ mod tests {
         let v = f.final_json(&Collected::default());
         assert_eq!(v["target"], format!("peer:{}", "ab".repeat(32)));
         assert_eq!(f.envelope(json!([]))["target"], v["target"]);
+        assert!(v.get("placement").is_none(), "only a split carries a placement");
+        let mut f = Format::new(Kind::Text, "m", false, &Target::Split(id));
+        f.placement = Some(json!({"devices": "RPC0 (127.0.0.1:1), MTL0"}));
+        let v = f.final_json(&Collected::default());
+        assert_eq!(v["target"], format!("split:{}", "ab".repeat(32)));
+        assert_eq!(v["placement"]["devices"], "RPC0 (127.0.0.1:1), MTL0");
+        assert_eq!(f.chunk(json!({}), None)["placement"], v["placement"], "every chunk too");
     }
 
     #[test]

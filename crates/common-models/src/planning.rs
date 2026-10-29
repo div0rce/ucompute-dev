@@ -55,6 +55,20 @@ pub fn plan_context(
     memory_budget_bytes: u64,
     allow_cap: bool,
 ) -> Result<ContextPlan> {
+    plan_context_with(meta, requested, memory_budget_bytes, allow_cap, |n_ctx, kv| {
+        estimate(meta, file_size, n_ctx, kv)
+    })
+}
+
+/// [`plan_context`] against any estimate of `(n_ctx, kv)`: one stage of a split plans with
+/// `feasibility::estimate_stage` (WP-04), so the head needs only its stages' weights and KV share.
+pub fn plan_context_with(
+    meta: &GgufMetadata,
+    requested: Option<u32>,
+    memory_budget_bytes: u64,
+    allow_cap: bool,
+    estimate: impl Fn(u32, KvType) -> crate::MemoryEstimate,
+) -> Result<ContextPlan> {
     let trained = meta.context_length;
     if trained == 0 {
         return Err(CommonError::new(
@@ -82,7 +96,7 @@ pub fn plan_context(
     for kv_type in [KvType::F16, KvType::Q8_0] {
         let mut n_ctx = start;
         loop {
-            let est = estimate(meta, file_size, n_ctx, kv_type);
+            let est = estimate(n_ctx, kv_type);
             if est.total_bytes <= memory_budget_bytes {
                 let budget = human_bytes(memory_budget_bytes);
                 if n_ctx < start {
@@ -111,7 +125,7 @@ pub fn plan_context(
             n_ctx = ((n_ctx - 1) / CTX_STEP * CTX_STEP).max(min_ctx);
         }
     }
-    let est = estimate(meta, file_size, min_ctx, KvType::Q8_0);
+    let est = estimate(min_ctx, KvType::Q8_0);
     Err(CommonError::new(
         ErrorCode::InsufficientMemory,
         format!(

@@ -452,6 +452,139 @@ async fn peer_target_is_denied_before_any_connection_when_network_is_enabled() {
     srv.stop().await;
 }
 
+/// WP-04 C6 (ADR-0005 D5, I-05): a split target is decided by the policy for POOLED inference
+/// before admission, any load or any network activity. Remote inference alone does not grant it.
+/// One server, nothing listens at the pinned address; no model file is needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_target_denied_before_any_connection_without_pooled_policy() {
+    let (srv, _dir) = empty_server().await;
+    let stranger = DeviceIdentity::generate().unwrap().id;
+    let body = json!({ "model": MODEL_ID, "prompt": PROMPT, "max_tokens": 4, "target": format!("split:{}", stranger.to_hex()), "split_at": 3, "acknowledged": true });
+    let refused = |want: &'static str| {
+        let body = body.clone();
+        let srv = &srv;
+        async move {
+            let (status, v) = post(srv, "/v1/completions", body).await;
+            assert_eq!((status, v["error"]["code"].as_str()), (403, Some(want)), "{v}");
+        }
+    };
+    refused("policy_denied").await; // local_only
+    let (status, _) = put(
+        &srv,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    refused("policy_denied").await; // networking off
+    enable_network(&srv, false).await;
+    refused("peer_unauthorized").await; // not paired
+    pin(&srv, stranger, "stranger", Some("127.0.0.1:1".into()));
+    refused("peer_unauthorized").await; // paired, in no group
+    put_group(&srv, "home", &[stranger], true, false).await;
+    refused("peer_unauthorized").await; // remote inference only: not pooling
+                                        // the header form is decided the same way
+    let r = client()
+        .post(srv.url("/v1/completions"))
+        .header("x-common-target", format!("split:{}", stranger.short_label()))
+        .json(&json!({ "model": MODEL_ID, "prompt": PROMPT, "split_at": 3, "acknowledged": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(srv.state.split_slot().as_ref().map(|a| a.peer), None);
+    assert_no_network_activity(&srv).await;
+    let kinds = audit_kinds(&get(&srv, "/api/audit?n=1000").await);
+    assert!(
+        !kinds.iter().any(|k| k.starts_with("session_") || k.starts_with("rpc_")),
+        "{kinds:?}"
+    );
+    srv.stop().await;
+}
+
+/// WP-04 C6 (ADR-0005 D5, D8, X-08): once the policy allows pooling, `split_at` is required, the
+/// disclosure must be acknowledged (403 carrying its text), and a model whose licence does not
+/// allow uploading its weights is refused, all before any connection. The model is the REAL
+/// stories15M file (licence unknown, B-011) from COMMON_HOME; no engine runs. This binary never
+/// sets `COMMON_TEST_SINGLE_HOST_POOL`, so nothing lifts the licence gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_requires_split_at_and_acknowledgement() {
+    let Some(home) = fixture_home() else {
+        return;
+    };
+    assert!(std::env::var_os(common_network::rpc::TEST_POOL_ENV).is_none());
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(serving_app(&home, dir.path(), cfg())).await;
+    let (status, _) = put(
+        &srv,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    enable_network(&srv, false).await;
+    let stranger = DeviceIdentity::generate().unwrap().id;
+    pin(&srv, stranger, "stranger", Some("127.0.0.1:1".into()));
+    put_group(&srv, "home", &[stranger], false, true).await;
+    let target = format!("split:{}", stranger.to_hex());
+    let post_c = |extra: Value| {
+        let mut body = json!({ "model": MODEL_ID, "prompt": PROMPT, "max_tokens": 4, "target": target });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let srv = &srv;
+        async move { post(srv, "/v1/completions", body).await }
+    };
+    let (status, v) = post_c(json!({ "acknowledged": true })).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (400, Some("invalid_request")),
+        "{v}"
+    );
+    assert!(v["error"]["message"].as_str().unwrap().contains("split_at"), "{v}");
+    let (status, v) = post_c(json!({ "split_at": 3 })).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("policy_denied")),
+        "{v}"
+    );
+    assert_eq!(
+        v["error"]["message"],
+        common_api::split::disclosure(&stranger.short_label())
+    );
+    assert!(v["error"]["hint"].as_str().unwrap().contains("acknowledged"), "{v}");
+    let (status, v) = post_c(json!({ "split_at": 3, "acknowledged": true })).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("policy_denied")),
+        "{v}"
+    );
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("licence (unknown)"),
+        "{v}"
+    );
+    // chat takes the same fields
+    let (status, v) = post(
+        &srv,
+        "/v1/chat/completions",
+        chat_body(MODEL_ID, 4, json!({ "target": target, "split_at": 3 })),
+    )
+    .await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (403, Some("policy_denied")),
+        "{v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Pooling splits one model"),
+        "{v}"
+    );
+    assert_no_remote_request(&srv).await;
+    assert!(srv.state.manager.snapshot().loaded.is_none(), "nothing was loaded");
+    srv.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_pins_both_sides_and_revoke_closes_the_connection_single_host() {
     let (a, _da) = empty_server().await;
@@ -1328,8 +1461,27 @@ impl Drop for Relay {
 /// sends at most one PING per keep-alive interval it stays idle (its timer restarts on every
 /// ack-eliciting packet) and the other side answers each with at most one ACK-only datagram, so
 /// per side and interval 2 datagrams, plus one interval for a window that straddles two timers.
-fn keepalive_bound(elapsed: Duration, keep_alive: Duration) -> u64 {
-    4 * (elapsed.as_millis() / keep_alive.as_millis() + 1) as u64
+/// Plus 2 per loss probe (`quic_sent`): the probe and the immediate ACK it asks for.
+fn keepalive_bound(elapsed: Duration, keep_alive: Duration, probes: u64) -> u64 {
+    4 * (elapsed.as_millis() / keep_alive.as_millis() + 1) as u64 + 2 * probes
+}
+
+/// What the QUIC stacks of `servers` have sent so far, over all their connections: (loss probes,
+/// STREAM + DATAGRAM frames). A keep-alive PING is ACKed after the peer's ACK delay (up to 25 ms),
+/// and its PTO is that delay plus ~1-2 ms on loopback, so timer jitter can fire it: quinn then
+/// sends two probes, each an IMMEDIATE_ACK frame (ack-frequency extension) answered at once. STREAM
+/// and DATAGRAM frames are the only ones that carry application bytes.
+async fn quic_sent(servers: [&Server; 2]) -> (u64, u64) {
+    let mut out = (0, 0);
+    for srv in servers {
+        let Ok(node) = srv.state.node().await else { continue };
+        for c in node.connections() {
+            let f = c.conn.stats().frame_tx;
+            out.0 += f.immediate_ack;
+            out.1 += f.stream + f.datagram;
+        }
+    }
+    out
 }
 
 /// Largest datagram a keep-alive or its ACK can be here: short header (1 + 8-byte connection id +
@@ -1446,6 +1598,7 @@ async fn privacy_mode_enforced_end_to_end_single_host() {
     assert_eq!(get(&a, "/api/privacy").await["mode"], "local_only");
 
     let (server0, sent0) = (server_request_entries(&b).len(), sender_entries(&a, "sent").len());
+    let q0 = quic_sent([&a, &b]).await;
     let (d0, b0, _) = relay.window();
     let t0 = Instant::now();
     let http = client();
@@ -1470,10 +1623,12 @@ async fn privacy_mode_enforced_end_to_end_single_host() {
     }
     let elapsed = t0.elapsed();
     let (d1, b1, largest) = relay.window();
-    let bound = keepalive_bound(elapsed, Duration::from_millis(cfg().network.keep_alive_ms));
+    let q1 = quic_sent([&a, &b]).await;
+    let probes = q1.0.saturating_sub(q0.0);
+    let bound = keepalive_bound(elapsed, Duration::from_millis(cfg().network.keep_alive_ms), probes);
     eprintln!(
         "SINGLE-HOST F-10-10: {N} peer-targeted requests in local_only in {elapsed:?}: relay {} datagrams / {} bytes \
-         (largest {largest} B; keep-alive bound {bound} datagrams of <= {KEEPALIVE_MAX_BYTES} B); B audit +{}, A sent +{}",
+         (largest {largest} B; keep-alive bound {bound} datagrams of <= {KEEPALIVE_MAX_BYTES} B, {probes} loss probes); B audit +{}, A sent +{}",
         d1 - d0,
         b1 - b0,
         server_request_entries(&b).len() - server0,
@@ -1490,6 +1645,7 @@ async fn privacy_mode_enforced_end_to_end_single_host() {
         "{} datagrams in {elapsed:?} > keep-alive bound {bound}",
         d1 - d0
     );
+    assert_eq!(q1.1, q0.1, "no STREAM or DATAGRAM frame left either device");
     assert!(
         largest <= KEEPALIVE_MAX_BYTES,
         "a {largest}-byte datagram is not a keep-alive"
@@ -1549,6 +1705,7 @@ async fn privacy_mode_enforced_end_to_end_single_host() {
         use std::os::unix::fs::PermissionsExt;
         let log = a.state.audit.path.clone();
         tokio::time::sleep(Duration::from_millis(300)).await; // the previous request's tail
+        let q4 = quic_sent([&a, &b]).await;
         let (d4, _, _) = relay.window();
         let t4 = Instant::now();
         std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o400)).unwrap();
@@ -1563,7 +1720,8 @@ async fn privacy_mode_enforced_end_to_end_single_host() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
         let (d5, _, largest) = relay.window();
-        let bound = keepalive_bound(t4.elapsed(), Duration::from_millis(cfg().network.keep_alive_ms));
+        let probes = quic_sent([&a, &b]).await.0.saturating_sub(q4.0);
+        let bound = keepalive_bound(t4.elapsed(), Duration::from_millis(cfg().network.keep_alive_ms), probes);
         eprintln!(
             "SINGLE-HOST F-06-10: request with A's audit log unwritable: relay {} datagrams (largest {largest} B; bound {bound})",
             d5 - d4
@@ -1649,8 +1807,27 @@ fn policy_model(
     }
 }
 
+/// The same for a `split:` target (WP-04): pooled inference needs a group allowing pooling, which
+/// remote inference does not grant. A split the policy allows still never leaves this device here:
+/// A has no model file to split (`model_not_downloaded`, before the licence gate or any session).
+fn split_model(
+    privacy: common_policy::PrivacyMode,
+    network: bool,
+    group: GroupPolicy,
+    t: Target,
+) -> (u16, &'static str) {
+    match (privacy, network, t) {
+        (common_policy::PrivacyMode::TrustedGroup, true, Target::B) if group == GroupPolicy::PooledOnly => {
+            (404, "model_not_downloaded")
+        }
+        (common_policy::PrivacyMode::TrustedGroup, true, Target::B) => (403, "peer_unauthorized"),
+        _ => (403, policy_model(privacy, network, group, t).expect("denied")),
+    }
+}
+
 /// F-06-07, SINGLE-HOST: 10,000 requests through A's HTTP API with randomized (privacy mode,
-/// target local / B / unknown / revoked / unpaired, A's group policy for B, A's networking on/off)
+/// target local / B / unknown / revoked / unpaired, as `peer:` or (WP-04) `split:`, A's group
+/// policy for B, A's networking on/off)
 /// from a seeded PRNG (`COMMON_TEST_SEED` replays a run). Settings change per epoch of 20-80
 /// requests; targets, endpoint and body/header form per request. B (real engine) is reachable only
 /// through the counting relay. Asserted: (a) every request the policy model denies gets exactly
@@ -1707,7 +1884,7 @@ async fn local_only_never_leaves_device_10k_single_host() {
         (Duration::ZERO, 0u64, 0u64, 0u64);
     // Denied-only window time with A's endpoint up (keep-alives can flow), and relay datagrams
     // during the windows that held allowed requests (proof the relay is the path).
-    let (mut denied_time_connected, mut allowed_window_dgrams) = (Duration::ZERO, 0u64);
+    let (mut denied_time_connected, mut allowed_window_dgrams, mut denied_probes) = (Duration::ZERO, 0u64, 0u64);
     while sent < TOTAL {
         let privacy = [
             PrivacyMode::LocalOnly,
@@ -1762,6 +1939,7 @@ async fn local_only_never_leaves_device_10k_single_host() {
 
         let (server0, sent0) = (server_request_entries(&b).len(), sender_entries(&a, "sent").len());
         let finished0 = sender_entries(&a, "finished").len();
+        let q0 = quic_sent([&a, &b]).await;
         let (d0, _, _) = relay.window();
         let t0 = Instant::now();
         let mut allowed = 0usize;
@@ -1782,12 +1960,18 @@ async fn local_only_never_leaves_device_10k_single_host() {
             };
             let chat = rng.below(2) == 1;
             let in_header = rng.below(2) == 1;
-            let label = id.map(|id| format!("peer:{}", id.to_hex()));
+            // WP-04: a third of the peer-targeted requests ask for a split instead
+            let split = id.is_some() && rng.below(3) == 0;
+            let label = id.map(|id| format!("{}:{}", if split { "split" } else { "peer" }, id.to_hex()));
             let mut body = if chat {
                 chat_body(MODEL_ID, 1, json!({}))
             } else {
                 json!({ "model": MODEL_ID, "prompt": PROMPT, "max_tokens": 1, "temperature": 0 })
             };
+            if split {
+                body["split_at"] = json!(3);
+                body["acknowledged"] = json!(true);
+            }
             let mut req = http.post(a.url(if chat {
                 "/v1/chat/completions"
             } else {
@@ -1812,6 +1996,16 @@ async fn local_only_never_leaves_device_10k_single_host() {
                 *by_outcome.entry("local:model_not_downloaded".into()).or_default() += 1;
                 continue;
             };
+            if split {
+                let want = split_model(privacy, network, group, target);
+                assert_eq!(
+                    (status, code.as_str()),
+                    want,
+                    "split {target:?} {privacy:?} net={network} {group:?}: {v}"
+                );
+                *by_outcome.entry(format!("split:{}", want.1)).or_default() += 1;
+                continue;
+            }
             match policy_model(privacy, network, group, target) {
                 None => {
                     assert_eq!(
@@ -1845,6 +2039,7 @@ async fn local_only_never_leaves_device_10k_single_host() {
         }
         let elapsed = t0.elapsed();
         let (d1, _, largest) = relay.window();
+        let q1 = quic_sent([&a, &b]).await;
         // (a) + (b): B saw exactly the allowed requests, A audited exactly those, ids joined.
         let served = wait_for("B audits every allowed request", || async {
             let e = server_request_entries(&b);
@@ -1865,12 +2060,18 @@ async fn local_only_never_leaves_device_10k_single_host() {
         assert_eq!(request_ids(&finished[finished0..]), request_ids(&served[server0..]));
         // (c): a window of denied requests only carries keep-alives at most.
         if allowed == 0 {
-            let bound = keepalive_bound(elapsed, keep_alive);
+            let probes = q1.0.saturating_sub(q0.0);
+            let bound = keepalive_bound(elapsed, keep_alive, probes);
             assert!(
                 d1 - d0 <= bound && largest <= KEEPALIVE_MAX_BYTES,
-                "epoch {epochs}: {} datagrams (largest {largest} B) in {elapsed:?}, keep-alive bound {bound}",
+                "epoch {epochs} ({privacy:?} net={network} {group:?}, before {before:?}): {} datagrams (largest {largest} B) in {elapsed:?}, keep-alive bound {bound}",
                 d1 - d0
             );
+            assert_eq!(
+                q1.1, q0.1,
+                "epoch {epochs}: a STREAM or DATAGRAM frame in a denied-only window"
+            );
+            denied_probes += probes;
             denied_windows += 1;
             denied_window_time += elapsed;
             if network {
@@ -1903,7 +2104,8 @@ async fn local_only_never_leaves_device_10k_single_host() {
         "SINGLE-HOST F-06-07: allowed {allowed_total} (each: one A 'sent' + one B entry, same request_id; \
          {allowed_window_dgrams} relay datagrams in their windows); denied-only windows {denied_windows} over \
          {denied_window_time:?} ({denied_time_connected:?} of it with A's endpoint up): relay {denied_window_dgrams} \
-         datagrams (keep-alive bound {denied_window_bound}), largest {largest_denied} B"
+         datagrams (keep-alive bound {denied_window_bound}, {denied_probes} loss probes), largest {largest_denied} B, \
+         no STREAM or DATAGRAM frame"
     );
     eprintln!(
         "SINGLE-HOST F-06-07: policy()+evaluate on the deny path, n={}: p50 {:?} p99 {p99:?} max {:?}; \
@@ -1916,6 +2118,14 @@ async fn local_only_never_leaves_device_10k_single_host() {
     );
     assert!(allowed_total > 0, "the run must exercise the allow path too");
     assert!(p99 < Duration::from_millis(1), "policy evaluation p99 {p99:?}");
+    // no split target opened a pooled session or a tunnel on either device
+    for srv in [&a, &b] {
+        let all = srv.state.audit.tail(10_000_000).unwrap();
+        assert!(!all
+            .iter()
+            .any(|e| e.kind.starts_with("session_") || e.kind.starts_with("rpc_")));
+    }
+    assert!(by_outcome.contains_key("split:model_not_downloaded"), "{by_outcome:?}");
     a.stop().await;
     b.stop().await;
 }

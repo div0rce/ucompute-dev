@@ -132,6 +132,44 @@ pub struct LoadOptions {
     pub threads: Option<u32>,
     pub parallel_slots: Option<u32>,
     pub embeddings: bool,
+    /// Load as one stage of a layer split (WP-04): planned with this device's stages only, a
+    /// longer load timeout ([`split_load_timeout`]), and never compatible with a load without it,
+    /// so a local request never runs on the split engine (I-05).
+    pub split: Option<Split>,
+}
+
+/// A split load waits this long plus the remote stages' upload at [`SPLIT_UPLOAD_BYTES_PER_S`].
+pub const SPLIT_LOAD_BASE: Duration = Duration::from_secs(300);
+// ponytail: 5 MB/s is a slow Wi-Fi guess; tune from P1's measured upload.
+pub const SPLIT_UPLOAD_BYTES_PER_S: u64 = 5_000_000;
+
+/// The load timeout of a split whose remote stages hold `remote_bytes`.
+pub fn split_load_timeout(remote_bytes: u64) -> Duration {
+    SPLIT_LOAD_BASE + Duration::from_secs(remote_bytes / SPLIT_UPLOAD_BYTES_PER_S)
+}
+
+/// The stages of `split` on this device (not `RPCk`) as one range: the head always keeps the input
+/// embedding and the tokenizer, and the output layer when the last stage is local.
+pub fn local_stage(split: &Split) -> common_models::StageRange {
+    let local: Vec<&SplitStage> = split.stages.iter().filter(|s| !s.device.starts_with("RPC")).collect();
+    common_models::StageRange {
+        first: local.iter().map(|s| s.first_block).min().unwrap_or(0),
+        end: local.iter().map(|s| s.end_block).max().unwrap_or(0),
+        input: true,
+        output: split.stages.last().is_some_and(|s| !s.device.starts_with("RPC")),
+    }
+}
+
+/// Weight bytes the remote stages of `split` hold (uploaded at every load).
+pub fn remote_bytes(lb: &common_models::LayerBytes, split: &Split) -> u64 {
+    let blocks: u64 = split
+        .stages
+        .iter()
+        .filter(|s| s.device.starts_with("RPC"))
+        .map(|s| lb.range(s.first_block, s.end_block))
+        .sum();
+    let output = split.stages.last().is_some_and(|s| s.device.starts_with("RPC"));
+    blocks + if output { lb.output } else { 0 }
 }
 
 impl ModelManager {
@@ -269,6 +307,14 @@ impl ModelManager {
         let mut slot = self.loaded.lock().await;
         self.reap(&mut slot);
         if let Some(s) = slot.as_ref() {
+            // WP-04: the split engine is this device's own pooled run; a paired device's Mode B
+            // request neither uses it nor replaces it.
+            if s.opts.split.is_some() && opts.split.is_none() && loaded_for != "local" {
+                return Err(CommonError::new(
+                    ErrorCode::Overloaded,
+                    "this device is running a model split with another device; it serves no requests from other devices until that is unloaded",
+                ));
+            }
             if s.model_id == model_id && compatible(&s.opts, &opts) {
                 return Ok(s.model.clone());
             }
@@ -355,6 +401,25 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Stop the split engine whose `--rpc` ports are `rpc_ports`, in use or not: its pooled session
+    /// has ended, so its requests fail with the session's reason anyway (ADR-0005 D7). Leaves any
+    /// other loaded model alone.
+    pub async fn unload_split(&self, rpc_ports: &[u16]) -> Result<()> {
+        let mut slot = self.loaded.lock().await;
+        self.reap(&mut slot);
+        if slot
+            .as_ref()
+            .and_then(|s| s.opts.split.as_ref())
+            .is_some_and(|s| s.rpc_ports == rpc_ports)
+        {
+            if let Some(prev) = slot.take() {
+                lock(&self.view).loaded = None;
+                prev.model.unload().await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Currently loaded model info, if any.
     pub async fn status(&self) -> Option<LoadedModelInfo> {
         let mut slot = self.loaded.lock().await;
@@ -363,7 +428,7 @@ impl ModelManager {
     }
 
     /// Blob path + sha256 for `id`, or the typed reason it cannot be used.
-    fn resolve(&self, id: &str) -> Result<(PathBuf, String)> {
+    pub fn resolve(&self, id: &str) -> Result<(PathBuf, String)> {
         match self.store.resolve(id) {
             Ok((m, path)) => Ok((path, m.sha256)),
             Err(e) if e.code == ErrorCode::ModelNotFound => match common_artifacts::Catalog::builtin()?.get(id) {
@@ -396,7 +461,25 @@ impl ModelManager {
         let requested = opts.n_ctx.unwrap_or(meta.context_length.min(4096));
         let budget = (available as f64 * 0.9) as u64;
         let size = file_size(path)?;
-        let plan = common_models::planning::plan_context(&meta, size, Some(requested), budget, true)?;
+        // A split head plans for its own stages only: their weights, their KV share (WP-04).
+        let stage = match &opts.split {
+            Some(split) => {
+                meta.uniform_kv().map_err(CommonError::invalid)?;
+                if split.n_layer != meta.block_count {
+                    return Err(CommonError::invalid(format!(
+                        "split plan is for {} blocks, the model has {}",
+                        split.n_layer, meta.block_count
+                    )));
+                }
+                Some(local_stage(split))
+            }
+            None => None,
+        };
+        let estimate = |n_ctx, kv| match stage {
+            Some(s) => common_models::estimate_stage(&meta, size, n_ctx, kv, s),
+            None => common_models::feasibility::estimate(&meta, size, n_ctx, kv),
+        };
+        let plan = common_models::planning::plan_context_with(&meta, Some(requested), budget, true, estimate)?;
         if let Some(reason) = &plan.reason {
             tracing::warn!(
                 model = id,
@@ -405,7 +488,7 @@ impl ModelManager {
                 "{reason}"
             );
         }
-        let est = common_models::feasibility::estimate(&meta, size, plan.n_ctx, plan.kv_type);
+        let est = estimate(plan.n_ctx, plan.kv_type);
         if let FitVerdict::TooLarge { reason, .. } = common_models::feasibility::check_fit(&est, available, 0.10) {
             return Err(CommonError::new(ErrorCode::InsufficientMemory, reason));
         }
@@ -420,9 +503,15 @@ impl ModelManager {
             parallel_slots: opts.parallel_slots.unwrap_or(1),
             kv_type: plan.kv_type,
             embeddings: opts.embeddings,
-            timeouts: Timeouts::default(),
+            timeouts: match &opts.split {
+                Some(split) => Timeouts {
+                    load: split_load_timeout(remote_bytes(&meta.layer_bytes(size), split)),
+                    ..Timeouts::default()
+                },
+                None => Timeouts::default(),
+            },
             extra_args: vec![],
-            split: None,
+            split: opts.split.clone(),
         };
         Ok((req, plan.reason))
     }
@@ -487,6 +576,7 @@ fn compatible(loaded: &LoadOptions, wanted: &LoadOptions) -> bool {
         && (wanted.n_ctx.is_none() || wanted.n_ctx == loaded.n_ctx)
         && (wanted.threads.is_none() || wanted.threads == loaded.threads)
         && (wanted.parallel_slots.is_none() || wanted.parallel_slots == loaded.parallel_slots)
+        && wanted.split == loaded.split
 }
 
 /// The slot's view of a loaded model: the backend's model, its info completed with the planner's
@@ -621,6 +711,7 @@ mod tests {
             threads: None,
             parallel_slots: None,
             embeddings: false,
+            split: None,
         };
         assert!(compatible(&loaded, &LoadOptions::default()), "no pins = compatible");
         assert!(compatible(&loaded, &loaded.clone()));
@@ -982,6 +1073,8 @@ mod tests {
     struct FakeBackend {
         loads: std::sync::atomic::AtomicUsize,
         fail: Option<&'static str>,
+        /// The last request `load` was given.
+        last: std::sync::Mutex<Option<LoadRequest>>,
     }
 
     #[async_trait::async_trait]
@@ -997,6 +1090,7 @@ mod tests {
         }
         async fn load(&self, req: LoadRequest) -> Result<Arc<dyn LoadedModel>> {
             self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *lock(&self.last) = Some(req.clone());
             match self.fail {
                 Some(msg) => Err(CommonError::new(ErrorCode::BackendFailed, msg)),
                 None => Ok(Arc::new(Idle(
@@ -1045,9 +1139,161 @@ mod tests {
         let backend = Arc::new(FakeBackend {
             loads: Default::default(),
             fail,
+            last: Default::default(),
         });
         m.backend = backend.clone();
         (m, backend)
+    }
+
+    fn split3(port: u16) -> Split {
+        Split {
+            rpc_ports: vec![port],
+            stages: vec![
+                SplitStage {
+                    device: "RPC0".into(),
+                    first_block: 0,
+                    end_block: 3,
+                },
+                SplitStage {
+                    device: "MTL0".into(),
+                    first_block: 3,
+                    end_block: 6,
+                },
+            ],
+            n_layer: 6,
+            no_mmap: false,
+            engine_pid: Default::default(),
+        }
+    }
+
+    /// WP-04 C6 (ADR-0005 D2, I-05): the split engine is this device's own run. A paired device's
+    /// Mode B request is refused while it is loaded, and a local request reloads locally instead
+    /// of running on it. FAKE engines, SYNTHETIC model.
+    #[tokio::test]
+    async fn mode_b_refused_while_split_loaded() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut m, backend) = fake_manager(HardwareReport::default(), None);
+        m.available_memory = || Some(8 << 30);
+        let split = LoadOptions {
+            split: Some(split3(50052)),
+            ..Default::default()
+        };
+        m.ensure_loaded("tiny", split.clone()).await.unwrap();
+        assert_eq!(backend.loads.load(SeqCst), 1);
+        let peer = format!("peer:{}", "ab".repeat(32));
+        let e = m
+            .ensure_loaded_for("tiny", LoadOptions::default(), &peer)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code, ErrorCode::Overloaded, "{e}");
+        assert!(e.message.contains("split with another device"), "{e}");
+        assert_eq!(backend.loads.load(SeqCst), 1, "the split engine stays");
+        // the same split reuses the engine; another session's ports do not
+        m.ensure_loaded("tiny", split).await.unwrap();
+        assert_eq!(backend.loads.load(SeqCst), 1);
+        // a local request never runs on the split engine: it reloads without the split
+        m.ensure_loaded("tiny", LoadOptions::default()).await.unwrap();
+        assert_eq!(backend.loads.load(SeqCst), 2);
+        assert_eq!(lock(&backend.last).as_ref().unwrap().split, None);
+        // and a stale session's unload leaves the local engine alone
+        m.unload_split(&[50052]).await.unwrap();
+        assert!(m.status().await.is_some());
+        m.ensure_loaded(
+            "tiny",
+            LoadOptions {
+                split: Some(split3(50053)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        m.unload_split(&[50053]).await.unwrap();
+        assert!(
+            m.status().await.is_none(),
+            "the split engine of the ended session is stopped"
+        );
+    }
+
+    /// WP-04 C6 (lab watch item): a split head plans memory and context for its own stages (its
+    /// blocks, its KV share), never the whole model, and waits longer for the load. FAKE engine,
+    /// SYNTHETIC model: the budget sits between the whole model's Q8_0 and F16 estimates, above the
+    /// head's F16 one, so only a whole-model plan has to downgrade its KV cache.
+    #[tokio::test]
+    async fn a_split_head_plans_with_its_stage_estimate() {
+        use common_models::KvType;
+        static AVAIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (mut m, backend) = fake_manager(HardwareReport::default(), None);
+        let (_, blob) = m.store.resolve("tiny").unwrap();
+        let meta = common_models::read_metadata(&blob).unwrap();
+        let size = std::fs::metadata(&blob).unwrap().len();
+        let split = split3(50052);
+        let head = common_models::estimate_stage(&meta, size, 128, KvType::F16, local_stage(&split)).total_bytes;
+        let whole_q8 = common_models::estimate(&meta, size, 128, KvType::Q8_0).total_bytes;
+        let whole_f16 = common_models::estimate(&meta, size, 128, KvType::F16).total_bytes;
+        assert!(head < whole_q8 && whole_q8 < whole_f16, "{head} {whole_q8} {whole_f16}");
+        AVAIL.store(
+            ((whole_q8 + whole_f16) / 2) * 10 / 9 + 1,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        m.available_memory = || Some(AVAIL.load(std::sync::atomic::Ordering::SeqCst));
+        m.ensure_loaded("tiny", LoadOptions::default()).await.unwrap();
+        assert_eq!(lock(&backend.last).as_ref().unwrap().kv_type, KvType::Q8_0);
+        m.ensure_loaded(
+            "tiny",
+            LoadOptions {
+                split: Some(split.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let req = lock(&backend.last).clone().unwrap();
+        assert_eq!(req.kv_type, KvType::F16, "the head's own stages fit as F16");
+        assert_eq!(req.split, Some(split));
+        assert_eq!(req.timeouts.load, SPLIT_LOAD_BASE, "64 bytes upload in no time");
+        assert_eq!(
+            split_load_timeout(50_000_000),
+            SPLIT_LOAD_BASE + Duration::from_secs(10)
+        );
+    }
+
+    /// WP-04 C6: the split load waits for the remote stages' upload, which is their blocks and,
+    /// in configuration C, the output layer.
+    #[test]
+    fn remote_bytes_counts_the_remote_stages_and_output() {
+        let lb = common_models::LayerBytes {
+            blocks: vec![10, 20, 30, 40, 50, 60],
+            input: 5,
+            output: 7,
+        };
+        assert_eq!(remote_bytes(&lb, &split3(1)), 10 + 20 + 30, "P: RPC0 holds [0,3)");
+        let mut c = split3(1);
+        c.stages[0].device = "CPU".into();
+        c.stages[1].device = "RPC0".into();
+        assert_eq!(
+            remote_bytes(&lb, &c),
+            40 + 50 + 60 + 7,
+            "C: RPC0 holds [3,6) and the output"
+        );
+        assert_eq!(
+            local_stage(&split3(1)),
+            common_models::StageRange {
+                first: 3,
+                end: 6,
+                input: true,
+                output: true
+            }
+        );
+        assert_eq!(
+            local_stage(&c),
+            common_models::StageRange {
+                first: 0,
+                end: 3,
+                input: true,
+                output: false
+            }
+        );
     }
 
     /// F-01-03: memory sampled while the engine a load replaces still runs counts that engine as

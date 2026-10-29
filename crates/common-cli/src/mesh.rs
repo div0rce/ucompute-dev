@@ -430,7 +430,15 @@ impl Daemon {
 
     /// One JSON call; a non-2xx answer becomes the daemon's typed error.
     pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let mut req = self.http.request(method, format!("{}{path}", self.url));
+        self.call_for(method, path, body, Duration::from_secs(30)).await
+    }
+
+    /// [`Daemon::call`] waiting up to `timeout` (a split load can take minutes).
+    pub async fn call_for(&self, method: Method, path: &str, body: Option<Value>, timeout: Duration) -> Result<Value> {
+        let mut req = self
+            .http
+            .request(method, format!("{}{path}", self.url))
+            .timeout(timeout);
         if let Some(k) = &self.key {
             req = req.bearer_auth(k);
         }

@@ -828,6 +828,7 @@ dependencies = [
  "hex",
  "hmac",
  "if-addrs",
+ "libc",
  "mdns-sd",
  "prost",
  "quinn",

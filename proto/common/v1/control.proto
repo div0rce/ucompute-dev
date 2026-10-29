@@ -8,13 +8,23 @@
 // large, 0x4844 'HD' held: the closing device's user disconnected the peer and refuses it until they
 // connect it again (read as `peer_held`; builds without it read `peer_lost`).
 //
-// Protocol minor 1 (PROTOCOL_MINOR = 1, HELD_EXCHANGE_MINOR = 1): a device that holds its peer
+// Protocol minor 1 (HELD_EXCHANGE_MINOR = 1): a device that holds its peer
 // answers the peer's Capabilities with ErrorMsg{code:"peer_held"} instead of its own Capabilities;
 // the holder then sends its RevocationMsg frames and ends its stream, the held side reads to that
 // end, sends its own and ends its stream, and the holder reads to that end and closes with
 // CLOSE_HELD. A minor-0 peer gets no ErrorMsg (it would read one there as a protocol error): the
 // holder still sends its Hello and verifies the peer's Capabilities, then closes with CLOSE_HELD
 // without sending its own and without the revocation exchange. No message or field was added.
+//
+// Protocol minor 2 (PROTOCOL_MINOR = 2, RPC_SESSION_MINOR = 2; WP-04, ADR-0005 D4): RpcSessionOpen,
+// RpcSessionAccept and RpcTunnelOpen (ControlMessage tags 10, 11, 12). Each of RpcSessionOpen and
+// RpcTunnelOpen is the first frame of a new bidirectional stream on the existing connection; R
+// answers RpcSessionOpen with RpcSessionAccept or ErrorMsg. The session stream's FIN or reset, or
+// the connection's loss, ends the session (no close message). After RpcTunnelOpen the stream
+// carries raw ggml RPC bytes. These frames are at most 1 KiB (MAX_RPC_FRAME). They are sent only
+// when the negotiated minor (min of both Hellos) is at least 2: a minor-1 build would decode them
+// as an unknown variant and refuse the stream with "expected RemoteRequest". Minor 1's hold
+// exchange is unchanged at negotiated minor 1 and above.
 syntax = "proto3";
 package common.v1;
 
@@ -91,6 +101,33 @@ message Cancel {
   string request_id = 1;
 }
 
+// Minor 2: asks the peer to host blocks [layer_start, layer_end) of n_layer in one ggml-rpc-server.
+message RpcSessionOpen {
+  // 16 random bytes chosen by the head.
+  bytes session_id = 1;
+  string model_sha256 = 2;
+  // The pinned llama.cpp release, e.g. "b11609".
+  string engine_release = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  uint32 n_layer = 6;
+  uint64 est_bytes = 7;
+  uint32 ttl_s = 8;
+}
+
+// Minor 2: the stage host's answer on the session stream (a refusal is an ErrorMsg).
+message RpcSessionAccept {
+  bytes session_id = 1;
+  uint64 granted_bytes = 2;
+  uint32 threads = 3;
+  string device = 4;
+}
+
+// Minor 2: the first frame of a tunnel stream; raw ggml RPC bytes follow both ways.
+message RpcTunnelOpen {
+  bytes session_id = 1;
+}
+
 message ControlMessage {
   // Tag 2 was an unsigned Capabilities; an old peer sees tag 9 as an unknown variant.
   reserved 2;
@@ -103,5 +140,8 @@ message ControlMessage {
     RemoteRequest remote_request = 6;
     RemoteChunk remote_chunk = 7;
     Cancel cancel = 8;
+    RpcSessionOpen rpc_session_open = 10;
+    RpcSessionAccept rpc_session_accept = 11;
+    RpcTunnelOpen rpc_tunnel_open = 12;
   }
 }

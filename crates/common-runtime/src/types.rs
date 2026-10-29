@@ -57,7 +57,40 @@ pub struct Split {
     /// Load without mmap (`-lm none`; b11609 has no `--no-mmap`).
     #[serde(default)]
     pub no_mmap: bool,
+    /// Set to each split engine's pid as it starts: the RPC bridge carries only connections this
+    /// pid owns (ADR-0005 D4), and a new start is a new load for its byte cap.
+    #[serde(skip)]
+    pub engine_pid: EnginePid,
 }
+
+/// The pid of the last engine a split load started, and how many starts it has seen. Shared
+/// between the load ([`Split::engine_pid`]) and the RPC bridge that owns its `--rpc` ports. Not
+/// part of the plan: it compares equal to every other `EnginePid`.
+#[derive(Debug, Clone, Default)]
+pub struct EnginePid(Arc<std::sync::atomic::AtomicU64>);
+
+impl EnginePid {
+    /// Record a new engine start.
+    pub fn set(&self, pid: u32) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _ = self
+            .0
+            .fetch_update(SeqCst, SeqCst, |v| Some((((v >> 32) + 1) << 32) | u64::from(pid)));
+    }
+
+    /// (pid, start count) of the last start; None before the first.
+    pub fn get(&self) -> Option<(u32, u32)> {
+        let v = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        (v >> 32 != 0).then_some((v as u32, (v >> 32) as u32))
+    }
+}
+
+impl PartialEq for EnginePid {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for EnginePid {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SplitStage {
