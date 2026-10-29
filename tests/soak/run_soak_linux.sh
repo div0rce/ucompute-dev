@@ -4,7 +4,7 @@
 # them. The daemon is `target/release/common` in ~/src/common (sync and build it first), with its own home
 # ~/.common-soak (engine and models linked from ~/.common-acceptance), port 18500 and no peer endpoint.
 #
-#   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh start [HOURS]   # default 24
+#   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh start [HOURS [local_soak.py args...]]   # default 24
 #   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh status
 #   LINUX_HOST=<ip> LINUX_USER=<user> tests/soak/run_soak_linux.sh collect <local dir>   # also stops both units
 set -euo pipefail
@@ -15,6 +15,7 @@ H=scripts/mac-host.sh
 case "${1:-}" in
   start)
     hours="${2:-24}"
+    extra="${*:3}"  # more local_soak.py arguments, e.g. --only overload
     $H put tests/soak/local_soak.py soak/local_soak.py
     # shellcheck disable=SC2016  # expanded on the Linux host
     $H run 'set -e; S=$HOME/.common-soak; cd ~/src/common; test -x target/release/common
@@ -32,7 +33,7 @@ case "${1:-}" in
       rm -f ~/soak/soak.jsonl
       systemd-run --user --unit common-soak --collect -p StandardOutput=file:$HOME/soak/soak.out \
         -p StandardError=file:$HOME/soak/soak.out /usr/bin/python3 -I "$HOME/soak/local_soak.py" --pid "$pid" \
-        --home "$S" --log "$HOME/soak/daemon.log" --hours '"$hours"' --out "$HOME/soak/soak.jsonl"
+        --home "$S" --log "$HOME/soak/daemon.log" --hours '"$hours"' '"$extra"' --out "$HOME/soak/soak.jsonl"
       echo "soak started: daemon pid $pid, $(cat ~/soak/version.txt), '"$hours"' h"'
     ;;
   status)

@@ -19,6 +19,7 @@ completion golden; a golden completion again within 30 s of each engine kill; af
 growth <= --rss-mib (64) and open-file growth <= --fd-growth (16). Exit 0 PASS, 3 FAIL, 2 the daemon is unusable.
 """
 import argparse
+import http.client
 import json
 import os
 import random
@@ -86,8 +87,8 @@ def call(api, method, path, body=None, timeout=120):
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read()
-    except (urllib.error.URLError, OSError) as e:
-        status, raw = 0, str(e).encode()
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        status, raw = 0, repr(e).encode()
     try:
         val = json.loads(raw)
     except ValueError:
@@ -118,8 +119,8 @@ def sse(api, path, body, stop_after=None, timeout=120):
             return e.code, json.loads(e.read())
         except ValueError:
             return e.code, None
-    except (urllib.error.URLError, OSError, ValueError):
-        return 0, None
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
+        return 0, repr(e)
     return 200, evs
 
 
@@ -162,13 +163,16 @@ class Soak:
     def __init__(self, a):
         self.a, self.rng = a, random.Random(a.seed)
         self.codes, self.lat, self.untyped, self.not_golden, self.slow = Counter(), [], 0, 0, 0
-        self.kills, self.cycles = [], 0
+        self.kills, self.cycles, self.errors = [], 0, []
 
     def note(self, step, status, body):
         c = classify(status, body) if status else "untyped:no_response"
         self.codes[f"{step}:{c}"] += 1
         if c.startswith("untyped"):
             self.untyped += 1
+            # what is needed to find the cause of a rare one (the 2026-10-24 soak lost it)
+            self.errors.append({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "step": step,
+                                "status": status, "detail": str(body)[:300]})
         return c
 
     def golden(self):
@@ -216,6 +220,8 @@ class Soak:
             t.join()
         for s, v in out:
             self.note("overload", s, v)
+        for _ in range(self.a.burst - len(out)):  # a thread that died without a result is an untyped failure too
+            self.note("overload", 0, "no result: the request's thread ended without one")
 
     def kill_engine(self):
         mine, _ = engines(self.a.home, self.a.pid)
@@ -245,10 +251,10 @@ class Soak:
         row = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "elapsed_s": round(time.monotonic() - t_start),
                "cycles": self.cycles, "rss_kib": rss_kib(self.a.pid), "fds": fds(self.a.pid), "engines": len(mine),
                "orphans": orphans, "log_bytes": log, "golden_p95_ms": p95(self.lat), "golden_n": len(self.lat),
-               "codes": dict(self.codes), "kills_recovered_s": self.kills}
+               "codes": dict(self.codes), "kills_recovered_s": self.kills, "errors": self.errors}
         out.write(json.dumps(row) + "\n")
         out.flush()
-        self.lat, self.codes, self.kills = [], Counter(), []
+        self.lat, self.codes, self.kills, self.errors = [], Counter(), [], []
         return row
 
 
@@ -264,6 +270,7 @@ def main():
     ap.add_argument("--sample", type=int, default=60)
     ap.add_argument("--kill-every", type=int, default=50, help="cycles between engine kills (0: never)")
     ap.add_argument("--burst", type=int, default=40, help="concurrent requests in an overload burst")
+    ap.add_argument("--only", help="comma-separated steps to run (golden,golden_stream,cancel,chat,pull,overload); all by default")
     ap.add_argument("--rss-mib", type=float, default=64)
     ap.add_argument("--fd-growth", type=int, default=16)
     a = ap.parse_args()
@@ -276,6 +283,8 @@ def main():
         return 2
     soak, samples = Soak(a), []
     steps = [soak.golden, soak.golden_stream, soak.cancel, soak.chat, soak.pull, soak.overload]
+    if a.only:
+        steps = [getattr(soak, n) for n in a.only.split(",")]
     t_start = t_sample = time.monotonic()
     with open(a.out, "a") as out:
         while time.monotonic() - t_start < a.hours * 3600:
@@ -287,7 +296,7 @@ def main():
             if time.monotonic() - t_sample >= a.sample:
                 samples.append(soak.sample(t_start, out))
                 t_sample = time.monotonic()
-                if "golden:ok" not in samples[-1]["codes"]:
+                if soak.golden in steps and "golden:ok" not in samples[-1]["codes"]:
                     # stop instead of looping on a daemon whose inference only fails
                     samples[-1]["stopped"] = "no golden completion succeeded in this window"
                     break
