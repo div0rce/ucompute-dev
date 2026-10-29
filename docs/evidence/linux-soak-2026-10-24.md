@@ -22,3 +22,14 @@ Follow-up (this commit): the driver now records the time, step, status and excep
 counts a burst request whose thread ends without a result, and catches `http.client.HTTPException` (it escaped
 before); `--only overload` runs bursts alone. A targeted overload run on sentinel is next, to find the cause.
 Milestone C stays open until a soak passes.
+
+## Targeted overload run, 2026-10-29 (04:39-07:39 UTC): PASS, the error did not recur
+
+`run_soak_linux.sh start 3 --only overload` on the same build (0b0c1a4), now detached as its own sessions (e3713cd)
+and recording every untyped result's detail (c26c0a1): **716,000 burst requests, 0 untyped errors** (639,478 ok,
+71,596 `overloaded`, 4,926 `backend_failed` during kills); 358 engine kills, all recovered (slowest 8.2 s under this
+denser load, bound 30 s); RSS 33.9 to 36.9 MiB after the first hour; open files 11 throughout; no orphans
+(`linux-soak-2026-10-24/overload-3h-2026-10-29.jsonl.gz`). The 24 h run's single no-response is therefore **not
+reproduced** and its cause **not determined**; across both runs it is at most 1 in about 1.27 million burst
+requests. Milestone C needs a passing 24 h soak: rerun with the detail recording, started 2026-10-29.
+
