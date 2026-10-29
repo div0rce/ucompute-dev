@@ -221,7 +221,7 @@ Both daemons' sync loops dial each other, so crossed dials are normal. The rule:
 ### 9.5 D4 Discovery
 The record, as built:
 - Service `_common._udp.local.`. Instance = first 12 hex of the id. Host `common-<12 hex>.local.`. SRV port = workload port.
-- TXT: `v=1`, `id=<64 hex>`, `pair=0|1`, `pairport=<n>` (only while pairing), `proto=<major>.<minor>` (`1.1` since the E5 hold exchange, 2026-10-22), `ts=<unix s>`, `sig`. Nothing else: no hostname beyond SRV, no models, no hardware, no user names.
+- TXT: `v=1`, `id=<64 hex>`, `pair=0|1`, `pairport=<n>` (only while pairing), `proto=<major>.<minor>` (`1.1` since the E5 hold exchange, 2026-10-22; `1.2` since the WP-04 RPC session messages, ADR-0005 D4), `ts=<unix s>`, `sig`. Nothing else: no hostname beyond SRV, no models, no hardware, no user names.
 - `sig` is hex (not base64) Ed25519 over the canonical string `v=1\nid=…\nport=<SRV port>\npair=…\npairport=…\nproto=…\nts=…`. The SRV port is signed, so a replay cannot point a live entry at another port.
 - The advertiser re-signs and re-announces every 120 s, so `ts` stays fresh. A specific bind address is the only address advertised; `0.0.0.0` advertises every IPv4 interface address. IPv4 only since 2026-10-23 (round 6): the peer endpoint refuses IPv6 binds at startup, and IPv6 is neither advertised nor browsed.
 
@@ -245,10 +245,10 @@ The daemon dials a pinned device at its fresh mDNS address first, then at the pi
 - In `control.proto`, tag 2 (the old unsigned Capabilities) and field 10 (the old in-record signature) are reserved. `SignedCapabilities` is tag 9, so an old peer sees an unknown variant.
 - The Rust types in `proto.rs` mirror `control.proto` by hand; no generated code, no `protoc`. A test fails when a name or tag differs.
 - `Status` is defined but not sent yet. Capabilities are not refreshed after the handshake. The bulk activation frame waits for M4.
-- Tests, `crates/common-network/src/proto.rs`: `every_message_round_trips`, `frame_bound_checked_before_allocation`, `unknown_field_tolerated`, `unknown_oneof_variant_tolerated`, `control_proto_mirrors_proto_rs`. `crates/common-network/src/transport.rs`: `negotiate_major_mismatch_is_typed_and_minor_is_min`, `capabilities_signature_covers_the_bytes_sent`, `engines_names_the_pinned_build`. `crates/common-network/tests/peer_transport.rs`: `capabilities_exchanged_after_handshake`, `oversized_capability_message_rejected`, `protocol_major_mismatch_is_typed`, `minor_negotiation_is_min`, `old_new_peer_interop_single_host`.
+- Tests, `crates/common-network/src/proto.rs`: `every_message_round_trips`, `frame_bound_checked_before_allocation`, `unknown_field_tolerated`, `unknown_oneof_variant_tolerated`, `control_proto_mirrors_proto_rs`. `crates/common-network/src/transport.rs`: `negotiate_major_mismatch_is_typed_and_minor_is_min`, `capabilities_signature_covers_the_bytes_sent`, `engines_names_the_pinned_build`. `crates/common-network/tests/peer_transport.rs`: `capabilities_exchanged_after_handshake`, `oversized_capability_message_rejected`, `protocol_major_mismatch_is_typed`, `minor_negotiation_is_min`, `old_new_peer_interop_single_host`, `negotiated_minor_is_min_of_both_single_host` (minor 2 against a minor-1 build, both directions, negotiates 1). Minor 2 (ADR-0005 D4) adds `RpcSessionOpen` (10), `RpcSessionAccept` (11) and `RpcTunnelOpen` (12), sent only at negotiated minor 2 or above; a minor-1 build decodes them as no body (`proto.rs` `minor_1_peer_sees_rpc_frames_as_unknown`) and each is bound to 1 KiB (`tunnel_open_frame_over_1kib_is_frame_too_large`). The minor-1 hold exchange is unchanged (`a_held_peer_of_each_minor_reads_the_hold_single_host` now runs minor 0 and 1 against minor 2).
 
 ### 9.7 D6 RPC carriage
-Not built (M4). No `rpc-server` code exists. M3 built Mode B instead: one whole request on one paired device (9.10).
+Built by WP-04 under ADR-0005 (Proposed), which decides what D6 left open and amends it: a split never falls back to a local run (ADR-0005 D7). The carriage is `crates/common-network/src/rpc.rs` (one QUIC stream per TCP connection, protocol minor 2, 9.6), the stage host engine `crates/common-runtime/src/llamacpp/rpc_server.rs`. ADR-0005 §9 lists the code and its enforcing tests, all unit, synthetic or SINGLE-HOST; no two-machine run exists. M3's Mode B (one whole request on one paired device, 9.10) is unchanged.
 
 ### 9.8 D7 Health and the liveness bound
 - Defaults: keep-alive **1 s**, idle timeout **4 s** (`keep_alive_ms`, `idle_timeout_ms`).
@@ -341,7 +341,7 @@ Error frames carry the code. For engine and filesystem codes the message is gene
 | any group member may revoke any other | issuer pinned here and sharing a group with the target here (9.9) |
 | one connection assumed per peer | crossed dials resolved by the lower-id rule (9.4) |
 | `tcpdump` capture | in-process UDP relay capture (9.3) |
-| D6 RPC carriage | not built; Mode B instead (9.7, 9.10) |
+| D6 RPC carriage, local fallback allowed | built under ADR-0005, no fallback (9.7) |
 | test names in section 5 | the names in this section (e.g. `downgrade_attempt_fails` is `tls12_downgrade_attempt_fails`) |
 
 ### 9.15 Still open

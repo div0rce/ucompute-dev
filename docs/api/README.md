@@ -89,8 +89,9 @@ Every address is only a hint. Whatever answers must present the key pinned at pa
 `POST /v1/chat/completions` and `POST /v1/completions` accept a Common extension, `target`:
 - `"local"`: run here. This is the default; a missing or empty value means local.
 - `"peer:<64-hex id or short label>"`: run the whole request on that paired device (Mode B). It is not split across devices.
+- `"split:<64-hex id or short label>"`: split the model's blocks between this device and that paired device (WP-04 pooled inference, ADR-0005 Proposed; see [Pooled inference](#pooled-inference-the-split-target)).
 
-The same value may come in the `X-Common-Target` header. The body field wins when both are present. `POST /v1/embeddings` runs locally only; a peer target there is `invalid_request`. Every response, and every streamed chunk, carries `"target"` (`"local"` or `"peer:<64 hex>"`), so nothing runs elsewhere silently.
+The same value may come in the `X-Common-Target` header. The body field wins when both are present. `POST /v1/embeddings` runs locally only; a peer target there is `invalid_request`. Every response, and every streamed chunk, carries `"target"` (`"local"`, `"peer:<64 hex>"` or `"split:<64 hex>"`), so nothing runs elsewhere silently.
 
 ```sh
 curl -s http://127.0.0.1:8192/v1/completions -H 'Content-Type: application/json' \
@@ -108,6 +109,28 @@ The serving device checks its own side too: networking and `serve_peers` on, thi
 
 Both sides audit each request with the same `request_id`. The sending side writes its entry before the request leaves; if it cannot, nothing is sent. `/metrics` counts sent requests as `common_remote_requests_total{peer}`.
 
+### Pooled inference: the split target
+
+`"target": "split:<peer>"` on `POST /v1/completions` or `POST /v1/chat/completions` runs one model split in two: the paired device (the stage host) holds the first `split_at` blocks, this device the rest. llama.cpp's RPC between the two engines travels only inside the authenticated QUIC connection; both engines listen on `127.0.0.1` only. Experimental: tested on one machine only (SINGLE-HOST), no two-machine run yet. Extra body fields:
+
+| Field | Meaning |
+|---|---|
+| `split_at` | required: the first block of this device's stage, `0 < split_at < block_count` |
+| `split_mode` | `"pooled"` (default, configuration P: the stage host holds blocks `[0, split_at)`, this device's GPU the rest and the output layer, so no logits cross the link; needs a GPU here, else 503 `gpu_unavailable`) or `"same_backend"` (configuration C: this device's CPU holds `[0, split_at)`, the stage host the rest and the output layer) |
+| `acknowledged` | required `true`: without it the answer is 403 `policy_denied` whose message is the disclosure, and nothing is sent |
+
+```sh
+curl -sN http://127.0.0.1:8192/v1/completions -H 'Content-Type: application/json' -d '{
+  "model": "qwen2.5-0.5b-instruct-q8_0", "prompt": "Once upon a time", "max_tokens": 64, "stream": true,
+  "target": "split:1a2b-3c4d-5e6f", "split_at": 12, "split_mode": "pooled", "acknowledged": true}'
+```
+
+Before any connection, load or process: privacy `trusted_group`, networking on, the device paired, not revoked and not held, and a group with it that allows **pooled** inference (`allow_pooled_inference`; remote inference does not grant it). The stage host checks the same on its side (it must serve peers and allow pooled inference with this device), runs Linux in this build, and hosts one session at a time. The model must be downloaded here, and its catalog licence must be Apache-2.0 or MIT, because its weights for the stage are uploaded to the other device (`policy_denied` otherwise).
+
+The disclosure (`acknowledged` accepts it): the other device receives the weights of its part and, for every token, intermediate data from which the prompt and the reply can be reconstructed; the connection is encrypted, the other device is not; pooling is no more private than Mode B on that device and is usually slower than a model that fits here.
+
+The response and every chunk carry `"placement"`: the devices and stages the engine log proved, and the session id. A split loads the model as a split engine here; a later `local` request reloads it locally and the unused session closes 10 s later. Nothing falls back: when the session ends (the other device lost, revoked, held, its pooling turned off, privacy `local_only`, networking off, a byte cap, the silence watchdog) the split engine stops and in-flight requests fail with that reason (`peer_lost`, `peer_revoked`, `peer_held`, `policy_denied`, `overloaded`). `GET /api/status` has `split`: `peer`, `session`, `model_id`, `split_at`, `split_mode`, `stages`, `stage_device`, the tunnel byte counters `to_r` and `to_h`, direction `switches`, and `ended` (the end reason) — numbers and ids, never content. Both devices audit `session_open` and `session_close` with the same `session`. A peer that speaks protocol minor 1 cannot host a stage (`protocol_incompatible`).
+
 ### Privacy disclosure flow
 
 1. `GET /api/privacy` returns `mode` and `disclosure`. Show the disclosure to the user.
@@ -124,7 +147,7 @@ Same OpenAI error shape as above.
 | Code | HTTP | When |
 |---|---|---|
 | `policy_denied` | 403 | privacy is `local_only` or `swarm_allowed`; peer networking is off; `trusted_group` was not acknowledged; the serving device does not serve peers; this device disconnected the target device (`…/disconnect`) |
-| `peer_unauthorized` | 403 | the device is not paired, the short label is unknown, or no group allows remote inference with it (on either side); or the device that answered at an address did not prove it is the paired device (a refusal closed before it proved its key, a revocation by that device, a claimed protocol mismatch or a frame-size close included, reads this way) |
+| `peer_unauthorized` | 403 | the device is not paired, the short label is unknown, or no group allows remote inference (pooled inference, for a split target) with it (on either side); or the device that answered at an address did not prove it is the paired device (a refusal closed before it proved its key, a revocation by that device, a claimed protocol mismatch or a frame-size close included, reads this way) |
 | `peer_revoked` | 403 | the device is revoked here, or it closed a connection with that code after proving its key (a revocation met on a new dial reads `peer_unauthorized`) |
 | `peer_held` | 403 | the other device disconnected this one (`…/disconnect` there); it must connect again from its side. Builds without the hold read the same close as `peer_lost` ("closed by peer"); a minor-1 build held by a minor-0 build reads `peer_unauthorized`, because that holder closes before sending its Hello |
 | `pairing_failed` | 401 | wrong code, relayed connection, the QR names another device, or the window expired |
@@ -137,7 +160,8 @@ Same OpenAI error shape as above.
 | `model_not_found` | 404 | this device knows no hash for the model |
 | `timeout` | 504 | the peer sent nothing within the timeouts |
 | `cancelled` | 499 | the client stopped; or a pairing window closed because networking was turned off |
-| `invalid_request` | 400 | malformed `target`, a peer target on embeddings, bad `addr`, bad QR payload or bad group |
+| `invalid_request` | 400 | malformed `target`, a peer target on embeddings, bad `addr`, bad QR payload or bad group; a split target without `split_at` or with one out of range |
+| `gpu_unavailable` | 503 | `split_mode` `pooled` on a device with no GPU (use `same_backend`) |
 | `io` | 500 | the audit entry could not be written, so the request was not sent |
 
 ## Infrastructure contracts (2026-10-18 program)
