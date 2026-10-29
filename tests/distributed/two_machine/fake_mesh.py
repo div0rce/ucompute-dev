@@ -382,6 +382,156 @@ class Mesh:
         return ""
 
 
+class SplitMesh(Mesh):
+    """SYNTHETIC head (A, this Mac's dev daemon) and stage host (B, sentinel) for split_two_machine.py, unpaired at
+    the start like a fresh head home. A split request passes the gates in the order openai::run and rpc.rs check
+    them; each request adds the lab's registered per-token traffic for its model (R1a 14,150 B up, 3,592 B down,
+    one turn per token) plus a prefill, so the lab's scorer accepts the run. The texts, timings, `ss`, `who` and
+    the other shell outputs are canned. Nothing here is P1 or evidence of Common.
+
+    `bad`: dirty, busy_r, other_user, r_engine_left, low_memory (preflight); stage_spawns_on_refusal,
+    stage_refusal_untyped (P1.1); wrong_placement, public_rpc, rpc_reachable, rdma_banner (the session);
+    session_changes (a prompt's checkpoints); local_uses_split; rpc_outlives_session; leaks_prompt (R's logs);
+    no_close_audit."""
+    PER = {"R1a": (14150, 3592), "R1b": (21830, 6152)}
+    TIMES = {"R1a": (230.0, 36.0), "R1b": (350.0, 54.0)}  # TTFT and TPOT (ms) inside the lab's Wi-Fi bands
+
+    def __init__(self, bad=()):
+        super().__init__(bad)
+        self.H, self.R = self.d["http://a"], self.d["http://b"]
+        self.H.pins.clear()
+        self.R.pins.clear()
+        self.conns.clear()
+        prereg = json.loads((HERE / "split_prereg.json").read_text())
+        self.models = {m["model"]: m for m in prereg["models"]}
+        self.tokens = {p["text"]: p["tokens"] for p in prereg["prompts"]}
+        self.session, self.sessions, self.loaded_split, self.leak, self.requests = None, 0, None, False, 0
+
+    def pooled(self, me, pid):
+        return any(pid in g["members"] and g["policy"].get("allow_pooled_inference") for g in me.groups.values())
+
+    def close(self):
+        if self.session:
+            sid = self.session["id"]
+            if "no_close_audit" not in self.bad:
+                self.log(self.H, "session_close", self.R.id, role="head", session=sid)
+                self.log(self.R, "session_close", self.H.id, role="stage", session=sid)
+            self.leak |= "rpc_outlives_session" in self.bad
+        self.session, self.loaded_split = None, None
+
+    def open(self, model):
+        self.close()
+        self.sessions += 1
+        sid = f"{self.sessions:032x}"
+        self.session = {"id": sid, "model": model, "port": 40000 + self.sessions,
+                        "c": {"to_r": 200_000_000, "to_h": 9_000, "switches": 40}}  # the upload
+        self.log(self.H, "session_open", self.R.id, role="head", session=sid)
+        self.log(self.R, "session_open", self.H.id, role="stage", session=sid)
+
+    def traffic(self, m, tokens, n):
+        c, (up, down), act = self.session["c"], self.PER[m["label"]], m["hidden"] * 4
+        c["to_r"] += 3 * act * tokens + 22_528 + up * (n - 1)  # a prefill, then n - 1 decode steps
+        c["to_h"] += act * tokens + down * (n - 1)
+        c["switches"] += 6 + 2 * (n - 1)
+
+    def route(self, me, method, p, body):
+        if p == "/api/status":
+            s = self.session if me is self.H else None
+            split = self.loaded_split if me is self.H else None
+            return 200, {"loaded": me.loaded and {"model_id": me.loaded, "split": split},
+                         "split": s and {"session": s["id"], **s["c"]}}
+        if p == "/api/unload":
+            me.loaded = None
+            if me is self.H:
+                self.close()
+            return 204, None
+        return super().route(me, method, p, body)
+
+    def sse(self, base, body, timeout=900):
+        self.tick()
+        me, tgt, m = self.d[base], body.get("target", "local"), self.models[body["model"]]
+        n, tokens = body["max_tokens"], self.tokens.get(body["prompt"], 2)
+        ttft, tpot = self.TIMES[m["label"]]
+
+        def err(status, code, msg=None):
+            return {"status": status, "text": "", "usage": None, "target": None, "placement": None,
+                    "error": {"code": code, "message": msg or code}, "ttft_ms": None, "done_ms": None}
+
+        def ok(placement=None):
+            return {"status": 200, "text": " canned text" * n, "target": tgt, "placement": placement, "error": None,
+                    "usage": {"prompt_tokens": tokens, "completion_tokens": n},
+                    "ttft_ms": ttft, "done_ms": ttft + tpot * (n - 1)}
+        if tgt == "local":
+            if "local_uses_split" in self.bad and self.session:
+                self.traffic(m, tokens, n)
+            me.loaded, self.loaded_split = body["model"], None
+            return ok()
+        pid = tgt[len("split:"):]
+        if me.privacy != "trusted_group" or not me.enabled:
+            return err(403, "policy_denied")
+        if pid not in me.pins:
+            return err(403, "peer_unauthorized")
+        if not self.pooled(me, pid):
+            return err(403, "peer_unauthorized", "no trusted group allows pooled inference with device R")
+        if not body.get("acknowledged"):
+            return err(403, "policy_denied", "Pooling splits one model between this device and R. ...")
+        if not (self.R.serve and self.pooled(self.R, me.id)):
+            self.leak |= "stage_spawns_on_refusal" in self.bad
+            if "stage_refusal_untyped" in self.bad:  # the right words under another code
+                return err(403, "policy_denied", "no trusted group allows pooled inference with device H")
+            return err(403, "peer_unauthorized", "no trusted group allows pooled inference with device H")
+        self.requests += 1
+        if self.session is None or self.session["model"] != body["model"] or (
+                "session_changes" in self.bad and self.requests % 2 == 0):
+            self.open(body["model"])
+        self.traffic(m, tokens, n)
+        k, nl = m["split_at"], m["n_layer"]
+        devs = ("MTL0", "RPC0") if "wrong_placement" in self.bad else ("RPC0", "MTL0")
+        self.loaded_split = [{"device": devs[0], "first_block": 0, "end_block": k},
+                             {"device": devs[1], "first_block": k, "end_block": nl}]
+        me.loaded = body["model"]
+        return ok({"stages": self.loaded_split, "session": self.session["id"]})
+
+    def ss(self, rpc):
+        lines = ['tcp LISTEN 0 1024 127.0.0.1:8192 0.0.0.0:* users:(("common",pid=100,fd=9))',
+                 'udp UNCONN 0 0 0.0.0.0:8193 0.0.0.0:* users:(("common",pid=100,fd=10))',
+                 "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"]  # sshd: another user's socket, no process shown
+        if rpc:
+            host = "0.0.0.0" if "public_rpc" in self.bad else "127.0.0.1"
+            port = self.session["port"] if self.session else 39999
+            lines.append(f'tcp LISTEN 0 1 {host}:{port} 0.0.0.0:* users:(("ggml-rpc-server",pid=5151,fd=3))')
+        return "\n".join(lines) + "\n"
+
+    def shell(self, where, key, **kw):
+        bad, rpc = self.bad, self.session is not None or self.leak
+        if where == "r":
+            return {
+                "procs": "4242 /home/x/llama-server -m m.gguf\n" if "r_engine_left" in bad else "",
+                "rpc": "5151 ggml-rpc-server -H 127.0.0.1 -p 40001\n" if rpc else "",
+                "ss": self.ss(rpc),
+                "who": ("kyle pts/1 2026-10-29 10:00 (10.0.0.77)\n" if "other_user" in bad else "")
+                + "div0rce pts/0 2026-10-29 09:00 (10.0.0.1)\nssh_client=10.0.0.1\n",
+                "load": ("1.50" if "busy_r" in bad else "0.12") + " 0.20 0.30 1/300 4242\n",
+                "top": "%CPU PID COMMAND\n 1.0 1 systemd\n",
+                "banner": "transport : "
+                + ("RDMA" if "rdma_banner" in bad else "TCP (RDMA auto-negotiate enabled)") + "\n",
+                "scan": "/home/x/.common-acceptance/logs/engine-1.log\n" if "leaks_prompt" in bad else "",
+            }[key]
+        return {
+            "git": "abc123\n" + (" M crates/x.rs\n" if "dirty" in bad else ""),
+            "procs": "",
+            "load": "{ 0.50 0.60 0.70 }\n",
+            "power": "Now drawing from 'AC Power'\n",
+            "caffeinate": "999\n",
+            "mem": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: "
+                   + ("20000" if "low_memory" in bad else "200000") + ".\n"
+                   "Pages active: 9.\nPages inactive: 50000.\nPages speculative: 1000.\n",
+            "top": "%CPU PID COMMAND\n 2.0 1 launchd\n",
+            "ping": "round-trip min/avg/max/stddev = 5.1/12.5/24.0/3.0 ms\n",
+            "nc": "rc=0\n" if "rpc_reachable" in bad else "rc=1\n",
+        }[key]
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(Path(name).stem, HERE / name)
     m = importlib.util.module_from_spec(spec)
@@ -391,11 +541,12 @@ def load(name):
 
 def drive(script, mesh, *flags, restore=0):
     """Run a driver's main() against `mesh`; state.py is not run (save 0, restore `restore`). Returns its steps by
-    name, its console lines, its exit code (or the exception that ended it) and the files it wrote (name -> text)."""
+    name, its console lines, its exit code (or the exception that ended it) and the files it wrote (path under
+    --out -> text)."""
     d = load(script)
     mesh.golden = getattr(d, "GOLDEN", mesh.golden)
     d.call, d.time, d.state = mesh.call, mesh.clock, (lambda *a: restore if a[0] == "restore" else 0)
-    for name in ("sh", "stream"):
+    for name in ("sh", "stream", "sse", "shell"):
         if hasattr(d, name):
             setattr(d, name, getattr(mesh, name))
     out = tempfile.mkdtemp()
@@ -409,8 +560,10 @@ def drive(script, mesh, *flags, restore=0):
                 code = e.code
             except Exception as e:  # a crash: results.json must still have been written
                 code = e
-        steps = json.loads((Path(out) / "results.json").read_text())["steps"]
-        files = {p.name: p.read_text() for p in Path(out).iterdir() if p.name not in ("raw.jsonl", "results.json")}
+        res = Path(out) / "results.json"
+        steps = json.loads((res if res.exists() else Path(out) / "steps.json").read_text())["steps"]
+        files = {str(p.relative_to(out)): p.read_text() for p in Path(out).rglob("*")
+                 if p.is_file() and p.name not in ("raw.jsonl", "results.json")}
     finally:
         d.RAW and d.RAW.close()
         shutil.rmtree(out)

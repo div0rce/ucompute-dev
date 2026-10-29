@@ -1,0 +1,85 @@
+{
+ "what": "WP-04 P1 pre-registration (plan section 3, P1.0): written into <run>/prereg.json before P1.1. Do not edit once a P1 run exists.",
+ "sources": {
+  "prompts": "ucompute-core-lab 13fc793 p1-predictions/prompts.json (unchanged at d569c5b): raw completion text, qwen2.5 token counts",
+  "scoring": "ucompute-core-lab d569c5b p1-predictions/SCORING-INPUT.md, PREFLIGHT.md and score_p1.py (predictions PREDICTIONS.md at ae88d0b)",
+  "limits": "ucompute-core-lab p1-predictions/C5-NUMBERS.md; ADR-0005 D3 and D6"
+ },
+ "config": "P",
+ "models": [
+  {
+   "label": "R1a",
+   "model": "qwen2.5-0.5b-instruct-q8_0",
+   "n_layer": 24,
+   "split_at": 12,
+   "hidden": 896
+  },
+  {
+   "label": "R1b",
+   "model": "qwen2.5-1.5b-instruct-q4_k_m",
+   "n_layer": 28,
+   "split_at": 14,
+   "hidden": 1536
+  }
+ ],
+ "prompts": [
+  {
+   "id": 1,
+   "text": "Write a short story about a lighthouse keeper who finds a message in a bottle. The message reads UCOMPUTE-CANARY-D5DFDB64E3AEB0AB. Begin the story now.",
+   "canary": "UCOMPUTE-CANARY-D5DFDB64E3AEB0AB",
+   "tokens": 44
+  },
+  {
+   "id": 2,
+   "text": "Explain in simple terms how a river carves a canyon over millions of years. Reference code UCOMPUTE-CANARY-4F2DF3728656CA72 appears in the field notes. Start your explanation.",
+   "canary": "UCOMPUTE-CANARY-4F2DF3728656CA72",
+   "tokens": 50
+  },
+  {
+   "id": 3,
+   "text": "List three practical tips for keeping houseplants healthy during winter. The label on the pot says UCOMPUTE-CANARY-364003C269A56E40. Give the first tip.",
+   "canary": "UCOMPUTE-CANARY-364003C269A56E40",
+   "tokens": 47
+  }
+ ],
+ "requests": {
+  "endpoint": "/v1/completions",
+  "stream": true,
+  "temperature": 0,
+  "seed": 42,
+  "stream_options": {
+   "include_usage": true
+  },
+  "max_tokens": [
+   1,
+   65
+  ],
+  "split_mode": "pooled",
+  "acknowledged": true,
+  "cache_prompt": "false, always (Common's llama.cpp adapter)",
+  "load_request": {
+   "prompt": "Hello",
+   "max_tokens": 1
+  }
+ },
+ "checkpoints": "per prompt, one split session, nothing in between: loaded, after_n1, after_n65; each read from GET /api/status split {to_r, to_h, switches} 0.2 s after the stream's [DONE]",
+ "timing": "client side on H, the max_tokens 65 stream: ttft_ms = request sent to the first chunk with non-empty text; tpot_ms = ([DONE] time - ttft_ms) / (usage.completion_tokens - 1)",
+ "t_rpc_s": 10,
+ "byte_cap": "2 x est_bytes + 1 GiB per direction per load (ADR-0005 D6; lab C5-NUMBERS.md: 1,454 MB for R1a, 1,877 MB for R1b)",
+ "rlimit_as": "as built: granted bytes (the session's est_bytes) x 1.5 + 1 GiB (rpc::mem_cap); ADR-0005 D3's tighter rule (granted + the range's largest tensor + baseline + stacks) is not built",
+ "preflight": {
+  "r_load_max": 1.0,
+  "h_load_max": 2.0,
+  "quiet_s": 300,
+  "quiet_wait_s": 1200,
+  "h_free_min_bytes": 3000000000
+ },
+ "pass_rules": {
+  "deny": "P1.1: each refusal typed, as built: (a) unpaired peer_unauthorized; (b) groups allowing remote inference only and (c) pooling allowed on H only: peer_unauthorized 'no trusted group allows pooled inference'; (d) no acknowledgement: policy_denied with the disclosure; after each, no ggml-rpc-server and no extra listener on R",
+  "session": "P1.2: placement RPC0 [0,k) then MTL0 [k,n); R's rpc-server listens on 127.0.0.1 only and is unreachable from H's LAN address; its banner says transport TCP",
+  "local_stays_local": "P1.9: a local request with a split loaded runs on the local engine and moves the session counters by under 1 KiB per direction",
+  "canaries": "P1.10: no canary in any daemon log, engine log, rpc-server log, audit file or run record on either host",
+  "lab": "scored by the lab's score_p1.py: bytes per decode token within 10 %, turns 1.00 +- 0.05, TPOT within [0.75 x planner, 1.25 x ramp-down], TTFT within 25 %",
+  "tokens": "split against local text is reported as measured (Metal head, x86 CPU stage: ADR-0005 D10), never a pass rule here"
+ }
+}

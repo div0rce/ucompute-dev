@@ -12,6 +12,19 @@
 # the ssh shell whose command text contains it) with COMMON_HOME=~/.common-acceptance (its own identity),
 # started here when it is not running and stopped at the end. B (this Mac's app) is quit with SIGTERM to the app (the
 # Cmd+Q path), crashed with SIGKILL and started with `open -a`. Exit codes and restore as in run_mac_windows.sh.
+#
+# SPLIT=1 runs WP-04 P1 instead (plan docs/design/wp04-implementation-plan-2026-10-23.md section 3; ADR-0005):
+#
+#   LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/pool-two-machine-<date>/run-<HHMM> \
+#     [LINK=wifi|wired] [MODELS=R1a,R1b] [LAB=<ucompute-core-lab checkout>] [H_PORT=18320] [H_LISTEN=18420] \
+#     tests/distributed/two_machine/run_mac_linux.sh
+#
+# The head H is a dev daemon from this checkout (target/release/common, built from HEAD with a clean tree; sync the
+# same HEAD to the Linux host and build it there first) with COMMON_HOME=.common-split, hardlinked from .common's
+# models and backends (no extra disk). The Linux daemon A is the stage host R. The installed app is quit for the
+# run and started again at the end; A's and H's state is saved and put back (state.py). The driver,
+# split_two_machine.py, runs under caffeinate -dimsu and writes the run directory $OUT; with LAB set, the lab's
+# scorer reads $OUT/lab-input.json into $OUT/lab-score.json.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 : "${LINUX_HOST:?set LINUX_HOST}" "${LINUX_USER:?set LINUX_USER}" "${OUT:?set OUT}"
@@ -34,6 +47,46 @@ tunnel() {
 }
 $H run "$A_START" >/dev/null || { echo "A's daemon did not start (build it: cargo build --release -p common-cli)"; exit 1; }
 tunnel || exit 1
+
+if [ "${SPLIT:-}" = 1 ]; then
+  HS="http://127.0.0.1:${H_PORT:-18320}" HOME_H="$PWD/.common-split" APP_WAS_UP=0 HPID=""
+  test -x target/release/common || { echo "H is not built: cargo build --release -p common-cli"; exit 1; }
+  mkdir -p "$OUT/h" "$HOME_H"
+  (cd .common && pax -rwlk models backends "$HOME_H")  # hardlinks (B-010: the disk is tight)
+  # shellcheck disable=SC2329  # run by the EXIT trap
+  split_cleanup() {
+    rc=$?
+    set +e
+    [ -f "$OUT/state-before.json" ] && { python3 -I tests/distributed/two_machine/state.py restore "$OUT/state-before.json" || rc=1; }
+    [ -n "$HPID" ] && kill "$HPID" 2>/dev/null && wait "$HPID" 2>/dev/null
+    $H run 'pkill -TERM -f "^target/release/common serve"' >/dev/null 2>&1
+    pkill -f "1830[4]:127.0.0.1:8192" 2>/dev/null
+    [ "$APP_WAS_UP" = 1 ] && open -a /Applications/Common.app
+    exit "$rc"
+  }
+  trap split_cleanup EXIT
+  if pgrep -x common-desktop >/dev/null; then
+    APP_WAS_UP=1
+    pkill -TERM -x common-desktop
+    for _ in $(seq 30); do curl -s -m 1 "$B/health" >/dev/null || break; sleep 1; done
+  fi
+  # shellcheck disable=SC2086
+  COMMON_HOME="$HOME_H" target/release/common serve --port "${H_PORT:-18320}" --network \
+    --listen-port "${H_LISTEN:-18420}" $MDNS_FLAG -v >>"$OUT/h/daemon.log" 2>&1 </dev/null &
+  HPID=$!
+  for _ in $(seq 60); do curl -s -m 1 "$HS/health" >/dev/null && break; sleep 0.5; done
+  curl -s -m 2 "$HS/health" >/dev/null || { echo "H's dev daemon did not answer: $OUT/h/daemon.log"; exit 1; }
+  python3 -I tests/distributed/two_machine/state.py save "$OUT/state-before.json" "$A" "$HS"
+  rc=0
+  # shellcheck disable=SC2086
+  caffeinate -dimsu python3 -I tests/distributed/two_machine/split_two_machine.py --a "$HS" --b "$A" --out "$OUT" \
+    --r-sh "$H run" --h-home "$HOME_H" --h-log "$OUT/h/daemon.log" --link "${LINK:-wifi}" ${MODELS:+--models "$MODELS"} \
+    | tee "$OUT/split-console.txt" || rc=$?
+  if [ -n "${LAB:-}" ] && [ -s "$OUT/lab-input.json" ]; then
+    python3 -I -B "$LAB/p1-predictions/score_p1.py" "$OUT/lab-input.json" >"$OUT/lab-score.json" || rc=1
+  fi
+  exit "$rc"
+fi
 curl -s -m 5 "$B/health" >/dev/null || { echo "B (this Mac's app) is not running"; exit 1; }
 
 QUIT="pkill -TERM -x common-desktop"

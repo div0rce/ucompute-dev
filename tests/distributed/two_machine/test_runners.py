@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s tests/distributed/two_machine -v
 import glob
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,16 @@ class RunnerScriptTests(unittest.TestCase):
             with self.subTest(runner=os.path.basename(r)):
                 p = subprocess.run(["bash", "-n", r], capture_output=True, text=True)
                 self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_every_script_a_runner_names_exists(self):
+        named = set()
+        for r in RUNNERS:
+            text = pathlib.Path(r).read_text()
+            named |= set(re.findall(r"tests/distributed/two_machine/(\w+\.py)", text))
+            named |= {f"{d}_two_machine.py" for d in re.findall(r"^\s*driver (\w+)", text, re.M)}
+        self.assertIn("split_two_machine.py", named, "run_mac_linux.sh SPLIT=1 runs the WP-04 P1 driver")
+        for n in named:
+            self.assertTrue(os.path.exists(os.path.join(HERE, n)), n)
 
     @unittest.skipUnless(shutil.which("shellcheck"), "shellcheck is not installed")
     def test_shellcheck_finds_nothing(self):
