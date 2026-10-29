@@ -72,7 +72,8 @@ function Launch {
 # 2. first launch
 $app = Launch
 $t = WaitFor { Healthy } 180
-$daemons = Procs "common.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe }
+# @(): on Windows PowerShell 5.1 a single CimInstance has no .Count, so one correct daemon read as "not one"
+$daemons = @(Procs "common.exe" | Where-Object { $_.ExecutablePath -eq $daemonExe })
 $argsOk = $daemons.Count -eq 1 -and $daemons[0].ParentProcessId -eq $app.Id -and ($daemons[0].CommandLine -replace '^"[^"]+"\s*|^\S+\s*', '') -eq ($DaemonArgs -join " ")
 Step "first launch: daemon healthy, started by the app with its exact arguments" ($t -ne $null -and $argsOk) @{ healthy_after_s = $t; daemon = @($daemons | ForEach-Object { "$($_.ProcessId) parent $($_.ParentProcessId): $($_.CommandLine)" }) }
 $engineDir = Join-Path $data "Common\backends\llama.cpp"
