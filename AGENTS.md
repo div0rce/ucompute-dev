@@ -44,6 +44,7 @@ cd apps/desktop && pnpm install && pnpm test  # desktop UI tests (vitest + axe)
 - A claim from another agent or a chat summary is at most `IMPLEMENTED_UNVERIFIED` until you see the evidence yourself.
 
 ## Hard rules
+- **Work never stops because a machine sleeps or a connection drops (owner, 2026-10-29, non-negotiable).** On the Mac every session holds a sleep-prevention assertion (`caffeinate -ims -w <session pid>`, set by the user-level SessionStart hook; start it yourself if `pgrep -lf "caffeinate -ims"` finds none) and every long command runs under `caffeinate -i`. Remote long jobs never depend on the SSH session: `setsid nohup` with pid files on Linux, a WMI-created process (`Invoke-CimMethod Win32_Process Create`) on Windows, `nohup caffeinate -i` on a Mac. A closed lid still sleeps a MacBook; only the owner changes that.
 - No mocked or simulated inference presented as real. Synthetic fixtures must be labelled as such in the test name and evidence.
 - **Single-host multiprocess tests are labelled `SINGLE-HOST`** in test names, evidence and docs. They never satisfy a two-machine criterion (F-03-01, F-03-02, Gate D). Two independent physical machines are required.
 - Never expose llama.cpp `rpc-server` (or any unauthenticated service) beyond loopback. Cross-machine traffic goes only through UCompute's authenticated, encrypted transport.
