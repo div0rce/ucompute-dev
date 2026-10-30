@@ -4,6 +4,18 @@ Names: this record uses the current names (D-030). What it describes ran under t
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-29/30 — Claude Code — D-026 built; candidate 2 ready; Mac migrated; WP-04 fix pass and S1-M (unit, SINGLE-HOST)
+
+**Implemented / verified:**
+- D-026 local-work priority on CPU engines: `local_priority` setting (default `refuse_new`, opt-in `preempt`, `none`), API, app Settings › Sharing selection; unit and SINGLE-HOST tests on this Mac with real engines (`docs/VERIFICATION.md` 2026-10-30 D-026). F-06-04 stays IMPLEMENTED_UNVERIFIED: the flood bound with D-026 is to be measured on sentinel.
+- WP-04 fix pass (4ddec61) and S1-M with the `--cache-ram 0` change (f7fe48e); candidate 2 (0.1.1, SHA-256 `c1166ba9…b937`) built and verified ALL PASS 19/19, promotion record awaiting the owner's approval; this Mac migrated to it (`docs/evidence/migration-mac-2026-10-29.md`); D-030 (no trace of the former name); CI on both PRs green.
+
+**Ledger:** NOT_STARTED 103 · IN_PROGRESS 6 · IMPLEMENTED_UNVERIFIED 8 · VERIFIED 36 · BLOCKED 0 · INFEASIBLE 0 (153 rows).
+
+**Limitations:** D-026 not run on sentinel or two machines; split requests and embeddings are not counted as local work; the restart test is in process only. The second Linux soak is still running (ends about 07:43 UTC 2026-10-30).
+
+**Next:** collect the soak (moving its home into the backup, not deleting it); migrate sentinel (`~/ucompute-migration-2026-10-29`, backup then verified model carry-over); sync and build HEAD there; S1-L and the Linux suite, D-026's flood tests included; R's half of the preflight; end the desktop session; P1 with `run_mac_linux.sh SPLIT=1`.
+
 ## 2026-10-28/29 — Claude Code — candidate 1 published; Windows app verified; soaks; WP-04 round 8; GitHub sync; total rename to UCompute (unit, SINGLE-HOST, one-machine packaged checks)
 
 **Implemented / verified:**

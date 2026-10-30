@@ -612,9 +612,21 @@ async fn start_local(
     let model = st.manager.ensure_loaded(model_id, st.load_options()).await?;
     job.loaded(&model.info().device_actual);
     let req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    // D-026: local work on a CPU engine holds peers off (and, under `preempt`, cancels them) until
+    // this stream is dropped, then for `local_priority::WINDOW`.
+    let local = ucompute_network::local_priority::on_cpu(model.info()).then(|| st.local_work.local_started());
     // Child of the server's shutdown token: Ctrl-C ends this generation too (see `serve_on`).
     let cancel = st.shutdown.child_token();
     let gen = model.generate(req, cancel.clone()).await?;
+    let gen = match local {
+        Some(guard) => gen
+            .map(move |ev| {
+                let _ = &guard;
+                ev
+            })
+            .boxed(),
+        None => gen,
+    };
     Ok((gen, cancel, Some(permit)))
 }
 

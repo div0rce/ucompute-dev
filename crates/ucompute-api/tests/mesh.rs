@@ -3412,3 +3412,339 @@ async fn a_request_to_a_device_being_dialled_is_connecting_single_host() {
     );
     a.stop().await;
 }
+
+// ------------------------------------------- D-026: local work first on CPU engines
+
+/// [`serving_app`] whose probe reports every GPU backend unusable, so the engine runs on the CPU
+/// (`device_actual == "cpu"`), as on a CPU-only host. The engine, model and inference are real.
+fn cpu_serving_app(home: &std::path::Path, dir: &std::path::Path, config: ApiConfig) -> Arc<AppState> {
+    let real = Paths::at(home);
+    let backend = ucompute_runtime::backend_by_name("llama.cpp", engine_dir(&real), real.clone()).unwrap();
+    let mut hw = ucompute_hardware::probe().unwrap();
+    for b in &mut hw.backends {
+        if b.name != "cpu" {
+            b.available = false;
+        }
+    }
+    let manager =
+        ucompute_runtime::manager::ModelManager::new(real.clone(), ucompute_artifacts::Store::new(real), backend, hw);
+    app_with(config, Paths::at(dir), Arc::new(manager))
+}
+
+/// The model these tests generate with: qwen2.5-0.5b, long enough on the CPU (several seconds for
+/// a few hundred tokens) that "while a local generation runs" is a real interval.
+const LP_MODEL: &str = CHAT_MODEL_ID;
+const LP_PROMPT: &str = "Write a long story about a dragon who learns to bake bread.";
+const BUSY: &str = "busy with its own work";
+
+/// A and B paired (SINGLE-HOST), B serving with two engine slots (one for peers), A in trusted
+/// mode; B's local priority set to `mode` through `PUT /api/network` (left at the default when
+/// None). `cpu`: B's engine runs on the CPU, else on what the probe offers (Metal here).
+async fn priority_pair(
+    home: &std::path::Path,
+    mode: Option<&str>,
+    cpu: bool,
+) -> (Server, Server, PeerId, [tempfile::TempDir; 2]) {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Server::start(app(cfg(), da.path().to_path_buf(), HardwareReport::default())).await;
+    let b_app = if cpu {
+        cpu_serving_app(home, db.path(), serving_cfg())
+    } else {
+        serving_app(home, db.path(), serving_cfg())
+    };
+    let b = Server::start(b_app).await;
+    let net_b = enable_network(&b, true).await;
+    assert_eq!(net_b["local_priority"], "refuse_new", "the default: {net_b}");
+    if let Some(mode) = mode {
+        let (status, v) = put(&b, "/api/network", json!({ "local_priority": mode })).await;
+        assert_eq!((status, v["local_priority"].as_str()), (200, Some(mode)), "{v}");
+        assert_eq!(
+            v["listen_addr"], net_b["listen_addr"],
+            "a priority change does not restart the endpoint"
+        );
+    }
+    enable_network(&a, false).await;
+    let (ida, idb) = (a.state.identity.id, b.state.identity.id);
+    pin(&a, idb, "B", Some(listen_addr(&net_b)));
+    pin(&b, ida, "A", None);
+    put_group(&a, "home", &[idb], true, false).await;
+    put_group(&b, "home", &[ida], true, false).await;
+    let (status, _) = put(
+        &a,
+        "/api/privacy",
+        json!({ "mode": "trusted_group", "acknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // Load B's engine with a local request and wait out the window it opens.
+    let (status, v) = post(
+        &b,
+        "/v1/completions",
+        json!({ "model": LP_MODEL, "prompt": LP_PROMPT, "max_tokens": 4, "temperature": 0 }),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let device = b.state.manager.status().await.unwrap().device_actual;
+    eprintln!("SINGLE-HOST D-026: B's engine runs on {device:?} (local_priority {mode:?})");
+    tokio::time::sleep(ucompute_network::local_priority::WINDOW + Duration::from_millis(300)).await;
+    (a, b, idb, [da, db])
+}
+
+fn lp_body(max_tokens: u32, stream: bool, target: Option<PeerId>) -> Value {
+    let mut v =
+        json!({ "model": LP_MODEL, "prompt": LP_PROMPT, "max_tokens": max_tokens, "temperature": 0, "stream": stream });
+    if let Some(id) = target {
+        v["target"] = json!(format!("peer:{}", id.to_hex()));
+    }
+    v
+}
+
+/// A streaming generation under way: returns once its first token arrived; the task yields the
+/// whole SSE body and the instant it ended, `ended` is set at that instant.
+struct Running {
+    task: tokio::task::JoinHandle<(String, Instant)>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn start_running(url: String, body: Value) -> Running {
+    let mut r = client().post(url).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let mut text = String::new();
+    while !text.contains("\"choices\"") {
+        let c = r
+            .chunk()
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("stream ended before its first token: {text}"));
+        text.push_str(&String::from_utf8_lossy(&c));
+    }
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ended.clone();
+    let task = tokio::spawn(async move {
+        while let Some(c) = r.chunk().await.unwrap() {
+            text.push_str(&String::from_utf8_lossy(&c));
+        }
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        (text, Instant::now())
+    });
+    Running { task, ended }
+}
+
+fn assert_busy(status: u16, v: &Value) {
+    assert_eq!((status, v["error"]["code"].as_str()), (429, Some("overloaded")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains(BUSY), "{v}");
+}
+
+/// D-026 B, the default, on a real CPU engine (SINGLE-HOST): a peer generation already running
+/// when local work starts finishes; a new one is refused (typed, retryable `overloaded`) while a
+/// local generation runs and within 2 s after it ends, and accepted after that.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_priority_refuse_new_on_a_cpu_engine_single_host() {
+    let Some(home) = fixture_home() else { return };
+    if !has_model(&home, LP_MODEL) {
+        assert!(
+            std::env::var_os("UCOMPUTE_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "{LP_MODEL} missing"
+        );
+        return eprintln!("SKIP: {LP_MODEL} missing");
+    }
+    let _engine = ENGINE_TESTS.lock().await;
+    let (a, b, idb, _dirs) = priority_pair(&home, None, true).await;
+    assert_eq!(b.state.manager.status().await.unwrap().device_actual, "cpu");
+
+    // A running peer generation finishes although local work starts beside it.
+    let peer = start_running(a.url("/v1/completions"), lp_body(64, true, Some(idb))).await;
+    let (status, v) = post(&b, "/v1/completions", lp_body(8, false, None)).await;
+    assert_eq!(status, 200, "local requests are never refused: {v}");
+    let (text, _) = peer.task.await.unwrap();
+    assert!(
+        text.contains("\"finish_reason\":\"") && !text.contains("\"error\""),
+        "the peer generation finished: {text}"
+    );
+    tokio::time::sleep(ucompute_network::local_priority::WINDOW + Duration::from_millis(300)).await;
+
+    // During a local generation: refused.
+    let local = start_running(b.url("/v1/completions"), lp_body(400, true, None)).await;
+    let t0 = Instant::now();
+    let (status, v) = post(&a, "/v1/completions", lp_body(8, false, Some(idb))).await;
+    let during = !local.ended.load(std::sync::atomic::Ordering::SeqCst);
+    eprintln!(
+        "SINGLE-HOST D-026 B: peer request during local work: {status} in {:?} (local still running: {during})",
+        t0.elapsed()
+    );
+    assert_busy(status, &v);
+    assert!(during, "the refusal came while the local generation ran");
+
+    // Within 2 s after it ended: refused.
+    let (body, end) = local.task.await.unwrap();
+    assert!(body.contains("[DONE]"), "{body}");
+    let (status, v) = post(&a, "/v1/completions", lp_body(8, false, Some(idb))).await;
+    let after = end.elapsed();
+    eprintln!("SINGLE-HOST D-026 B: peer request {after:?} after local work ended: {status}");
+    assert!(after < ucompute_network::local_priority::WINDOW, "{after:?}");
+    assert_busy(status, &v);
+
+    // After the window: accepted.
+    tokio::time::sleep(
+        (ucompute_network::local_priority::WINDOW + Duration::from_millis(300)).saturating_sub(end.elapsed()),
+    )
+    .await;
+    let (status, v) = post(&a, "/v1/completions", lp_body(8, false, Some(idb))).await;
+    assert_eq!(status, 200, "after the window: {v}");
+    assert!(!v["choices"][0]["text"].as_str().unwrap().is_empty(), "{v}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// D-026 A, opt-in, on a real CPU engine (SINGLE-HOST): local work starting cancels the running
+/// peer generation, which ends with the typed `overloaded`; the local request completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_priority_preempt_cancels_a_running_peer_generation_on_a_cpu_engine_single_host() {
+    let Some(home) = fixture_home() else { return };
+    if !has_model(&home, LP_MODEL) {
+        assert!(
+            std::env::var_os("UCOMPUTE_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "{LP_MODEL} missing"
+        );
+        return eprintln!("SKIP: {LP_MODEL} missing");
+    }
+    let _engine = ENGINE_TESTS.lock().await;
+    let (a, b, idb, _dirs) = priority_pair(&home, Some("preempt"), true).await;
+    assert_eq!(b.state.manager.status().await.unwrap().device_actual, "cpu");
+    let peer = start_running(a.url("/v1/completions"), lp_body(400, true, Some(idb))).await;
+    let (status, v) = post(&b, "/v1/completions", lp_body(8, false, None)).await;
+    assert_eq!(status, 200, "the local request: {v}");
+    let (text, _) = peer.task.await.unwrap();
+    eprintln!(
+        "SINGLE-HOST D-026 A: the peer stream ended with: {}",
+        text.lines().rev().find(|l| l.contains("error")).unwrap_or("(no error)")
+    );
+    assert!(
+        text.contains("\"code\":\"overloaded\"") && text.contains(BUSY),
+        "{text}"
+    );
+    assert!(
+        !text.contains("\"finish_reason\":\""),
+        "cancelled, not finished: {text}"
+    );
+    // B's own row for the served request says so too.
+    let jobs = get(&b, "/api/jobs").await;
+    let served = jobs["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "served_for_peer")
+        .unwrap();
+    assert_eq!(served["error_code"], "overloaded", "{served}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// D-026 C on a real CPU engine (SINGLE-HOST): no rule, a peer generation is accepted during local work.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_priority_none_accepts_peer_work_during_local_work_on_a_cpu_engine_single_host() {
+    let Some(home) = fixture_home() else { return };
+    if !has_model(&home, LP_MODEL) {
+        assert!(
+            std::env::var_os("UCOMPUTE_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "{LP_MODEL} missing"
+        );
+        return eprintln!("SKIP: {LP_MODEL} missing");
+    }
+    let _engine = ENGINE_TESTS.lock().await;
+    let (a, b, idb, _dirs) = priority_pair(&home, Some("none"), true).await;
+    assert_eq!(b.state.manager.status().await.unwrap().device_actual, "cpu");
+    let local = start_running(b.url("/v1/completions"), lp_body(400, true, None)).await;
+    let (status, v) = post(&a, "/v1/completions", lp_body(8, false, Some(idb))).await;
+    assert_eq!(status, 200, "{v}");
+    let (body, _) = local.task.await.unwrap();
+    assert!(body.contains("\"finish_reason\":\""), "{body}");
+    a.stop().await;
+    b.stop().await;
+}
+
+/// D-026 leaves GPU engines alone (SINGLE-HOST, Metal on this Mac): with the default `refuse_new`,
+/// a peer generation is accepted while a local generation runs. Skips loudly on a host whose
+/// engine runs on the CPU.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_priority_leaves_a_gpu_engine_alone_single_host() {
+    let Some(home) = fixture_home() else { return };
+    if !has_model(&home, LP_MODEL) {
+        assert!(
+            std::env::var_os("UCOMPUTE_REQUIRE_FIXTURES").is_none_or(|v| v != "1"),
+            "{LP_MODEL} missing"
+        );
+        return eprintln!("SKIP: {LP_MODEL} missing");
+    }
+    let _engine = ENGINE_TESTS.lock().await;
+    let (a, b, idb, _dirs) = priority_pair(&home, None, false).await;
+    let device = b.state.manager.status().await.unwrap().device_actual;
+    if device == "cpu" {
+        eprintln!("SKIP: no GPU engine on this host");
+        a.stop().await;
+        b.stop().await;
+        return;
+    }
+    let local = start_running(b.url("/v1/completions"), lp_body(400, true, None)).await;
+    let (status, v) = post(&a, "/v1/completions", lp_body(8, false, Some(idb))).await;
+    let during = !local.ended.load(std::sync::atomic::Ordering::SeqCst);
+    eprintln!(
+        "SINGLE-HOST D-026 on {device}: peer request during local work: {status} (local still running: {during})"
+    );
+    assert_eq!(status, 200, "{v}");
+    assert!(during, "accepted while the local generation ran");
+    local.task.await.unwrap();
+    a.stop().await;
+    b.stop().await;
+}
+
+/// D-026 setting, no engine: `refuse_new` when `config.json` has none; unknown values refused with
+/// `invalid_request`; a change is persisted, applied at once without restarting the endpoint, and
+/// read back after a daemon restart (in process, same `UCOMPUTE_HOME`); a file written by another
+/// process applies at the next read.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_priority_setting_validates_persists_and_survives_a_restart() {
+    use ucompute_network::local_priority::LocalPriority;
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(app(cfg(), dir.path().to_path_buf(), HardwareReport::default())).await;
+    assert_eq!(get(&srv, "/api/network").await["local_priority"], "refuse_new");
+    assert_eq!(srv.state.local_work.mode(), LocalPriority::RefuseNew);
+    let on = enable_network(&srv, false).await;
+    for bad in [json!("always"), json!(""), json!(1), json!(null)] {
+        let (status, v) = put(&srv, "/api/network", json!({ "local_priority": bad })).await;
+        if bad.is_null() {
+            assert_eq!(status, 200, "null leaves it unchanged: {v}");
+            continue;
+        }
+        assert_eq!(
+            (status, v["error"]["code"].as_str()),
+            (400, Some("invalid_request")),
+            "{bad}: {v}"
+        );
+    }
+    let (status, v) = put(&srv, "/api/network", json!({ "local_priority": "preempt" })).await;
+    assert_eq!((status, v["local_priority"].as_str()), (200, Some("preempt")), "{v}");
+    assert_eq!(v["listen_addr"], on["listen_addr"], "not restarted: {v}");
+    assert_eq!(v["enabled"], true);
+    assert_eq!(srv.state.local_work.mode(), LocalPriority::Preempt);
+    assert!(audit_kinds(&get(&srv, "/api/audit").await).contains(&"local_priority_changed".to_string()));
+    let file: Value = serde_json::from_slice(&std::fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(file["local_priority"], "preempt", "{file}");
+    srv.stop().await;
+
+    let srv = Server::start(app(cfg(), dir.path().to_path_buf(), HardwareReport::default())).await;
+    assert_eq!(
+        srv.state.local_work.mode(),
+        LocalPriority::Preempt,
+        "read back at start"
+    );
+    assert_eq!(get(&srv, "/api/network").await["local_priority"], "preempt");
+    // Another process (the file) sets C; the next read applies it.
+    let mut s = Settings::load(&Paths::at(dir.path())).unwrap().unwrap();
+    s.local_priority = LocalPriority::None;
+    std::thread::sleep(Duration::from_millis(20)); // a new mtime
+    s.save(&Paths::at(dir.path())).unwrap();
+    assert_eq!(get(&srv, "/api/network").await["local_priority"], "none");
+    assert_eq!(srv.state.local_work.mode(), LocalPriority::None);
+    srv.stop().await;
+}
