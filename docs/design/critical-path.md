@@ -8,9 +8,30 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 
 | Workstream | Current priority | Next action |
 |---|---|---|
-| Engineering | WP-04 P1 on this Mac and sentinel | After the soak (about 07:43 UTC 2026-10-30): collect it with the 37cd454 runner, migrate sentinel (backup, renamed tree and homes), S1-L and the Linux suite, R's half of the preflight, end the desktop session, then P1. Fix pass 4ddec61 and S1-M f7fe48e done; candidate 0.1.1 (3470f8d) awaits the owner's approval |
+| Engineering | WP-04 P1 on this Mac and sentinel | After the soak (about 07:42 UTC 2026-10-30): collect it with the keep variant of the 37cd454 runner, migrate sentinel (backup, verified model carry-over, renamed tree), the Linux suite with D-026's flood tests, R's half of the preflight, end the desktop session, then P1. D-026 12c0c67 done (Mac, SINGLE-HOST); candidate 0.1.1 approved for publication (D-031) |
 | Core Lab | Help WP-04: drop-ins, pre-registered numbers, scoring | Review the C2 and C5 diffs read-only; score P1 when its evidence exists |
-| Website | Candidate 1 published, received and re-verified through Access; site checks passed on 2026-10-29 (22 pages in three browsers, Lighthouse 99-100) | Idle until the next promotion record or snapshot |
+| Website | Publishing candidate 2 (0.1.1, D-031) through the stage-snapshot link | `verify:release` on the published file and the download page state; then record D-032 and coordinate with Growth on positioning, content, SEO, onboarding, analytics and distribution |
+| Growth (D-032) | Its own repository and environment; consumes the handoff below | No engineering dependency and no request pending |
+
+## Cross-workstream handoff (D-032)
+
+Existing files only. What each workstream may take from the others, and what counts as a public claim.
+
+- **Verified capability updates** (Engineering, read by everyone): `docs/VERIFICATION.md` (dated entries with commands and results),
+  `docs/PROGRESS.md` (newest first), `docs/REQUIREMENTS.csv` rows at `VERIFIED` with their evidence paths, and `docs/evidence/`.
+  Only a `VERIFIED` row is a publicly claimable capability; `IMPLEMENTED_UNVERIFIED`, SINGLE-HOST and synthetic results are not.
+  The Core Lab's equivalents are its own repository's results and `WP04-DEPENDENCIES.md`.
+- **Approved public claims** (Website-owned): the website repository's `reference/claims.json` and its claims workflow
+  (`docs/DEPLOYMENT.md` there, "Claims and the capability snapshot"). Growth takes public wording from it, not from engineering's
+  working records; site text is never evidence (spec §29.5).
+- **Release changes**: `docs/DECISIONS.md` (the D-025, D-030, D-031 pattern: artifact, hash, channel, cohort) and the WP-08 promotion
+  records in `docs/VERIFICATION.md`; the website's `reference/releases.json` is the published state. The private-alpha cohort is the
+  owner's Access policy and nothing else; no workstream expands it.
+- **Growth requests** go to Website (positioning, content, SEO, onboarding, analytics, distribution). One needing an engineering or
+  lab fact is answered from the records above; anything beyond them is an owner decision. Analytics on ucompute.org stay under spec
+  §29.5 and Website's deployment authority; Growth's own analytics live in Growth's own channels.
+- **Mechanism for now**: cross-session messages between the Claude Code sessions plus these files. A durable read-only feed (GitHub
+  issues or a status file) is a later step, taken only if routine coordination needs it.
 
 ## Milestones and what each waits on
 

@@ -7,6 +7,7 @@ Read this first, every session, whichever agent you are (Claude, Codex, other). 
 2. `docs/REQUIREMENTS.csv` — the single requirements ledger (spec section 21 fields). `docs/requirements/REGISTRY.md` is generated from it.
 3. `docs/research/` — M0 research **baseline**, not verified truth. Keep its ✅/⚠️/`unknown/unverified` markers. Re-verify before relying on anything not ✅.
 4. `docs/DECISIONS.md` + `docs/decisions/ADR-*.md` — architectural decisions.
+5. `docs/design/critical-path.md` — the four workstreams (Engineering, Core Lab, Website, Growth; D-032), one current priority each, and the cross-workstream handoff: which files other workstreams take from this repository and what counts as a public claim (`VERIFIED` rows only).
 
 ## Session start
 ```sh
