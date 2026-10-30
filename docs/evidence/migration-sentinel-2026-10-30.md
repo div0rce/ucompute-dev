@@ -74,6 +74,17 @@ not suspend on its own meanwhile: Ubuntu's `10_ubuntu-settings.gschema.override`
 `/etc/polkit-1/rules.d/50-ucompute-inhibit.rules` allowing `div0rce` the two inhibit-block actions, after which the
 service takes its inhibitor again. Until then the keep-awake rule on sentinel rests on the AC policy alone.
 
+After the reboot `rustc` itself faults on sentinel: the Linux suite's compile died four times in its first minutes
+(`SIGSEGV` and general-protection faults inside `librustc_driver`, kernel log 13:12–13:18 local), with a cleared
+`target/debug`, at `-j 16` and at `-j 8`, while no other process faulted, a hello-world build passed, CPU temperatures
+were 46–49 °C, an 8 GiB two-pattern user-space memory test found 0 bad pages, and a re-downloaded 1.98.0 toolchain
+has the identical `librustc_driver` hash (`56047570…`, 150,831,312 B), so the toolchain was not corrupt. Attempt logs:
+`linux-tests-749fe93.attempt1-rustc-segv.log`, `.attempt2.log`, `.attempt3-j8.log`; a fourth attempt with the
+re-downloaded toolchain runs as unit `ucompute-linux-tests-749fe93-d`. If it faults too, the host's kernel or memory
+is unreliable since the crash and P1 must not run on it until the owner has checked it (a reboot into
+`linux-image-7.0.0-34-generic` from GRUB, or memtest86 overnight, are the owner's options); the release binary built
+before the crash is unaffected as a file but its results would not be trustworthy on a faulting host.
+
 ## Acceptance (condition 2), sentinel
 
 | # | Check | Result |
