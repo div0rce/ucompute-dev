@@ -53,13 +53,34 @@ Afterwards no file or folder with the former name remains in the home outside th
   `qwen2.5-0.5b-instruct-q4_k_m` hard-linked from the acceptance home (no extra disk), 549 MB.
 - Keep-awake: the user service `ucompute-keep-awake.service` was already installed and active (2026-10-29), untouched.
 
+## Kernel crash and reboot while ending the desktop session (2026-10-30, 13:04 local)
+
+P1's preflight requires no local login, so the engineering session ended the owner's seat0 desktop session with
+`loginctl terminate-session 111` (owner-approved on 2026-10-29). At 13:04:45 local, while that session was being torn
+down, the kernel (Ubuntu 26.04, `linux-image-7.0.0-38-generic`) logged `BUG: Bad rss-counter state … type:MM_FILEPAGES
+val:1 Comm:systemd Pid:2231167` with a page-fault trace in a `systemd` process's exit, tainted, and crashed; kdump saved
+a vmcore (`/var/crash/202610301305`, root-only) and the apport report `/var/crash/linux-image-7.0.0-38-generic-202610301305.crash`;
+the host was back at 13:07 (1 min of uptime at 13:07:55). A kernel bug, not UCompute's; it took about 4 minutes of
+availability and killed the Linux test run that had just started compiling (relaunched as the transient user unit
+`ucompute-linux-tests-749fe93`). After the reboot the seat shows the login greeter only, `who` is empty, and the user
+manager (lingering) is up, so the P1 preflight's session condition now holds without a desktop session.
+
+Keep-awake after the reboot: the user service `ucompute-keep-awake.service` restarts every 60 s and fails, because
+polkit refuses a *block* inhibitor (`org.freedesktop.login1.inhibit-block-sleep`, `…-idle`) to a user whose only
+sessions are SSH ("requires interactive authentication"); it worked while the desktop session existed. The host does
+not suspend on its own meanwhile: Ubuntu's `10_ubuntu-settings.gschema.override` sets `sleep-inactive-ac-timeout = 0`
+(never, on AC, greeter included) and `logind.conf` leaves `IdleAction` at its default (ignore). Owner action, either:
+`sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` (strongest), or a polkit rule
+`/etc/polkit-1/rules.d/50-ucompute-inhibit.rules` allowing `div0rce` the two inhibit-block actions, after which the
+service takes its inhibitor again. Until then the keep-awake rule on sentinel rests on the AC policy alone.
+
 ## Acceptance (condition 2), sentinel
 
 | # | Check | Result |
 |---|---|---|
 | 1 | Fresh install | Pending: the renamed Linux tarball and `verify_linux_install.py` (milestone C) |
 | 2 | Replacement of the previous development install | **PASS**: the old daemons stopped, no orphaned process (`pgrep` for the engine, the daemon and the old tree: none); the renamed build runs on a test port and reports its commit |
-| 3 | Startup after a reboot | Not tested |
+| 3 | Startup after a reboot | Partly observed: after the kernel-crash reboot (above) the user manager and the keep-awake unit started (the unit then fails on polkit, see above); the development install has no boot-time daemon by design, so the product check (the packaged Linux service) remains pending with milestone C |
 | 4 | Inference: local / remote / split | Pending: the Linux suite (local, real engine), then P1 (split) with this Mac |
 | 5 | Mesh with updated Mac and Windows devices | Pending: P1's pairing with this Mac; the laptop later |
 | 6 | An outdated build fails cleanly | Pending (needs a pre-rename peer on the network) |

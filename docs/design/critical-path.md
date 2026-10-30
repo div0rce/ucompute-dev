@@ -68,6 +68,7 @@ Existing files only. What each workstream may take from the others, and what cou
 ## Owner actions that unblock something
 
 1. If sentinel's link still drops or jitters with power saving off: an Ethernet cable on its `eno2`.
-2. When convenient: the laptop and Kyle's Mac awake and on the network (milestones D and E).
-3. Accept or amend ADR-0006 (zero-trust execution, security gates SG-1 to SG-3; Proposed). Today's work stays inside
+2. Sentinel, keep-awake headless (its desktop session is gone since the 2026-10-30 kernel crash, `docs/evidence/migration-sentinel-2026-10-30.md`): `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`, or a polkit rule allowing `div0rce` `org.freedesktop.login1.inhibit-block-sleep` and `-idle`; until then Ubuntu's never-suspend-on-AC default is the only guard. Optionally report the kernel bug (`Bad rss-counter state`, 7.0.0-38-generic) from `/var/crash/linux-image-7.0.0-38-generic-202610301305.crash`.
+3. When convenient: the laptop and Kyle's Mac awake and on the network (milestones D and E).
+4. Accept or amend ADR-0006 (zero-trust execution, security gates SG-1 to SG-3; Proposed). Today's work stays inside
    SG-1 either way.
