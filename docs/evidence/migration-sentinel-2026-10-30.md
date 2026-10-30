@@ -80,7 +80,7 @@ After the reboot `rustc` itself faults on sentinel: the Linux suite's compile di
 were 46–49 °C, an 8 GiB two-pattern user-space memory test found 0 bad pages, and a re-downloaded 1.98.0 toolchain
 has the identical `librustc_driver` hash (`56047570…`, 150,831,312 B), so the toolchain was not corrupt. Attempt logs:
 `linux-tests-749fe93.attempt1-rustc-segv.log`, `.attempt2.log`, `.attempt3-j8.log`; a fourth attempt with the
-re-downloaded toolchain runs as unit `ucompute-linux-tests-749fe93-d`. If it faults too, the host's kernel or memory
+re-downloaded toolchain runs as unit `ucompute-linux-tests-749fe93-d`. **Outcome:** attempt 4 compiled with no fault and ran the suite (607 passed, 4 failed, `docs/VERIFICATION.md` 2026-10-30 Linux suite); its one fault was a test thread of the `pairing` binary (13:2x), which passes 3/3 when run alone afterwards. The kernel log shows six faults in all, every one between 13:12 and about 13:25 local under heavy parallel load, and none in the six hours since. Reading: a burst after the crash reboot, cause unknown, not a continuing condition; P1 may proceed, with the fault count checked before and after it. If it faults too, the host's kernel or memory
 is unreliable since the crash and P1 must not run on it until the owner has checked it (a reboot into
 `linux-image-7.0.0-34-generic` from GRUB, or memtest86 overnight, are the owner's options); the release binary built
 before the crash is unaffected as a file but its results would not be trustworthy on a faulting host.

@@ -1872,6 +1872,12 @@ async fn local_only_never_leaves_device_10k_single_host() {
     let mut rng = Rng(seed);
     let started = Instant::now();
     let Relayed { a, b, relay, _dirs } = relayed_pair(&home).await;
+    // This test is about policy (F-06-07), not scheduling: on a CPU-only host (sentinel) the D-026 default
+    // `refuse_new` would refuse allowed peer requests near the target's own local work, read as 429 `overloaded`.
+    for d in [&a, &b] {
+        let (status, _) = put(d, "/api/network", json!({ "local_priority": "none" })).await;
+        assert_eq!(status, 200);
+    }
     let idb = b.state.identity.id;
     let keep_alive = Duration::from_millis(cfg().network.keep_alive_ms);
     let paths_a = a.state.paths.clone();
