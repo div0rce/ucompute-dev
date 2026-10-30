@@ -248,7 +248,8 @@ def who_others(text):
 def sessions_others(text):
     """The `loginctl show-session` blocks (the "sessions" command) of active or online sessions other than the run's
     own SSH sessions (this command's, and the run's tunnel: sshd, remote, the run's user, from the run's client
-    address) and the user manager, one line each (OD-10: a desktop login on a seat is caught, `who` may not list it)."""
+    address), the user manager and the display manager's login screen (`Class=greeter`: nobody is logged in), one
+    line each (OD-10: a desktop login on a seat is caught, `who` may not list it)."""
     blocks, meta = [], {}
     for chunk in text.strip().split("\n\n"):
         kv = dict(line.partition("=")[::2] for line in chunk.splitlines() if "=" in line)
@@ -259,7 +260,7 @@ def sessions_others(text):
     me, user, client = meta.get("self", ""), meta.get("user", ""), meta.get("ssh_client", "")
 
     def own(s):
-        return (s["Id"] == me or s.get("Class", "").startswith("manager")
+        return (s["Id"] == me or s.get("Class", "").startswith("manager") or s.get("Class") == "greeter"
                 or (s.get("Service") == "sshd" and s.get("Remote") == "yes" and bool(user) and s.get("Name") == user
                     and bool(client) and s.get("RemoteHost") == client))
     return [" ".join(f"{k}={s.get(k, '')}" for k in ("Id", "Name", "Class", "Type", "State", "Seat", "RemoteHost"))

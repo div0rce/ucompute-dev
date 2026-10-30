@@ -172,6 +172,14 @@ class SplitDriverSyntheticTests(unittest.TestCase):
             "Id=2 Name=div0rce Class=user Type=wayland State=active Seat=seat0 RemoteHost=",
             "Id=45 Name=div0rce Class=user Type=tty State=online Seat= RemoteHost=10.0.0.7"])
         self.assertEqual(D.sessions_others("self=44\nuser=div0rce\nssh_client=10.0.0.1\n"), [])
+        # the display manager's login screen (as on sentinel after its 2026-10-30 reboot: gdm's greeter on seat0 and
+        # its early manager) is no login; a user's desktop on the same seat still is
+        greeter = ("Id=c1\nName=gdm-greeter\nClass=greeter\nType=wayland\nState=active\nRemote=no\nRemoteHost=\n"
+                   "Service=gdm-launch-environment\nSeat=seat0\n\n"
+                   "Id=2\nName=gdm-greeter\nClass=manager-early\nType=unspecified\nState=active\nRemote=no\n"
+                   "RemoteHost=\nService=systemd-user\nSeat=\n\n")
+        self.assertEqual(D.sessions_others(greeter + "self=44\nuser=div0rce\nssh_client=10.0.0.1\n"), [])
+        self.assertEqual(len(D.sessions_others(greeter + loginctl)), 2)
         # without the run's client address only the run's own session is its own
         self.assertEqual(len(D.sessions_others(loginctl.replace("ssh_client=10.0.0.1", "ssh_client="))), 3)
         # R's tree against HEAD: changed, missing and extra paths; a symlink in HEAD is not a regular file
