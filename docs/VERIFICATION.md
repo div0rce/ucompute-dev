@@ -656,6 +656,7 @@ Replaces candidate 1, withdrawn under D-030. A private-alpha build may go to tes
 | Gates D, E, F, G | Not claimed (as for candidate 1) |
 | Installed on this Mac | Yes, replacing candidate 1: `docs/evidence/migration-mac-2026-10-29.md` |
 | Where it is | `~/UCompute-release-candidates/0.1.1-7d4d194/` (the DMG and `SHA256SUMS`). Not uploaded anywhere |
+| Published | **2026-10-30, website commits ce71dc1 and 4441b78 on `stage-snapshot`** (deployed 05:49 and 11:04 UTC): the file at `/releases/0.1.1/UCompute_0.1.1_aarch64.dmg` on the stage-snapshot alias behind Access; the website's `verify:release` and `verify-live` pass; D-023 compare identical to `origin/main`; preview.ucompute.org and production unchanged. Engineering's own check from this Mac (`npm run verify:release` in the website checkout, through Access): `/download/` HTTP 200; the file HTTP 200, 6,425,890 bytes, SHA-256 `c1166ba91cf07d0af7d57e3563a4f592b0de077fefc9e0725192aae38c42b937`. Milestone A1 (macOS private-alpha artifact published) is met for candidate 2; who may download it is the owner's Access policy |
 | Approval | **Approved for publication (D-031, 2026-10-30)** to the existing private-alpha channel (the website's stage-snapshot link behind Access); the owner manages the cohort directly. Nothing distributed by engineering; publication is the website workstream's step |
 
 ## 2026-10-30 — D-026 local-work priority on CPU engines: unit and SINGLE-HOST, Mac only

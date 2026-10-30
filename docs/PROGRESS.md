@@ -7,6 +7,7 @@ Newest first. Every entry: date, agent, what changed, counts, evidence, next com
 ## 2026-10-29/30 — Claude Code — D-026 built; candidate 2 ready; Mac migrated; WP-04 fix pass and S1-M (unit, SINGLE-HOST)
 
 **Implemented / verified:**
+- Milestone A1 met for candidate 2: UCompute 0.1.1 (`c1166ba9…b937`) approved by the owner (D-031) and published by the website on the stage-snapshot link behind Access (ce71dc1, 4441b78); engineering re-verified the published file's size and hash through Access from this Mac. Second 24 h Linux soak collected: FAIL as registered (2 untyped no-response in 5.3 M requests, engine alive; `docs/evidence/linux-soak-2026-10-29.md`); milestone C open; a SINGLE-HOST investigation runs on the Mac. D-032: fourth workstream (Growth) and the cross-workstream handoff.
 - D-026 local-work priority on CPU engines: `local_priority` setting (default `refuse_new`, opt-in `preempt`, `none`), API, app Settings › Sharing selection; unit and SINGLE-HOST tests on this Mac with real engines (`docs/VERIFICATION.md` 2026-10-30 D-026). F-06-04 stays IMPLEMENTED_UNVERIFIED: the flood bound with D-026 is to be measured on sentinel.
 - WP-04 fix pass (4ddec61) and S1-M with the `--cache-ram 0` change (f7fe48e); candidate 2 (0.1.1, SHA-256 `c1166ba9…b937`) built and verified ALL PASS 19/19, promotion record awaiting the owner's approval; this Mac migrated to it (`docs/evidence/migration-mac-2026-10-29.md`); D-030 (no trace of the former name); CI on both PRs green.
 
