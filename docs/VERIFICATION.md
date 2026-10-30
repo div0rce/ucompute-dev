@@ -637,9 +637,9 @@ Spec section 29.5 row "Downloads and releases" and section 31: a private-alpha d
 - Change: every engine starts with `--cache-ram 0` (the adapter always sends `cache_prompt: false`, so the idle-slot save only held host RAM and, on a split, read R's KV back over the network; reserved from extra arguments). Rerun with it: the save towards H fell from 663,808-700,672 B per prompt switch to 64 B; decode per token unchanged. The first request on a new prompt still uploads its graphs (191,332 B and 8 switches to R), which the lab's decode-only subtraction would count against decode (to the stage −23 %, 0.94 turns): the P1 driver now sends a same-prompt max_tokens 1 warm-up before `loaded`, and `split_prereg.json` `checkpoints` is amended accordingly (before any P1 run).
 - Checks after the change: fmt; clippy `-D warnings` on runtime, network, api; runtime `process` 13 and `rpc_server` 4; `llamacpp_real` 9/9 and `real_engine` 11/11 on the real engine with the new flag; `split_single_host` 9/9 in three of four runs (one run had 1 failure under load right after clippy, output not kept, so the test is not identified; not reproduced in three reruns); two_machine offline suite 73 OK.
 
-## WP-08 promotion record: UCompute 0.1.1 private-alpha candidate 2, macOS on Apple Silicon (2026-10-29) — AWAITING THE OWNER'S APPROVAL
+## WP-08 promotion record: UCompute 0.1.1 private-alpha candidate 2, macOS on Apple Silicon (2026-10-29) — APPROVED FOR PUBLICATION (D-031, 2026-10-30)
 
-Replaces candidate 1, withdrawn under D-030. A private-alpha build may go to testers only after this record exists **and the owner approves its SHA-256** (spec sections 29.5 and 31). Nothing has been distributed.
+Replaces candidate 1, withdrawn under D-030. A private-alpha build may go to testers only after this record exists **and the owner approves its SHA-256** (spec sections 29.5 and 31): approved 2026-10-30 (D-031). Engineering has distributed nothing; the website publishes it.
 
 | Field | Value |
 |---|---|
@@ -656,7 +656,7 @@ Replaces candidate 1, withdrawn under D-030. A private-alpha build may go to tes
 | Gates D, E, F, G | Not claimed (as for candidate 1) |
 | Installed on this Mac | Yes, replacing candidate 1: `docs/evidence/migration-mac-2026-10-29.md` |
 | Where it is | `~/UCompute-release-candidates/0.1.1-7d4d194/` (the DMG and `SHA256SUMS`). Not uploaded anywhere |
-| Approval | **Awaiting the owner**: approve this SHA-256 and name the cohort |
+| Approval | **Approved for publication (D-031, 2026-10-30)** to the existing private-alpha channel (the website's stage-snapshot link behind Access); the owner manages the cohort directly. Nothing distributed by engineering; publication is the website workstream's step |
 
 ## 2026-10-30 — D-026 local-work priority on CPU engines: unit and SINGLE-HOST, Mac only
 
