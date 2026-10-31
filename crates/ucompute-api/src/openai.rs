@@ -611,7 +611,8 @@ async fn start_local(
     job.started();
     let model = st.manager.ensure_loaded(model_id, st.load_options()).await?;
     job.loaded(&model.info().device_actual);
-    let req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    let mut req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    req.timeouts = st.config.timeouts;
     // D-026: local work on a CPU engine holds peers off (and, under `preempt`, cancels them) until
     // this stream is dropped, then for `local_priority::WINDOW`.
     let local = ucompute_network::local_priority::on_cpu(model.info()).then(|| st.local_work.local_started());
@@ -673,7 +674,8 @@ async fn start_split(
     let info = model.info();
     job.loaded(&info.device_actual);
     fmt.placement = Some(json!({"devices": info.device_actual, "stages": info.split, "session": session.session_id()}));
-    let req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    let mut req = sampling.to_generate(local_input(st, model_id, input)?, tools)?;
+    req.timeouts = st.config.timeouts;
     // The session's end stops the split engine (`split::ensure`'s watcher), which ends this stream.
     let cancel = st.shutdown.child_token();
     let gen = match model.generate(req, cancel.clone()).await {

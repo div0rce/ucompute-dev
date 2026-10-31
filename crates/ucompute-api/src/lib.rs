@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use ucompute_core::{ErrorCode, Paths, Result, UComputeError};
+use ucompute_core::{ErrorCode, Paths, Result, Timeouts, UComputeError};
 use ucompute_identity::{DeviceIdentity, PeerStore};
 use ucompute_models::GgufMetadata;
 use ucompute_network::NetworkConfig;
@@ -79,6 +79,10 @@ pub struct ApiConfig {
     /// setting when `UCOMPUTE_HOME/config.json` does not exist yet.
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Generation timeouts of local and split runs; `Timeouts::default()` unless a test shortens
+    /// them to prove a bound.
+    #[serde(default)]
+    pub timeouts: Timeouts,
 }
 
 fn default_cors_origins() -> Vec<String> {
@@ -105,6 +109,7 @@ impl Default for ApiConfig {
             default_device: ucompute_runtime::DevicePreference::Auto,
             cors_origins: default_cors_origins(),
             network: NetworkConfig::default(),
+            timeouts: Timeouts::default(),
         }
     }
 }

@@ -1,0 +1,9 @@
+start 2026-10-31T16:28:01Z tag=fix min=6 port=18711 sha=d7932dc60b3819e8
+{"model_id":"stories15M-q4_0","model_sha256":"66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739","backend_name":"llama.cpp","backend_version":"0.6.0-dev (build 11609, commit fcac19079)","device_requested":"cpu","device_actual":"cpu","offloaded_layers":0,"total_layers":6,"n_ctx":128,"t
+177815 /home/div0rce/verify/home-fix/backends/llama.cpp/b11609/llama-server -m /home/div0rce/verify/home-fix/models/blobs/sha256-66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739 --host 127.0.0.1 --port 38957 --api-key-file /home/div0rce/verify/home-fix/logs/engine-80cff606-4109-4c34-85c2-71cb8c9565a1.key -c 128 -t 8 -np 4 -ctk f16 -ctv f16 --metrics --no-webui --offline --log-times
+SINGLE-HOST verifier bursts=718 requests=28720 admitted=25848 codes={'overloaded': 2872, 'ok': 25848}
+backend_failed=0 rate_of_admitted=0.000% slowest_admitted_ms=556
+ok texts: {' named Benny was hopping in a field. He ': 25848}
+load: 8.31 7.61 4.67 1/614 206616
+end 2026-10-31T16:34:10Z
+CHAIN_DONE
