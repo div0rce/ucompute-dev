@@ -78,12 +78,18 @@ def verdict(samples, untyped, not_golden, slow_recoveries, rss_mib, fd_growth):
     return fails
 
 
-def call(api, method, path, body=None, timeout=120):
+# How long a client request waits for its answer. Above the daemon's first-token timeout (120 s) plus its admission
+# queue (30 s), so a daemon that gives up answers with a typed `timeout` before the client gives up: an untyped
+# no-response is then the daemon's, not a race between two equal clocks (2026-10-29 soak, its two no-responses).
+REQUEST_TIMEOUT = 180
+
+
+def call(api, method, path, body=None, timeout=None):
     req = urllib.request.Request(api + path, data=None if body is None else json.dumps(body).encode(), method=method,
                                  headers={"Content-Type": "application/json"})
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as r:
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read()
@@ -96,14 +102,14 @@ def call(api, method, path, body=None, timeout=120):
     return status, val, (time.monotonic() - t0) * 1000
 
 
-def sse(api, path, body, stop_after=None, timeout=120):
+def sse(api, path, body, stop_after=None, timeout=None):
     """(200, data events) or (status, error body); an error event inside the stream reads as a 500 with its body.
     With stop_after, closes the socket after that many events (a client cancel)."""
     req = urllib.request.Request(api + path, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     evs = []
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as r:
             for line in r:
                 line = line.decode().strip()
                 if not line.startswith("data:") or line == "data: [DONE]":
@@ -268,6 +274,7 @@ class Soak:
 
 
 def main():
+    global REQUEST_TIMEOUT
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--api", default="http://127.0.0.1:18500")
     ap.add_argument("--pid", type=int, required=True, help="the daemon's pid")
@@ -282,7 +289,10 @@ def main():
     ap.add_argument("--only", help="comma-separated steps to run (golden,golden_stream,cancel,chat,pull,overload); all by default")
     ap.add_argument("--rss-mib", type=float, default=64)
     ap.add_argument("--fd-growth", type=int, default=16)
+    ap.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT,
+                    help="seconds a request waits for its answer (the daemon's first-token timeout is 120 s)")
     a = ap.parse_args()
+    REQUEST_TIMEOUT = a.request_timeout
     if not a.api.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:")):
         sys.exit("loopback API only")
     a.home = os.path.abspath(os.path.expanduser(a.home))
