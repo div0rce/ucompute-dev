@@ -1,4 +1,4 @@
-# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (restarted 20:2x UTC 2026-10-31 with a 960 s client timeout)
+# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (restarted 20:13:41 UTC 2026-10-31, daemon pid 274756 at d3b178b, 960 s client timeout)
 
 Registered before the start; nothing below changes once samples exist.
 
