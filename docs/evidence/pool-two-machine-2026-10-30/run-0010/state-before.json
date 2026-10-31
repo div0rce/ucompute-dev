@@ -1,0 +1,26 @@
+{
+  "http://127.0.0.1:18304": {
+    "peer_id": "98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf",
+    "network": {
+      "enabled": true,
+      "serve_peers": true
+    },
+    "names": {},
+    "held": [],
+    "groups": [],
+    "privacy": "local_only",
+    "loaded": null
+  },
+  "http://127.0.0.1:18320": {
+    "peer_id": "d5ef0ca88a68ca5477b2d46b0de8615109dcc904cc0d58a0226a33b13e9dc963",
+    "network": {
+      "enabled": true,
+      "serve_peers": false
+    },
+    "names": {},
+    "held": [],
+    "groups": [],
+    "privacy": "local_only",
+    "loaded": null
+  }
+}
