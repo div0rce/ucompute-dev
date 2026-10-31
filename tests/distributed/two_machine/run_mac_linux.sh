@@ -49,6 +49,10 @@ tunnel() {
 $H run "$A_START" >/dev/null || { echo "A's daemon did not start (build it: cargo build --release -p ucompute-cli)"; exit 1; }
 tunnel || exit 1
 
+# Both paths use it: H's dev daemon (SPLIT=1) and the discovery and mesh drivers.
+MDNS_FLAG=""
+[ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
+
 if [ "${SPLIT:-}" = 1 ]; then
   HS="http://127.0.0.1:${H_PORT:-18320}" HOME_H="$PWD/.ucompute-split" APP_WAS_UP=0 HPID=""
   test -x target/release/ucompute || { echo "H is not built: cargo build --release -p ucompute-cli"; exit 1; }
@@ -95,8 +99,6 @@ CRASH="pkill -KILL -x ucompute-desktop"
 START="open -a /Applications/UCompute.app"
 # B's own daemon (the app's exact arguments) and its engine only: the CROSS_HOLD daemons run the same binary.
 PROCS="pgrep -f 'MacOS/ucompute serve --host 127.0.0.1 --port 8192|Application Support/UCompute/backends/.*llama-server' | wc -l | tr -d ' '"
-MDNS_FLAG=""
-[ "${NO_MDNS:-}" = 1 ] && MDNS_FLAG="--no-mdns"
 
 # shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {
