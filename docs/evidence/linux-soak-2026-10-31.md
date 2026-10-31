@@ -1,4 +1,4 @@
-# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING
+# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (started 20:02 UTC 2026-10-31)
 
 Registered before the start; nothing below changes once samples exist.
 
@@ -25,3 +25,8 @@ load; the watcher's `p1-ready` flag), the soak is stopped and collected at once,
 
 **Reading rule.** As registered for the second soak: an untyped error outside every documented interference window is
 a FAIL; any foreign work on sentinel during the run is listed with its window before the verdict.
+
+**Start (20:02 UTC 2026-10-31).** `run_soak_linux.sh start 24`: daemon pid 231422 at d3b178b (`/health` commit
+`d3b178b2…`, version 0.1.1), the driver with `REQUEST_TIMEOUT = 180`. Just before it, `split_single_host` passed on
+sentinel at d3b178b (9 passed, 1 ignored, no SKIP), which also covers P1's split path through the changed engine
+client (the Core Lab's pre-P1 condition). A watcher on this Mac collects the soak as soon as P1's `p1-ready` flag appears.
