@@ -78,10 +78,11 @@ def verdict(samples, untyped, not_golden, slow_recoveries, rss_mib, fd_growth):
     return fails
 
 
-# How long a client request waits for its answer. Above the daemon's first-token timeout (120 s) plus its admission
-# queue (30 s), so a daemon that gives up answers with a typed `timeout` before the client gives up: an untyped
-# no-response is then the daemon's, not a race between two equal clocks (2026-10-29 soak, its two no-responses).
-REQUEST_TIMEOUT = 180
+# How long a client request waits for its answer: above every bound the daemon applies to one request, admission
+# queue 30 s + a load in progress 300 s + generation total 600 s (`ucompute-core` `Timeouts::default`), plus 30 s.
+# A daemon that gives up therefore answers with a typed error before the client gives up, and an untyped no-response
+# means the daemon exceeded all of its bounds (the 2026-10-29 soak's 120 s equalled the daemon's first-token timeout).
+REQUEST_TIMEOUT = 960
 
 
 def call(api, method, path, body=None, timeout=None):
@@ -290,7 +291,7 @@ def main():
     ap.add_argument("--rss-mib", type=float, default=64)
     ap.add_argument("--fd-growth", type=int, default=16)
     ap.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT,
-                    help="seconds a request waits for its answer (the daemon's first-token timeout is 120 s)")
+                    help="seconds a request waits for its answer (above the daemon's queue + load + total bounds)")
     a = ap.parse_args()
     REQUEST_TIMEOUT = a.request_timeout
     if not a.api.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:")):

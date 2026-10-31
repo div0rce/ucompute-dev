@@ -1,4 +1,4 @@
-# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (started 20:02 UTC 2026-10-31)
+# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (restarted 20:2x UTC 2026-10-31 with a 960 s client timeout)
 
 Registered before the start; nothing below changes once samples exist.
 
@@ -30,3 +30,13 @@ a FAIL; any foreign work on sentinel during the run is listed with its window be
 `d3b178b2…`, version 0.1.1), the driver with `REQUEST_TIMEOUT = 180`. Just before it, `split_single_host` passed on
 sentinel at d3b178b (9 passed, 1 ignored, no SKIP), which also covers P1's split path through the changed engine
 client (the Core Lab's pre-P1 condition). A watcher on this Mac collects the soak as soon as P1's `p1-ready` flag appears.
+
+**Amendment before the restart (20:13 UTC, from the Core Lab's read-only reading; no verdict existed).** 180 s does
+not clear every daemon bound on the non-streaming steps: queue 30 s + first token 120 s + one inter-token gap 30 s is
+exactly 180 s, and a request that arrives during a reload after an engine kill waits for the load, bounded only by
+the 300 s load timeout. A no-response at 180 s would again be ambiguous. The client timeout is therefore **960 s**
+(queue 30 + load 300 + total 600 + 30 s margin; `REQUEST_TIMEOUT`, the driver's new default), and an untyped
+no-response in this soak means the daemon exceeded every bound it applies to a request. Bounds, seed and everything
+else above unchanged. The 20:02 start was stopped and collected after 10 minutes (602 s, 974 cycles, every step ok,
+0 `backend_failed` against the second soak's 4–98 a minute, 0 untyped, 2 kills recovered in 0.69 s; raw files in
+`linux-soak-2026-10-31/aborted-start-180s/`); it is not part of the verdict.
