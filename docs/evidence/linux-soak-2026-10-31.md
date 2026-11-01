@@ -1,4 +1,4 @@
-# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: RUNNING (restarted 20:13:41 UTC 2026-10-31, daemon pid 274756 at d3b178b, 960 s client timeout)
+# Third 24 h local soak on Linux (sentinel), 2026-10-31/11-01 — SINGLE-HOST: PASS with documented interference (d3b178b, 960 s client timeout, 20:13:41 UTC 2026-10-31 to 20:19 UTC 2026-11-01)
 
 Registered before the start; nothing below changes once samples exist.
 
@@ -48,3 +48,30 @@ running; the owner's own use of the machine), constant from then on. The soak dr
 `backend_failed`, 1,972 kills all recovered (slowest 0.99 s), RSS 34.5 → 43.7 MiB after the first hour, open files 11,
 no orphan. Under the reading rule an untyped error inside or within 5 minutes of this window would make the run
 inconclusive for milestone C, not a FAIL.
+
+## Result (collected 20:20 UTC 2026-11-01, `run_soak_linux.sh collect`)
+
+Driver verdict (`soak.out`): **PASS**, no failed bound; 130,362 cycles in 24.0 h, seed 20261023. Raw rows
+`linux-soak-2026-10-31/soak.jsonl.gz` (1,432 one-minute samples, 20:14:41Z to 20:13:42Z), the daemon's log
+`daemon.log.gz` (2,607 warnings, one "engine exited unexpectedly" per kill; no error line), `version.txt` (0.1.1),
+`cleanup.txt` (no soak engine left).
+
+| Bound | Result |
+|---|---|
+| Zero untyped errors | **0** (client timeout 960 s, above every daemon bound, so a hang would have read untyped) |
+| Every golden completion golden | 130,362 / 130,362 |
+| Every engine kill golden again within 30 s | 2,607 kills, slowest 0.99 s, none above 2 s |
+| No orphaned engine | 0 in every sample; at most 1 engine |
+| RSS growth after the first hour ≤ 64 MiB | 9.7 MiB (34.5 MiB at 1 h, 44.2 MiB at the end, which is the maximum) |
+| Open-files growth ≤ 16 | 0 (11 throughout) |
+
+Typed results: 4,693,032 `ok` and 521,448 `overloaded` (4.00 per burst of 40, the admission bound) in the overload
+step, **0 `backend_failed` in 4,693,032 admitted burst requests** (the second soak: 24,562 in 4,771,369, before the
+engine-client fix of 578999f); every `golden`, `stream`, `cancel`, `chat` and `pull` step ok (130,362 each). Golden
+p95 per minute: median 14.9 ms, max 20.4 ms.
+
+**Reading** (the rule registered for the second soak): zero untyped errors overall, with one documented interference
+window (the owner's desktop login from 05:21:32 UTC, 887 of the 1,432 samples; golden p95 median 14.1 ms before it,
+16.6 ms during it; 1-minute load median 7.59 before, 8.18 during), reads **PASS with documented interference**. The
+interference added load and never removed any; every bound is scoped to the soak's own daemon and home. This is the
+24 h soak half of milestone C; the renamed Linux tarball's install check is the other half.
