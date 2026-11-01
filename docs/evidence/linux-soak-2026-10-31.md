@@ -62,7 +62,7 @@ Driver verdict (`soak.out`): **PASS**, no failed bound; 130,362 cycles in 24.0 h
 | Every golden completion golden | 130,362 / 130,362 |
 | Every engine kill golden again within 30 s | 2,607 kills, slowest 0.99 s, none above 2 s |
 | No orphaned engine | 0 in every sample; at most 1 engine |
-| RSS growth after the first hour ≤ 64 MiB | 9.7 MiB (34.5 MiB at 1 h, 44.2 MiB at the end, which is the maximum) |
+| RSS growth after the first hour ≤ 64 MiB | 10.9 MiB, as the driver measures it (`verdict`: the first sample at or after 3,600 s, 33.3 MiB at 3,615 s, to the last, 44.2 MiB, which is also the maximum) |
 | Open-files growth ≤ 16 | 0 (11 throughout) |
 
 Typed results: 4,693,032 `ok` and 521,448 `overloaded` (4.00 per burst of 40, the admission bound) in the overload
