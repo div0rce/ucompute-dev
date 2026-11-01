@@ -40,3 +40,11 @@ no-response in this soak means the daemon exceeded every bound it applies to a r
 else above unchanged. The 20:02 start was stopped and collected after 10 minutes (602 s, 974 cycles, every step ok,
 0 `backend_failed` against the second soak's 4–98 a minute, 0 untyped, 2 kills recovered in 0.69 s; raw files in
 `linux-soak-2026-10-31/aborted-start-180s/`); it is not part of the verdict.
+
+**Interference, recorded before any verdict (13:45 UTC 2026-11-01, at 17.5 h).** From **05:21:32 UTC 2026-11-01** a local
+desktop login on sentinel's seat0 (logind session 329, user `div0rce`, Wayland, Firefox and the release-upgrade check
+running; the owner's own use of the machine), constant from then on. The soak drives sentinel's 1-minute load to about
+7–8 by itself (median 7.71, max 14.98 so far). At 17.5 h, before any reading: 98,622 cycles, 0 untyped, 0
+`backend_failed`, 1,972 kills all recovered (slowest 0.99 s), RSS 34.5 → 43.7 MiB after the first hour, open files 11,
+no orphan. Under the reading rule an untyped error inside or within 5 minutes of this window would make the run
+inconclusive for milestone C, not a FAIL.
