@@ -79,12 +79,12 @@ task by product impact, security risk, critical-path dependency and verified use
 
 ## Next milestone: external developer alpha
 
-Spec section 31. **Goal:** a developer who is not on this project installs a released build, integrates it through a
-versioned SDK and gets a real streamed result, with cancellation, a typed refusal and default-local execution, unaided.
+Spec section 31. **Goal:** a developer who is not on this project can install a released build, integrate it through a
+versioned SDK and get a real streamed result, with cancellation, a typed refusal and default-local execution, unaided.
 
 **Exit criteria:** live Python and TypeScript suites on each advertised platform; typed errors and cancellation; a
-tested security contact; no critical or high issue affecting the offered scope; the U-04 study; the owner approves
-external distribution.
+tested security contact (D-036); no critical or high issue affecting the offered scope; the owner approves external
+distribution. No user count or study gates this (D-037).
 
 | # | Task | Rows | Depends on | Who |
 |---|---|---|---|---|
@@ -95,7 +95,6 @@ external distribution.
 | 5 | Machine-readable compatibility matrix and its validator | U-03 | evidence from 1 and 2 | Engineering |
 | 6 | Candidate 3 with the runtime fixes: Gates A and B, promotion record | WP-08 | 2 | Engineering, then the owner |
 | 7 | Security contact tested end to end: address exists, process written (D-036); delivery, reply and a backup responder open | spec §31 | — | Owner, then Engineering |
-| 8 | U-04 study: three independent developers | U-04 | 1, 2, 6, 7 | Owner recruits; Website & DevEx supports |
 
-Advertised platforms for this cohort are macOS on Apple Silicon and Linux x86_64 (CPU). Windows joins when the laptop
-returns. Pooling is not offered in this cohort.
+Advertised platforms are macOS on Apple Silicon and Linux x86_64 (CPU). Windows joins when the laptop returns. Pooling
+is not offered yet.
