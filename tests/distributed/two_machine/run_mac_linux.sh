@@ -17,7 +17,15 @@
 #
 #   LINUX_HOST=192.168.1.167 LINUX_USER=div0rce SPLIT=1 OUT=docs/evidence/pool-two-machine-<date>/run-<HHMM> \
 #     [LINK=wifi|wired] [MODELS=R1a,R1b] [LAB=<ucompute-core-lab checkout>] [H_PORT=18320] [H_LISTEN=18420] \
-#     [R_IP=<the Linux host's IPv4 LAN address, default LINUX_HOST>] tests/distributed/two_machine/run_mac_linux.sh
+#     [R_IP=<the Linux host's IPv4 LAN address, default LINUX_HOST>] [STEPS_SPLIT=<steps>] \
+#     tests/distributed/two_machine/run_mac_linux.sh
+#
+# STEPS_SPLIT unset is the core run (P1.0 to P1.3, P1.6, P1.9 to P1.11) and passes the driver nothing new. Set, it is
+# the driver's --steps, a comma list of core, memory (P1.5), capture (P1.7), config_c (P1.4) and failures (P1.8), which
+# run in that order whatever the list's: STEPS_SPLIT=memory,capture,config_c,failures runs what the first run left
+# open. A list without core gets no lab score. failures kills and restarts both daemons, through the commands here
+# (A_START, H_START, H_KILL); $OUT/h/daemon.pid names H's live daemon, and a daemon a stopped run left down is started
+# again before the restore.
 #
 # The head H is a dev daemon from this checkout (target/release/ucompute, built from HEAD with a clean tree; sync the
 # same HEAD to the Linux host with scripts/mac-host.sh sync and build it there first: the driver's preflight compares
@@ -57,13 +65,26 @@ if [ "${SPLIT:-}" = 1 ]; then
   HS="http://127.0.0.1:${H_PORT:-18320}" HOME_H="$PWD/.ucompute-split" APP_WAS_UP=0 HPID=""
   test -x target/release/ucompute || { echo "H is not built: cargo build --release -p ucompute-cli"; exit 1; }
   mkdir -p "$OUT/h" "$HOME_H"
+  rm -f "$OUT/h/daemon.pid"
   (cd .ucompute && pax -rwlk models backends "$HOME_H")  # hardlinks (B-010: the disk is tight)
+  # H's first start and the driver's restart (failures, case 9) are this one command line.
+  H_START="UCOMPUTE_HOME='$HOME_H' target/release/ucompute serve --port ${H_PORT:-18320} --network \
+--listen-port ${H_LISTEN:-18420} $MDNS_FLAG -v >>'$OUT/h/daemon.log' 2>&1 </dev/null & echo \$! >'$OUT/h/daemon.pid'"
+  H_KILL="kill -9 \$(cat '$OUT/h/daemon.pid')"
   # shellcheck disable=SC2317,SC2329  # run by the EXIT trap
   split_cleanup() {
     rc=$?
     set +e
-    [ -f "$OUT/state-before.json" ] && { python3 -I tests/distributed/two_machine/state.py restore "$OUT/state-before.json" || rc=1; }
-    [ -n "$HPID" ] && kill "$HPID" 2>/dev/null && wait "$HPID" 2>/dev/null
+    if [ -f "$OUT/state-before.json" ]; then
+      curl -s -m 5 "$A/health" >/dev/null || { $H run "$A_START" >/dev/null; for _ in $(seq 30); do curl -s -m 1 "$A/health" >/dev/null && break; sleep 0.5; done; }
+      curl -s -m 5 "$HS/health" >/dev/null || { eval "$H_START"; for _ in $(seq 60); do curl -s -m 1 "$HS/health" >/dev/null && break; sleep 0.5; done; }
+      python3 -I tests/distributed/two_machine/state.py restore "$OUT/state-before.json" || rc=1
+    fi
+    [ -f "$OUT/h/daemon.pid" ] && HPID=$(cat "$OUT/h/daemon.pid")
+    if [ -n "$HPID" ]; then
+      kill "$HPID" 2>/dev/null && wait "$HPID" 2>/dev/null
+      for _ in $(seq 100); do kill -0 "$HPID" 2>/dev/null || break; sleep 0.1; done  # a restarted H is no child of this shell
+    fi
     $H run 'pkill -TERM -f "^target/release/ucompute serve"' >/dev/null 2>&1
     pkill -f "1830[4]:127.0.0.1:8192" 2>/dev/null
     [ "$APP_WAS_UP" = 1 ] && open -a /Applications/UCompute.app
@@ -75,10 +96,8 @@ if [ "${SPLIT:-}" = 1 ]; then
     pkill -TERM -x ucompute-desktop
     for _ in $(seq 30); do curl -s -m 1 "$B/health" >/dev/null || break; sleep 1; done
   fi
-  # shellcheck disable=SC2086
-  UCOMPUTE_HOME="$HOME_H" target/release/ucompute serve --port "${H_PORT:-18320}" --network \
-    --listen-port "${H_LISTEN:-18420}" $MDNS_FLAG -v >>"$OUT/h/daemon.log" 2>&1 </dev/null &
-  HPID=$!
+  eval "$H_START"
+  HPID=$(cat "$OUT/h/daemon.pid")
   for _ in $(seq 60); do curl -s -m 1 "$HS/health" >/dev/null && break; sleep 0.5; done
   curl -s -m 2 "$HS/health" >/dev/null || { echo "H's dev daemon did not answer: $OUT/h/daemon.log"; exit 1; }
   python3 -I tests/distributed/two_machine/state.py save "$OUT/state-before.json" "$A" "$HS"
@@ -86,8 +105,9 @@ if [ "${SPLIT:-}" = 1 ]; then
   # shellcheck disable=SC2086
   caffeinate -dimsu python3 -I tests/distributed/two_machine/split_two_machine.py --a "$HS" --b "$A" --out "$OUT" \
     --r-sh "$H run" --r-ip "${R_IP:-$LINUX_HOST}" --h-home "$HOME_H" --h-log "$OUT/h/daemon.log" --link "${LINK:-wifi}" ${MODELS:+--models "$MODELS"} \
+    ${STEPS_SPLIT:+--steps "$STEPS_SPLIT" --r-start "$A_START" --h-start "$H_START" --h-kill "$H_KILL"} \
     | tee "$OUT/split-console.txt" || rc=$?
-  if [ -n "${LAB:-}" ] && [ -s "$OUT/lab-input.json" ]; then
+  if [ -n "${LAB:-}" ] && [ -s "$OUT/lab-input.json" ] && [[ ",${STEPS_SPLIT:-core}," == *,core,* ]]; then
     python3 -I -B "$LAB/p1-predictions/score_p1.py" "$OUT/lab-input.json" >"$OUT/lab-score.json" || rc=1
   fi
   exit "$rc"

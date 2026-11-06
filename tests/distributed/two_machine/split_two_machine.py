@@ -6,7 +6,8 @@ split points. A daemon API run: no app window is driven.
 
     python3 -I split_two_machine.py --a <H's API> --b <R's API, through the SSH tunnel> --out <run dir> \
         --r-sh "scripts/mac-host.sh run" [--r-ip <R's IPv4 LAN address>] [--r-tree DIR] [--h-home DIR] \
-        [--h-log FILE] [--r-home DIR] [--r-log FILE] [--link wifi|wired] [--models R1a,R1b] [--prereg FILE]
+        [--h-log FILE] [--r-home DIR] [--r-log FILE] [--link wifi|wired] [--models R1a,R1b] [--prereg FILE] \
+        [--steps core,memory,capture,config_c,failures] [--r-start CMD --h-start CMD --h-kill CMD]
 
 --r-sh is required (no default host). Every R-side command goes through it; an R command that exits non-zero (ssh
 itself exits 255 when it cannot reach R) FAILs the step that needed it, never reads as a clean result.
@@ -15,8 +16,30 @@ Steps: preflight (P1.0 and every item of the lab's PREFLIGHT.md; a failed prefli
 default-deny cases (P1.1: unpaired, remote-only groups, pooling allowed on H only, no acknowledgement), pairing, and
 per model: two loads (P1.3), the session checks (P1.2), the three prompts with their counter checkpoints (P1.6), a
 local request with the split loaded (P1.9) and the local references; then the audit join and the canary scan of
-every log on both hosts (P1.10) and teardown (P1.11). Not automated here, each with its own evidence: memory (P1.5),
-the capture (P1.7), the failure cases (P1.8) and configuration C (P1.4).
+every log on both hosts (P1.10) and teardown (P1.11). That is `--steps core`, the default.
+
+--steps also takes the steps below, in any order; they run after the core, in this order, the destructive one last,
+and report in their own steps, never in the lab's lab-input.json. Without `core` the run is preflight, pairing and
+groups, then these. They end with a canary scan and a teardown of their own (canary_scan_extra, teardown_extra).
+Each uses the first model of --models unless it says otherwise.
+  memory (P1.5, F-03-01, F-03-02, per model): `footprint -p` of llama-server, split head then a local full-model run
+    with the same flags, on H; VmHWM of rpc-server and of a local full-model run on R. Passes when each host's peak
+    is below its full-model peak by at least the bytes of the layers it does not host, -15 % (MEMORY_TOL), those
+    bytes read here from the GGUF's tensor table (gguf_sizes, as `gguf::layer_bytes`). N/A on R when R lacks the
+    model (OD-4).
+  capture (P1.7): this script's own UDP relay on this Mac, on the real path. H is dialled through it with the
+    existing API (POST /api/peers/<R>/disconnect, then connect with {"addr": "127.0.0.1:<relay>"}; /api/peers must
+    then show that outbound connection, and R the relay's port), the weights and the three prompts cross it, every
+    datagram goes to capture/datagrams.bin and is scanned for the canaries and a 64-byte weight pattern of R's range.
+    Passes on zero hits, with the relay having carried at least the tunnel's bytes, and a positive control: the same
+    relay, recording and scanner find every needle in a plaintext stream.
+  config_c (P1.4): R1b with split_mode same_backend (H's CPU holds [0, k), R's CPU the rest and the output layer),
+    3 x 64 tokens, against a local CPU run on H (POST /api/models/<id>/load {"device": "cpu"}) and on R. Tokens are
+    reported as measured (OD-3), never a pass rule. The API returns no log-probabilities (C7, OD-2): N/A.
+  failures (P1.8): the nine cases, each on a fresh session with a generation in flight. Passes on a typed error
+    within 10 s, 5 s for cases 3-7, no request left, no ggml-rpc-server or listener on R and session_close with an
+    outcome on each side whose daemon lives. Cases 8 and 9 kill a daemon, which writes no line, and case 9's client
+    sees its socket end, not a typed error. They restart it with --r-start and --h-start, the runner's start commands.
 
 What it exports follows the Core Lab's P1 contract (ucompute-core-lab d569c5b, p1-predictions/SCORING-INPUT.md
 and PREFLIGHT.md): requests go to H's /v1/completions with stream, temperature 0, seed 42, stream_options
@@ -26,18 +49,26 @@ prompt, each 0.2 s after the stream's [DONE]; TTFT and TPOT are client-side time
 <out>/lab-input.json is the lab's input: python3 -I p1-predictions/score_p1.py <out>/lab-input.json.
 
 Writes prereg.json (before P1.1), manifest.json, steps.json, raw.jsonl (every HTTP call and shell command), h/,
-r/, tokens/, bytes/ and lab-input.json under --out. Exit 3 when a step FAILed. Stdlib only.
+r/, tokens/, bytes/, capture/, failure/ and lab-input.json under --out. Exit 3 when a step FAILed. Stdlib only.
 """
 import argparse
+import bisect
+import hashlib
+import http.client
 import ipaddress
 import json
 import os
 import re
+import selectors
 import shlex
+import socket
+import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +80,12 @@ AUDIT_MAX = 1000  # /api/audit's largest n (mesh.rs audit_get)
 SSH_PORT = 22  # R's sshd: the LAN probe's positive control, a port the run already reaches R on
 RUN_START = None  # utc() before the run's first request; a full audit page must reach back past it
 SESSIONS = set()  # the split sessions the driver saw open (H's /api/status at each checkpoint)
+STEPS = ("core", "memory", "capture", "config_c", "failures")  # the order they run in, whatever --steps says
+MEMORY_TOL = 0.15  # F-03-02's +/-15 %
+FLIGHT_TOKENS = 900  # below a slot's n_ctx of 1024 (run-0820); at R1a's TPOT it outlasts every bound of P1.8
+LOAD_WAIT = 300  # s until a split's first token (R1a loaded in 36 to 42 s in run-0820)
+CAPTURE_KEEP = 32 << 20  # raw datagrams stay in the run folder up to this size (plan, evidence layout)
+UNTYPED = (None, "transport", "unparsed")
 # Shell commands by name. The R ones run through --r-sh (ssh); patterns carry [x] so pgrep never matches the shell
 # that runs them.
 R_CMDS = {
@@ -66,6 +103,15 @@ R_CMDS = {
     "banner": "f=$(ls -t {home}/logs/rpc-server-*.log 2>/dev/null | head -1); "
               "[ -n \"$f\" ] && grep -h transport \"$f\" || true",
     "scan": "grep -rlF {pats} {home}/logs {home}/runs {log} 2>/dev/null || true",
+    "proc_status": "cat /proc/{pid}/status",
+    "argv": "ps -o command= -p {pid} || true",
+    "kill_rpc": "pkill -9 -f 'ggml-rpc-serve[r]'",
+    # SIGKILL of R's daemon, then the ms until no rpc-server is left, timed on R so ssh's latency is not in it
+    "kill_daemon": "pkill -9 -f '^target/release/ucompute serve' || exit 1; t0=$(date +%s%N); "
+                   "while pgrep -f 'ggml-rpc-serve[r]' >/dev/null; do "
+                   "[ $(( ($(date +%s%N) - t0) / 1000000 )) -ge 3000 ] && break; sleep 0.02; done; "
+                   "echo ms=$(( ($(date +%s%N) - t0) / 1000000 ))",
+    "start": "{cmd}",
     # R's tree: the commit `scripts/mac-host.sh sync` recorded (or HEAD of a git checkout), then `path<TAB>blob hash`
     # of every file but build outputs and data homes, compared with H's HEAD
     "tree": "cd {tree} && {{ if [ -e .git ]; then git rev-parse HEAD; else cat .ucompute-sync-head; fi; }} && "
@@ -87,6 +133,10 @@ H_CMDS = {
     "top": "ps -Ao pcpu,pid,comm -r | head -6",
     "ping": "ping -c 5 -q {ip}",
     "nc": "nc -z -w 2 {ip} {port}; echo rc=$?",
+    "footprint": "/usr/bin/footprint -p {pid}",
+    "argv": "ps -o command= -p {pid} || true",
+    "alive": "ps -o pid= -p {pid} || true",
+    "run": "{cmd}",
 }
 
 
@@ -158,6 +208,131 @@ def sse(base, body, timeout=900):
     out["done_ms"] = round((done - t0) * 1000, 1) if done else None
     log_raw({"base": base, "method": "POST", "path": "/v1/completions (stream)", "body": body, "response": out})
     return out
+
+
+class Flight:
+    """One streamed /v1/completions request on its own thread, so a failure can hit it mid-generation: the client's
+    times of the first token, the error and the stream's end. A stream that stops without [DONE] and without an error
+    event (its daemon died) ends in `transport`. cancel() ends the socket, as a client going away does."""
+
+    def __init__(self, base, body, timeout=900):
+        self.status, self.error, self.finish, self.tokens, self.sock, self.cancelled = 0, None, None, 0, None, False
+        self.first_at = self.error_at = self.ended_at = None
+        self.up, self.done = threading.Event(), threading.Event()
+        threading.Thread(target=self.run, args=(base, body, timeout), daemon=True).start()
+
+    def fail(self, error):
+        self.error = self.error or error
+        self.error_at = self.error_at or time.monotonic()
+
+    def read(self, r):
+        """The stream's events; True at [DONE]."""
+        for raw in r:
+            line = raw.decode().strip()
+            if line == "data: [DONE]":
+                return True
+            if line.startswith("data:"):
+                ev = json.loads(line[5:])
+                if ev.get("error"):
+                    self.fail(ev["error"])
+                for ch in ev.get("choices") or []:
+                    self.finish = ch.get("finish_reason") or self.finish
+                    if ch.get("text"):
+                        self.tokens += 1
+                        self.first_at = self.first_at or time.monotonic()
+                        self.up.set()
+        return False
+
+    def run(self, base, body, timeout):
+        u = urllib.parse.urlsplit(base)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+        try:
+            conn.connect()
+            self.sock = conn.sock
+            conn.request("POST", "/v1/completions", json.dumps(body), {"Content-Type": "application/json"})
+            r = conn.getresponse()
+            self.status = r.status
+            if r.status != 200:
+                self.fail(json.loads(r.read()).get("error") or {"code": "unparsed"})
+            elif not self.read(r) and not self.cancelled:
+                self.fail({"code": "transport", "message": "the stream ended without [DONE]"})
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            if not self.cancelled:
+                self.fail({"code": "transport", "message": str(e)})
+        finally:
+            conn.close()
+            self.ended_at = time.monotonic()
+            self.up.set()
+            self.done.set()
+
+    def wait_first(self, within):
+        """True when a token arrived within `within` s (False: the stream ended first, or none yet)."""
+        self.up.wait(within)
+        return self.first_at is not None
+
+    def wait_done(self, within):
+        return self.done.wait(within)
+
+    def cancel(self):
+        self.cancelled = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except (AttributeError, OSError):
+            pass  # not connected yet, or already ended
+
+
+class Relay:
+    """P1.7's capture, this script's own UDP relay (as the test-only one in crates/ucompute-network/tests/support, which
+    no release has): H dials 127.0.0.1:<port>, `back` forwards to `target` over the real path, and every datagram goes
+    to `path` as it passes (direction, 0 to the target and 1 back; length; payload). What the relay never got reached
+    neither side, so the file holds all the two sides exchanged."""
+    # ponytail: a thread of this process, enough for run-0820's 5 MB/s; a process of its own if the upload ever stalls
+    HEAD = struct.Struct("<BI")
+
+    def __init__(self, target, path):
+        self.target, self.client, self.stopping = target, None, False
+        self.datagrams, self.bytes = [0, 0], [0, 0]
+        self.file = open(path, "wb", 1 << 20)
+        self.front, self.back = (socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(2))
+        self.front.bind(("127.0.0.1", 0))
+        self.back.bind(("0.0.0.0", 0))
+        for s in (self.front, self.back):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 21)
+        self.port, self.back_port = self.front.getsockname()[1], self.back.getsockname()[1]
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def record(self, direction, data):
+        self.file.write(self.HEAD.pack(direction, len(data)) + data)
+        self.datagrams[direction] += 1
+        self.bytes[direction] += len(data)
+
+    def forward(self, direction, data, sock, to):
+        self.record(direction, data)
+        try:
+            sock.sendto(data, to)
+        except OSError:
+            pass  # a lost datagram, as on any network: QUIC resends
+
+    def run(self):
+        sel = selectors.DefaultSelector()
+        sel.register(self.front, selectors.EVENT_READ, 0)
+        sel.register(self.back, selectors.EVENT_READ, 1)
+        while not self.stopping:
+            for key, _ in sel.select(0.2):
+                data, src = key.fileobj.recvfrom(65535)
+                if key.data == 0:
+                    self.client = src
+                    self.forward(0, data, self.back, self.target)
+                elif src == self.target and self.client:
+                    self.forward(1, data, self.front, self.client)
+
+    def stop(self):
+        self.stopping = True
+        self.thread.join(5)
+        self.file.close()
+        self.front.close()
+        self.back.close()
 
 
 class RShellError(Exception):
@@ -301,6 +476,146 @@ def timing(r):
     if r.get("ttft_ms") is None or r.get("done_ms") is None or n < 2:
         return None, None
     return r["ttft_ms"], round((r["done_ms"] - r["ttft_ms"]) / (n - 1), 3)
+
+
+def size_bytes(text):
+    """"45 MB", "2848 KB" or "1.2 GB" as `footprint` prints it, in bytes."""
+    n, unit = text.split()
+    return int(float(n) * {"B": 1, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30}[unit])
+
+
+def footprint_peak(text):
+    """`phys_footprint_peak` of `footprint -p`, in bytes; None when it is not there."""
+    m = re.search(r"phys_footprint_peak:\s*([\d.]+ [KMG]?B)", text)
+    return size_bytes(m[1]) if m else None
+
+
+def footprint_totals(text):
+    """The TOTAL line's dirty and clean bytes. `phys_footprint` leaves clean pages out, so weights an engine keeps
+    mapped from the file show here and not in the peak."""
+    m = re.search(r"^\s*([\d.]+ [KMG]?B)\s+([\d.]+ [KMG]?B)\s+[\d.]+ [KMG]?B\s+\d+\s+TOTAL\s*$", text, re.M)
+    return {"dirty": size_bytes(m[1]), "clean": size_bytes(m[2])} if m else {}
+
+
+def vm_hwm(text):
+    """VmHWM of /proc/<pid>/status, in bytes; None when it is not there."""
+    m = re.search(r"^VmHWM:\s*(\d+) kB", text, re.M)
+    return int(m[1]) << 10 if m else None
+
+
+def memory_verdict(full, split, absent):
+    """F-03-02: `split` is below `full` by at least `absent`, the bytes of the layers this host does not host, -15 %."""
+    if not full or not split or not absent:
+        return {"met": False, "full_peak": full, "split_peak": split, "absent_bytes": absent}
+    saved = full - split
+    return {"met": saved >= absent * (1 - MEMORY_TOL), "full_peak": full, "split_peak": split, "absent_bytes": absent,
+            "saved_bytes": saved, "saved_over_absent": round(saved / absent, 3)}
+
+
+def gguf_tensors(path):
+    """(tensor name, offset) pairs of a GGUF v2 or v3 file and where its data starts: the header only, little-endian,
+    as crates/ucompute-models/src/gguf.rs reads it."""
+    scalar = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}  # GGUF value type -> bytes
+    unsigned = {0: "B", 2: "H", 4: "I", 10: "Q"}
+    with open(path, "rb") as f:
+        def num(fmt):
+            return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))[0]
+
+        def skip(kind):
+            if kind == 8:  # string
+                f.seek(num("Q"), 1)
+            elif kind == 9:  # array
+                inner, n = num("I"), num("Q")
+                if inner in scalar:
+                    f.seek(scalar[inner] * n, 1)
+                else:
+                    for _ in range(n):
+                        skip(inner)
+            else:
+                f.seek(scalar[kind], 1)
+        if f.read(4) != b"GGUF" or num("I") not in (2, 3):
+            raise ValueError(f"{path} is not a GGUF v2 or v3 file")
+        tensor_count, kv_count, align = num("Q"), num("Q"), 32
+        for _ in range(kv_count):
+            key, kind = f.read(num("Q")), num("I")
+            if key == b"general.alignment" and kind in unsigned:
+                align = num(unsigned[kind])
+            else:
+                skip(kind)
+        tensors = []
+        for _ in range(tensor_count):
+            name = f.read(num("Q")).decode()
+            f.seek(8 * num("I") + 4, 1)  # the dimensions and the tensor's type
+            tensors.append((name, num("Q")))
+        return tensors, (f.tell() + align - 1) // align * align
+
+
+def gguf_sizes(path):
+    """Each tensor's bytes, each tensor's offset and where the data starts. The size is the gap to the next offset
+    (the last runs to the end of the data), as `GgufMetadata::layer_bytes`, so no type table is needed."""
+    tensors, start = gguf_tensors(path)
+    data = os.path.getsize(path) - start
+    offsets = sorted({o for _, o in tensors})
+
+    def end(o):
+        i = bisect.bisect_right(offsets, o)
+        return min(offsets[i] if i < len(offsets) else data, data)
+    return {n: max(end(o) - o, 0) for n, o in tensors}, dict(tensors), start
+
+
+def layer_bytes(sizes, n_layer):
+    """`GgufMetadata::layer_bytes`: the blocks, the output layer, and the rest as input."""
+    out = {"blocks": [0] * n_layer, "input": 0, "output": 0}
+    for name, size in sizes.items():
+        m = re.match(r"blk\.(\d+)\.", name)
+        if m and int(m[1]) < n_layer:
+            out["blocks"][int(m[1])] += size
+        else:
+            out["output" if name.startswith("output") else "input"] += size
+    return out
+
+
+def weight_pattern(path, block):
+    """(tensor, file offset, 64 bytes) from the middle of block `block`'s largest tensor, as the lab's R0 control
+    (rpc_dataflow.weight_pattern)."""
+    sizes, offsets, start = gguf_sizes(path)
+    name = max((n for n in sizes if n.startswith(f"blk.{block}.")), key=sizes.get)
+    at = start + offsets[name] + sizes[name] // 2
+    with open(path, "rb") as f:
+        f.seek(at)
+        return name, at, f.read(64)
+
+
+def scan_capture(path, needles):
+    """Relay.record's file against `needles` (label -> bytes), per direction as one stream, so a needle split between
+    two datagrams is found too. Counts only: the datagrams, and each label found with how often."""
+    keep = max(map(len, needles.values())) - 1
+    tails, hits, n = [b"", b""], {}, 0
+    with open(path, "rb") as f:
+        while head := f.read(Relay.HEAD.size):
+            direction, size = Relay.HEAD.unpack(head)
+            buf = tails[direction] + f.read(size)
+            n += 1
+            for label, needle in needles.items():
+                if needle in buf:
+                    hits[label] = hits.get(label, 0) + 1
+            tails[direction] = buf[-keep:]
+    return {"datagrams": n, "hits": hits}
+
+
+def failure_checks(done, fl, t0, limit, typed):
+    """P1.8's bound for one case: the stream ended within `limit` s of the injection and, when `typed`, with a typed
+    error by then. `done` is the wait's answer: a stream cancelled after the bound also has an end time."""
+    checks = {"ended_in_time": bool(done) and fl.ended_at is not None and fl.ended_at - t0 <= limit}
+    if typed:
+        checks["typed_in_time"] = ((fl.error or {}).get("code") not in UNTYPED and fl.error_at is not None
+                                   and fl.error_at - t0 <= limit)
+    return checks
+
+
+def prefix(x, y):
+    """How many characters `x` and `y` share from the start."""
+    return next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
 
 
 def lab_input(runs, link):
@@ -563,7 +878,7 @@ def audit_join(a, b):
                     run_start=RUN_START, oldest=oldest, whole_run=whole)
 
 
-def canary_scan(prereg, ev):
+def canary_scan(prereg, ev, name="canary_scan", out="scan.json"):
     canaries = [p["canary"] for p in prereg["prompts"]]
     hits = {"h": [], "r": [], "audit": [c for c in canaries if c in json.dumps(ev)]}
     roots = [os.path.join(ARGS.h_home, "logs"), os.path.join(ARGS.h_home, "runs")]
@@ -579,14 +894,455 @@ def canary_scan(prereg, ev):
         hits["r"], err = shell("r", "scan", pats=pats, home=ARGS.r_home, log=ARGS.r_log).split(), None
     except RShellError as e:
         err = str(e)
-    save("scan.json", {"canaries": canaries, "h_files_scanned": len(files), "hits": hits, "r_shell_error": err})
-    step("canary_scan", not err and not any(hits.values()), h_files=len(files), hits=hits, r_shell_error=err)
+    save(out, {"canaries": canaries, "h_files_scanned": len(files), "hits": hits, "r_shell_error": err})
+    step(name, not err and not any(hits.values()), h_files=len(files), hits=hits, r_shell_error=err)
 
 
-def teardown(a):
+def teardown(a, name="teardown", tag="teardown"):
     call(a, "POST", "/api/unload")
-    ok, facts, _ = r_clean("teardown")
-    step("teardown", ok, **facts)
+    ok, facts, _ = r_clean(tag)
+    step(name, ok, **facts)
+
+
+# --- the steps beyond the core run (--steps); `x` carries the run's two daemons, ids, prereg and models
+
+def status(base):
+    v = call(base, "GET", "/api/status")[1]
+    return v if isinstance(v, dict) else {}
+
+
+def peers(base):
+    v = call(base, "GET", "/api/peers")[1]
+    return v.get("peers", []) if isinstance(v, dict) else []
+
+
+def connected(base, pid):
+    return any(p["id"] == pid and p.get("connected") for p in peers(base))
+
+
+def connection(base, pid):
+    """`pid`'s open connection as `base` sees it, {} when there is none."""
+    return next((p.get("connection") or {} for p in peers(base) if p["id"] == pid), {})
+
+
+def fresh(x):
+    """Nothing split left: H unloads, which ends the session, and R's rpc-server is gone."""
+    call(x.a, "POST", "/api/unload")
+    return wait(lambda: not shell("r", "rpc").strip(), 15) is not None
+
+
+def local_body(x, m, prompt, n):
+    return {"model": m["model"], "prompt": prompt, "max_tokens": n, "stream": True, "temperature": 0,
+            "seed": x.prereg["requests"]["seed"], "stream_options": {"include_usage": True}, "target": "local"}
+
+
+def split_body(x, m, prompt, n, mode="pooled"):
+    return {**local_body(x, m, prompt, n), "target": f"split:{x.rid}", "split_at": m["split_at"], "split_mode": mode,
+            "acknowledged": True}
+
+
+def model_blob(model):
+    """The GGUF of `model` in H's store."""
+    with open(os.path.join(ARGS.h_home, "models", "manifests", model + ".json")) as f:
+        return os.path.join(ARGS.h_home, "models", "blobs", "sha256-" + json.load(f)["sha256"])
+
+
+def on_r(x, model):
+    """Whether R's store holds `model`: a split does not need it, a local reference on R does (OD-4)."""
+    v = call(x.b, "GET", "/api/models")[1]
+    listed = v.get("models", []) if isinstance(v, dict) else []
+    return any(m.get("id") == model and m.get("downloaded") for m in listed)
+
+
+def h_peak(tag, pid):
+    text = shell("h", "footprint", pid=pid)
+    save(f"h/footprint-{tag}.txt", text)
+    save(f"h/argv-{tag}.txt", shell("h", "argv", pid=pid))
+    return footprint_peak(text), footprint_totals(text)
+
+
+def r_peak(tag, pid):
+    text = shell("r", "proc_status", pid=pid) if pid else ""
+    save(f"r/proc-status-{tag}.txt", text)
+    if pid:
+        save(f"r/argv-{tag}.txt", shell("r", "argv", pid=pid))
+    return vm_hwm(text)
+
+
+def memory_model(x, m):
+    label, model, k = m["label"], m["model"], m["split_at"]
+    prompt = x.prereg["prompts"][0]["text"]
+    lb = layer_bytes(gguf_sizes(model_blob(model))[0], m["n_layer"])
+    # The same prompt and 64 decode steps everywhere; a peak is read while its process lives.
+    fresh(x)
+    split = sse(x.a, split_body(x, m, prompt, 65))
+    head = status(x.a).get("loaded") or {}
+    rpc = shell("r", "rpc").split()
+    h_split, h_split_totals = h_peak(f"split-{label}", head.get("pid"))
+    r_split = r_peak(f"rpc-{label}", rpc[0] if rpc else None)
+    fresh(x)
+    local = sse(x.a, local_body(x, m, prompt, 65))
+    full = status(x.a).get("loaded") or {}
+    h_full, h_full_totals = h_peak(f"local-{label}", full.get("pid"))
+    call(x.a, "POST", "/api/unload")
+    same = all(head.get(f) == full.get(f) for f in ("n_ctx", "parallel_slots", "threads"))
+    ran = split["status"] == local["status"] == 200 and not split["error"] and not local["error"]
+    h = memory_verdict(h_full, h_split, sum(lb["blocks"][:k]))
+    record = {"model": model, "split_at": k, "layer_bytes": lb, "tolerance": MEMORY_TOL,
+              "h": {**h, "same_flags": same, "totals_split": h_split_totals, "totals_local": h_full_totals}}
+    step(f"memory_{label}_h", ran and same and h["met"], same_flags=same, totals_split=h_split_totals,
+         totals_local=h_full_totals, errors=[split["error"], local["error"]], **h)
+    if on_r(x, model):
+        rlocal = sse(x.b, local_body(x, m, prompt, 65))
+        r_full = r_peak(f"local-{label}", (status(x.b).get("loaded") or {}).get("pid"))
+        call(x.b, "POST", "/api/unload")
+        r = memory_verdict(r_full, r_split, sum(lb["blocks"][k:]) + lb["input"] + lb["output"])
+        record["r"] = r
+        step(f"memory_{label}_r", ran and rlocal["status"] == 200 and not rlocal["error"] and r["met"],
+             error=rlocal["error"], **r)
+    else:
+        step_na(f"memory_{label}_r", f"{model} is not in R's store (OD-4): F-03-02's R side stays open")
+    save(f"memory-{label}.json", record)
+
+
+def memory(x):
+    for m in x.models:
+        memory_model(x, m)
+
+
+def scanner_control(path, stream, needles):
+    """The positive control of P1.7: plaintext `stream` through a Relay into its file and through scan_capture, the
+    path of the real capture but for what travels."""
+    sink, tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM), socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sink.bind(("127.0.0.1", 0))
+    sink.settimeout(5)
+    relay = Relay(sink.getsockname(), path)
+    try:
+        for i in range(0, len(stream), 1200):
+            tx.sendto(stream[i:i + 1200], ("127.0.0.1", relay.port))
+            sink.recv(65535)  # one at a time: nothing is dropped on loopback
+    finally:
+        relay.stop()
+        tx.close()
+        sink.close()
+    return scan_capture(path, needles)
+
+
+def dial_at(x, addr):
+    """H's one connection to R, dialled at `addr`, or None. Connect hands back an open connection as it is, so
+    disconnect closes that first (a hold, which also keeps R's redial off until connect ends it); connect then dials
+    `addr` first. R's redial can still win the race, so /api/peers has the word: connect's answer does not carry it."""
+    for _ in range(5):
+        call(x.a, "POST", f"/api/peers/{x.rid}/disconnect")
+        call(x.a, "POST", f"/api/peers/{x.rid}/connect", {"addr": addr})
+        c = connection(x.a, x.rid)
+        if c.get("direction") == "outbound" and c.get("remote_addr") == addr:
+            return c
+        time.sleep(1)
+    return None
+
+
+def capture(x):
+    m, prompts, a = x.models[0], x.prereg["prompts"], x.a
+    k, blob = m["split_at"], model_blob(m["model"])
+    needles = {f"canary {p['id']} {enc}": p["canary"].encode(enc) for p in prompts for enc in ("utf-8", "utf-16-le")}
+    canaries = b"".join(needles.values())
+    name, at, pattern = weight_pattern(blob, (k - 1) // 2)  # the middle of R's range, as the lab's R0 control
+    out_name, _, out_pattern = weight_pattern(blob, k)  # a block R does not hold: not in the control's stream
+    # ponytail: one pattern, as the plan and R0; every block's would close the blind spot of a pattern that QUIC framing
+    # would have cut in a plaintext stream, if a capture ever needs that
+    needles[f"weight {name}"] = pattern
+    out = os.path.join(ARGS.out, "capture")
+    os.makedirs(out, exist_ok=True)
+    with open(blob, "rb") as f:  # real weights around the pattern, split between the first two datagrams
+        f.seek(at - 1170)
+        plain = f.read(4096) + canaries
+    ctl = scanner_control(os.path.join(out, "control.bin"), plain, {**needles, f"out of range {out_name}": out_pattern})
+    control = set(ctl["hits"]) == set(needles)
+    step("capture_control", control, hits=sorted(ctl["hits"]), datagrams=ctl["datagrams"], plaintext_bytes=len(plain))
+
+    fresh(x)
+    path = os.path.join(out, "datagrams.bin")
+    relay = Relay((ARGS.r_ip, x.r_port), path)
+    via = f"127.0.0.1:{relay.port}"
+    runs, c, r_conn = [], {}, {}
+    try:
+        dialled = dial_at(x, via)
+        if dialled:
+            runs = [sse(a, split_body(x, m, p["text"], 65)) for p in prompts]
+            c = checkpoint(a, x.rid, "capture")
+            r_conn = connection(x.b, x.hid)
+            fresh(x)
+    finally:
+        back = dial_at(x, x.r_dial)  # H's pinned address goes back to R's own
+        relay.stop()
+    scan = scan_capture(path, needles)
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    size, kept = os.path.getsize(path), os.path.getsize(path) <= CAPTURE_KEEP
+    if not kept:
+        os.remove(path)
+    tunnel = c.get("counters") or {}
+    checks = {"dialled_through_relay": bool(dialled),
+              "h_stayed_on_relay": (c.get("connection") or {}).get("remote_addr") == via,
+              "r_saw_relay": (r_conn.get("remote_addr") or "").rpartition(":")[2] == str(relay.back_port),
+              "requests_ok": len(runs) == 3 and all(r["status"] == 200 and not r["error"] for r in runs),
+              "relay_carried_tunnel": relay.bytes[0] >= (tunnel.get("to_r") or 0) > 0
+              and relay.bytes[1] >= (tunnel.get("to_h") or 0) > 0,
+              "no_hits": not scan["hits"], "control": control, "dial_restored": bool(back)}
+    both = ("to_r", "to_h")
+    summary = {"via": via, "relay_port": relay.back_port, "target": f"{ARGS.r_ip}:{x.r_port}",
+               "datagrams": dict(zip(both, relay.datagrams)), "bytes": dict(zip(both, relay.bytes)),
+               "tunnel": tunnel, "h_connection": c.get("connection"), "r_connection": r_conn, "file_bytes": size,
+               "sha256": digest.hexdigest(), "raw_kept": kept, "dial_restored_to": x.r_dial if back else None}
+    save("capture/relay-summary.json", summary)
+    save("capture/scan.json", {"model": m["model"], "needles": {k_: v.hex() for k_, v in needles.items()}, **scan,
+                               "control": ctl})
+    step("capture", all(checks.values()), failed=[k_ for k_, v in checks.items() if not v], hits=scan["hits"],
+         datagrams=scan["datagrams"], relay_bytes=summary["bytes"], tunnel=tunnel)
+
+
+def config_c(x):
+    m = next(p for p in x.prereg["models"] if p["label"] == "R1b")
+    label, model, k, n = m["label"], m["model"], m["split_at"], m["n_layer"]
+    a, b, prompts = x.a, x.b, x.prereg["prompts"]
+    step_na("config_c_logprobs", "the API returns logprobs null (C7 not built, OD-2): tokens only")
+
+    def three(base, tag, body):
+        """The three prompts, 64 decode tokens each; their texts and whether all ran."""
+        texts, ok = {}, True
+        for p in prompts:
+            r = sse(base, body(p["text"]))
+            ttft, tpot = timing(r)
+            ok &= r["status"] == 200 and not r["error"] and (r["usage"] or {}).get("completion_tokens") == 65
+            save(f"tokens/{tag}-{label}-{p['id']}.json", {"text": r["text"], "usage": r["usage"], "ttft_ms": ttft,
+                                                          "tpot_ms": tpot, "target": r["target"]})
+            texts[p["id"]] = r["text"]
+        return texts, ok
+
+    fresh(x)
+    load = sse(a, split_body(x, m, prompts[0]["text"], 1, mode="same_backend"))
+    want = [("CPU", 0, k), ("RPC0", k, n)]
+    got = [(s.get("device"), s.get("first_block"), s.get("end_block"))
+           for s in (load["placement"] or {}).get("stages", [])]
+    st = status(a)
+    sp = st.get("split") or {}
+    device = sp.get("stage_device") or ""
+    if not step("config_c_session", load["status"] == 200 and not load["error"] and got == want
+                and device.startswith("CPU"), placement=got, want=want, stage_device=device, error=load["error"],
+                load_ms=load["done_ms"], h_devices=(st.get("loaded") or {}).get("device_actual")):
+        fresh(x)
+        return
+    split, ok = three(a, "C-split", lambda t: split_body(x, m, t, 65, mode="same_backend"))
+    c = checkpoint(a, x.rid, "config_c")
+    save("bytes/config-c.json", c)
+    step("config_c_split", ok and c["session"] == sp.get("session"), counters=c["counters"], session=c["session"])
+
+    fresh(x)
+    s, info, _ = call(a, "POST", f"/api/models/{model}/load", {"device": "cpu"}, timeout=LOAD_WAIT)
+    mac, ok = three(a, "local-mac-cpu", lambda t: local_body(x, m, t, 65))
+    loaded = status(a).get("loaded") or {}  # still the CPU engine: a local request without a device reuses it
+    call(a, "POST", "/api/unload")
+    step("config_c_local_mac_cpu", s == 200 and ok and loaded.get("device_requested") == "cpu",
+         status=s, device_requested=loaded.get("device_requested"), device_actual=loaded.get("device_actual"))
+
+    sentinel = {}
+    if on_r(x, model):
+        sentinel, ok = three(b, "local-sentinel-cpu", lambda t: local_body(x, m, t, 65))
+        call(b, "POST", "/api/unload")
+        step("config_c_local_sentinel_cpu", ok)
+    else:
+        step_na("config_c_local_sentinel_cpu", f"{model} is not in R's store (OD-4)")
+    pairs = (("C-split", split, "local-mac-cpu", mac), ("C-split", split, "local-sentinel-cpu", sentinel),
+             ("local-mac-cpu", mac, "local-sentinel-cpu", sentinel))
+    compare = [{"model": label, "prompt": p["id"], "a": x_, "b": y_, "equal": u[p["id"]] == v[p["id"]],
+                "equal_prefix_chars": prefix(u[p["id"]], v[p["id"]])}
+               for x_, u, y_, v in pairs for p in prompts if p["id"] in u and p["id"] in v]
+    save(f"tokens/compare-C-{label}.json", compare)
+    step_na("config_c_compare", f"as measured, never a pass rule (OD-3): {sum(r['equal'] for r in compare)} of "
+                                f"{len(compare)} equal, tokens/compare-C-{label}.json")
+
+
+def session_closes(sides, sid, within=15):
+    """Each side's session_close outcome (`reason`) for `sid` in its audit. R writes its line after rpc-server stopped,
+    so it is waited for."""
+    role, out = {"h": "head", "r": "stage"}, {}
+
+    def seen():
+        for side, base in sides:
+            v = call(base, "GET", "/api/audit?n=200")[1]
+            for e in v.get("events", []) if isinstance(v, dict) else []:
+                f = e.get("fields") or {}
+                if e.get("kind") == "session_close" and f.get("session") == sid and f.get("role") == role[side]:
+                    out[side] = f.get("reason")
+        return all(out.get(s) for s, _ in sides)
+    wait(seen, within)
+    return out
+
+
+def failure_case(x, n, name, limit, body, inject, recover=None, after=None, down=None, typed=True):
+    """One case of P1.8 on a fresh session: a generation in flight, inject(flight, record) applies the failure, after()
+    adds the case's own checks, recover() puts the hosts back. False when they did not come back."""
+    label = f"failure_{n}_{name}"
+    unloaded = fresh(x)
+    fl = Flight(x.a, body)
+    up = fl.wait_first(LOAD_WAIT)
+    st = status(x.a)
+    sid = (st.get("split") or {}).get("session")
+    rec = {"case": n, "name": name, "limit_s": limit, "session": sid, "engine_pid": (st.get("loaded") or {}).get("pid")}
+    if not up or not sid:
+        fl.cancel()
+        fl.wait_done(5)
+        save(f"failure/{name}.json", {**rec, "error": fl.error, "status": fl.status})
+        step(label, False, why="no generation in flight", status=fl.status, error=fl.error)
+        return True
+    checks = {"fresh_session": unloaded, "in_flight": not fl.wait_done(0)}
+    t0 = time.monotonic()
+    checks["injected"] = bool(inject(fl, rec))
+    done = fl.wait_done(max(0, limit - (time.monotonic() - t0)))
+    checks.update(failure_checks(done, fl, t0, limit, typed))
+    if not done:  # the bound passed: it hangs, and the run goes on
+        fl.cancel()
+        fl.wait_done(5)
+    rec.update(error=fl.error, finish=fl.finish, tokens=fl.tokens, status=fl.status,
+               error_after_s=round(fl.error_at - t0, 3) if fl.error_at is not None else None,
+               ended_after_s=round(fl.ended_at - t0, 3) if fl.ended_at is not None else None)
+    if after:
+        checks.update(after(rec, t0))
+    gone = wait(lambda: not shell("r", "rpc").strip(), 15) is not None
+    clean, facts, _ = r_clean(f"failure-{n}")
+    sides = [(s, base) for s, base in (("h", x.a), ("r", x.b)) if s != down]
+    closes = session_closes(sides, sid)
+    checks["rpc_gone"] = gone and clean
+    checks["session_close_with_outcome"] = all(closes.get(s) for s, _ in sides)
+    back = recover() if recover else True
+    checks["recovered"] = bool(back)
+    active = []
+
+    def idle():
+        s, v, _ = call(x.a, "GET", "/api/jobs")
+        active[:] = (v.get("active") or []) if isinstance(v, dict) else ["no answer"]
+        return s == 200 and not active
+    checks["no_job_left"] = wait(idle, limit) is not None
+    rec.update(checks=checks, session_close=closes, jobs_active=active, **facts)
+    save(f"failure/{name}.json", rec)
+    step(label, all(checks.values()), failed=[k for k, v in checks.items() if not v], limit_s=limit,
+         code=(fl.error or {}).get("code"), error_after_s=rec["error_after_s"], ended_after_s=rec["ended_after_s"],
+         session_close=closes)
+    return bool(back)
+
+
+def failures(x):
+    a, b, rid, hid = x.a, x.b, x.rid, x.hid
+    m, prompts = x.models[0], x.prereg["prompts"]
+
+    def done(r):
+        return r[0] in (200, 204)
+
+    def reconnect():
+        call(a, "POST", f"/api/peers/{rid}/connect", {})
+        return wait(lambda: connected(a, rid), 30) is not None
+
+    def cancel(fl, rec):
+        fl.cancel()
+        return True
+
+    def cancel_after(rec, t0):
+        r = sse(a, split_body(x, m, prompts[0]["text"], 8))
+        now = (status(a).get("split") or {}).get("session")
+        rec["next_request"] = {"status": r["status"], "error": r["error"], "session": now}
+        fresh(x)
+        return {"next_request_ok": r["status"] == 200 and not r["error"], "same_session": now == rec["session"]}
+
+    def kill_rpc(fl, rec):
+        shell("r", "kill_rpc")
+        return True
+
+    def pair_again():
+        s2, up = pair_up(a, b, rid)
+        return s2 == 200 and up is not None and groups(b, hid, True)
+
+    def network_on():
+        return done(call(a, "PUT", "/api/network", {"enabled": True, "serve_peers": False})) and wait(
+            lambda: connected(a, rid), 30) is not None
+
+    def kill_r(fl, rec):
+        found = re.search(r"ms=(\d+)", shell("r", "kill_daemon"))
+        rec["rpc_gone_after_ms"] = int(found[1]) if found else None
+        return True
+
+    def r_after(rec, t0):
+        return {"pdeathsig_within_1s": rec["rpc_gone_after_ms"] is not None and rec["rpc_gone_after_ms"] <= 1000}
+
+    def r_back():
+        shell("r", "start", cmd=ARGS.r_start)
+        return wait(lambda: call(b, "GET", "/health")[0] == 200, 30) is not None and reconnect()
+
+    def kill_h(fl, rec):
+        shell("h", "run", cmd=ARGS.h_kill)
+        return True
+
+    def h_after(rec, t0):
+        gone = wait(lambda: not shell("r", "rpc").strip(), max(0, 5 - (time.monotonic() - t0)), poll=0.2)
+        rec["r_teardown_seen_after_s"] = round(time.monotonic() - t0, 3)
+        pid = rec["engine_pid"]
+        rec["engine_alive_after_kill"] = bool(shell("h", "alive", pid=pid).strip())
+        shell("h", "run", cmd=ARGS.h_start)
+        up = wait(lambda: call(a, "GET", "/health")[0] == 200, 30) is not None
+        reaped = wait(lambda: not shell("h", "alive", pid=pid).strip(), 10) is not None
+        return {"r_teardown_within_5s": gone is not None, "h_restarted": up, "engine_reaped": reaped}
+
+    cases = [
+        ("client_cancel", 10, cancel, {"after": cancel_after, "typed": False}),
+        ("kill_rpc_server", 10, kill_rpc, {}),
+        ("revoke_on_r", 5, lambda fl, rec: done(call(b, "POST", f"/api/peers/{hid}/revoke")), {"recover": pair_again}),
+        ("hold_on_h", 5, lambda fl, rec: done(call(a, "POST", f"/api/peers/{rid}/disconnect")), {"recover": reconnect}),
+        ("pooling_off_on_r", 5, lambda fl, rec: groups(b, hid, False), {"recover": lambda: groups(b, hid, True)}),
+        ("local_only_on_h", 5, lambda fl, rec: done(call(a, "PUT", "/api/privacy", {"mode": "local_only"})),
+         {"recover": lambda: done(call(a, "PUT", "/api/privacy", {"mode": "trusted_group", "acknowledged": True}))}),
+        ("networking_off_on_h", 5, lambda fl, rec: done(call(a, "PUT", "/api/network", {"enabled": False,
+                                                                                         "serve_peers": False})),
+         {"recover": network_on}),
+        ("sigkill_r_daemon", 10, kill_r, {"after": r_after, "recover": r_back, "down": "r"}),
+        ("sigkill_h_daemon", 10, kill_h, {"after": h_after, "recover": reconnect, "down": "h", "typed": False}),
+    ]
+    for i, (name, limit, inject, kw) in enumerate(cases, 1):
+        body = split_body(x, m, prompts[i % len(prompts)]["text"], FLIGHT_TOKENS)  # the canaries reach the failure logs
+        if not failure_case(x, i, name, limit, body, inject, **kw):
+            for j, later in enumerate(cases[i:], i + 1):
+                step_na(f"failure_{j}_{later[0]}", f"not run: case {i} did not recover")
+            return
+
+
+def extras(x):
+    """The steps --steps named beyond the core, then their own scan and teardown."""
+    run = {"memory": memory, "capture": capture, "config_c": config_c, "failures": failures}
+    todo = [s for s in STEPS if s in run and s in ARGS.steps]
+    for name in todo:
+        try:
+            run[name](x)
+        except (RShellError, OSError, ValueError) as e:
+            step(f"{name}_stopped", False, why=repr(e))
+            call(x.a, "POST", "/api/unload")
+    if todo:
+        ev = {}
+        for side, base in (("h", x.a), ("r", x.b)):
+            v = call(base, "GET", f"/api/audit?n={AUDIT_MAX}")[1]
+            ev[side] = v.get("events", []) if isinstance(v, dict) else []
+            save(f"{side}/audit-extra.jsonl", "".join(json.dumps(e) + "\n" for e in ev[side]))
+        canary_scan(x.prereg, ev, "canary_scan_extra", "scan-extra.json")
+        teardown(x.a, "teardown_extra", "teardown-extra")
+
+
+def pair_up(a, b, rid):
+    """R shows a code, H joins, and the two connect: (join status, seconds until connected or None)."""
+    s, start, _ = call(b, "POST", "/api/pair/start", {})
+    s2, _, _ = call(a, "POST", "/api/pair/join", {"addr": start.get("pair_addr"), "code": start.get("code")}) \
+        if s == 200 else (s, start, 0)
+    return s2, wait(lambda: any(p["id"] == rid and p.get("connected")
+                                for p in call(a, "GET", "/api/peers")[1].get("peers", [])), 30)
 
 
 def p1(args, prereg, lab_runs, rows):
@@ -617,38 +1373,51 @@ def p1(args, prereg, lab_runs, rows):
     first = next(m for m in prereg["models"] if m["label"] in args.models.split(","))
     probe = {"model": first["model"], "prompt": "Hello", "max_tokens": 1, "stream": True, "temperature": 0,
              "target": f"split:{rid}", "split_at": first["split_at"], "split_mode": "pooled", "acknowledged": True}
+    core = "core" in args.steps
     _, pv, _ = call(a, "GET", "/api/peers")
     if not any(p["id"] == rid for p in pv.get("peers", [])):
-        deny("deny_unpaired", a, probe, ("peer_unauthorized",))  # P1.1 (a)
-        s, start, _ = call(b, "POST", "/api/pair/start", {})
-        s2, _, _ = call(a, "POST", "/api/pair/join", {"addr": start.get("pair_addr"), "code": start.get("code")}) \
-            if s == 200 else (s, start, 0)
-        connected = wait(lambda: any(p["id"] == rid and p.get("connected")
-                                     for p in call(a, "GET", "/api/peers")[1].get("peers", [])), 30)
-        if not step("pair", s2 == 200 and connected is not None, status=s2):
+        if core:
+            deny("deny_unpaired", a, probe, ("peer_unauthorized",))  # P1.1 (a)
+        s2, up = pair_up(a, b, rid)
+        if not step("pair", s2 == 200 and up is not None, status=s2):
             return
-    else:
+    elif core:
         step_na("deny_unpaired", "H and R arrived paired")
-    groups(a, rid, False, remote=True)
-    groups(b, hid, False, remote=True)
-    # (b) and (c): a group without pooling reads peer_unauthorized on either side (ucompute-policy evaluate, may_serve)
-    nogroup = "no trusted group allows pooled inference"
-    deny("deny_remote_only", a, probe, ("peer_unauthorized",), text=nogroup)  # (b)
-    groups(a, rid, True)
-    deny("deny_stage_refuses", a, probe, ("peer_unauthorized",), text=nogroup)  # (c)
-    groups(b, hid, True)
-    deny("deny_unacknowledged", a, {**probe, "acknowledged": False}, ("policy_denied",),
-         text="Pooling splits one model")  # (d)
-    for m in prereg["models"]:
-        if m["label"] in args.models.split(","):
-            try:
-                run_model(a, b, rid, m, prereg, lab_runs, rows)
-            except RShellError as e:
-                step(f"model_{m['label']}", False, r_shell_error=str(e))
-                call(a, "POST", "/api/unload")
-    ev, _ = audit_join(a, b)
-    canary_scan(prereg, ev)
-    teardown(a)
+    if core:
+        groups(a, rid, False, remote=True)
+        groups(b, hid, False, remote=True)
+        # (b) and (c): a group without pooling reads peer_unauthorized on either side (ucompute-policy evaluate,
+        # may_serve)
+        nogroup = "no trusted group allows pooled inference"
+        deny("deny_remote_only", a, probe, ("peer_unauthorized",), text=nogroup)  # (b)
+        groups(a, rid, True)
+        deny("deny_stage_refuses", a, probe, ("peer_unauthorized",), text=nogroup)  # (c)
+        groups(b, hid, True)
+        deny("deny_unacknowledged", a, {**probe, "acknowledged": False}, ("policy_denied",),
+             text="Pooling splits one model")  # (d)
+        for m in prereg["models"]:
+            if m["label"] in args.models.split(","):
+                try:
+                    run_model(a, b, rid, m, prereg, lab_runs, rows)
+                except RShellError as e:
+                    step(f"model_{m['label']}", False, r_shell_error=str(e))
+                    call(a, "POST", "/api/unload")
+        ev, _ = audit_join(a, b)
+        canary_scan(prereg, ev)
+        teardown(a)
+    else:
+        groups(a, rid, True)
+        groups(b, hid, True)
+    r_port = int((rb.get("dial_addr") or ":8193").rpartition(":")[2])
+    extras(argparse.Namespace(a=a, b=b, hid=hid, rid=rid, prereg=prereg, r_port=r_port, r_dial=f"{args.r_ip}:{r_port}",
+                              models=[m for m in prereg["models"] if m["label"] in args.models.split(",")]))
+
+
+def steps_arg(text):
+    names = tuple(s for s in text.split(",") if s)
+    if not names or set(names) - set(STEPS):
+        raise argparse.ArgumentTypeError(f"--steps takes {', '.join(STEPS)}")
+    return names
 
 
 def main():
@@ -667,7 +1436,13 @@ def main():
     ap.add_argument("--link", choices=("wifi", "wired"), default="wifi")
     ap.add_argument("--models", default="R1a,R1b")
     ap.add_argument("--prereg", default=os.path.join(HERE, "split_prereg.json"))
+    ap.add_argument("--steps", type=steps_arg, default=("core",), help=f"any of {','.join(STEPS)} (default core)")
+    ap.add_argument("--r-start", help="R's daemon start command, run through --r-sh (failures: case 8)")
+    ap.add_argument("--h-start", help="H's daemon start command, run here (failures: case 9)")
+    ap.add_argument("--h-kill", help="SIGKILL of H's daemon, run here (failures: case 9)")
     ARGS = args = ap.parse_args()
+    if "failures" in args.steps and not (args.r_start and args.h_start and args.h_kill):
+        ap.error("--steps failures needs --r-start, --h-start and --h-kill: cases 8 and 9 restart the daemons")
     os.makedirs(args.out, exist_ok=True)
     RAW = open(os.path.join(args.out, "raw.jsonl"), "a")
     with open(args.prereg) as f:
