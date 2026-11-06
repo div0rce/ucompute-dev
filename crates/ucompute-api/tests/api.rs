@@ -555,10 +555,11 @@ async fn status_ready_models_and_admin_validation() {
         v,
         json!({"status": "ok", "version": ucompute_core::VERSION, "commit": commit})
     );
-    // build.rs: 40 hex digits of HEAD (or of the synced commit), "-dirty" when the tree had changes
+    // build.rs: 40 hex digits of HEAD (or of the synced commit), "-dirty" when the tree had changes;
+    // "unknown" in a tree with neither Git metadata nor a sync marker
     let head = commit.trim_end_matches("-dirty");
     assert!(
-        head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()),
+        commit == "unknown" || (head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit())),
         "{commit}"
     );
 
