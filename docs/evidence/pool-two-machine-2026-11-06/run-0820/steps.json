@@ -1,0 +1,445 @@
+{
+ "driven": "daemon API run (not app UI): pairing, groups, privacy and requests go through the two daemons' loopback APIs",
+ "steps": [
+  {
+   "step": "preflight",
+   "ok": true,
+   "same_commit": {
+    "ok": true,
+    "head": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+    "uncommitted": [],
+    "r_tree": "$HOME/src/ucompute",
+    "r_head": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+    "r_tree_differs": [],
+    "build_commit": {
+     "h": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+     "r": "1038a7f126e7d6e0204b67621332cbf1cc80e595"
+    },
+    "why": "H's tree is clean at HEAD, R's tree holds exactly HEAD's files, and both daemons were built from HEAD with a clean tree (/health commit)"
+   },
+   "r_soak_and_engines_stopped": {
+    "ok": true,
+    "found": ""
+   },
+   "r_only_ucompute_listens": {
+    "ok": true,
+    "others": []
+   },
+   "r_no_other_sessions": {
+    "ok": true,
+    "loginctl": [],
+    "who": []
+   },
+   "h_no_other_engines_or_builds": {
+    "ok": true,
+    "found": ""
+   },
+   "h_ac_power": {
+    "ok": true
+   },
+   "h_caffeinate": {
+    "ok": true,
+    "why": "the runner wraps the run in caffeinate -dimsu"
+   },
+   "h_free_memory": {
+    "ok": true,
+    "bytes": 1336344576
+   },
+   "quiet": {
+    "ok": true,
+    "samples": 5,
+    "last": [
+     61.8,
+     0.04,
+     12.72
+    ],
+    "rule": "R below 1.0 and H below 99.0 for 60 s"
+   }
+  },
+  {
+   "step": "deny_unpaired",
+   "ok": true,
+   "status": 403,
+   "code": "peer_unauthorized",
+   "want": [
+    "peer_unauthorized"
+   ],
+   "rpc_server": "",
+   "bad_listeners": []
+  },
+  {
+   "step": "pair",
+   "ok": true,
+   "status": 200
+  },
+  {
+   "step": "deny_remote_only",
+   "ok": true,
+   "status": 403,
+   "code": "peer_unauthorized",
+   "want": [
+    "peer_unauthorized"
+   ],
+   "rpc_server": "",
+   "bad_listeners": []
+  },
+  {
+   "step": "deny_stage_refuses",
+   "ok": true,
+   "status": 403,
+   "code": "peer_unauthorized",
+   "want": [
+    "peer_unauthorized"
+   ],
+   "rpc_server": "",
+   "bad_listeners": []
+  },
+  {
+   "step": "deny_unacknowledged",
+   "ok": true,
+   "status": 403,
+   "code": "policy_denied",
+   "want": [
+    "policy_denied"
+   ],
+   "rpc_server": "",
+   "bad_listeners": []
+  },
+  {
+   "step": "session_R1a",
+   "ok": true,
+   "loads": [
+    {
+     "status": 200,
+     "ms": 41727.7,
+     "error": null,
+     "counters": {
+      "to_r": 190806685,
+      "to_h": 19004,
+      "switches": 88
+     }
+    },
+    {
+     "status": 200,
+     "ms": 35981.4,
+     "error": null,
+     "counters": {
+      "to_r": 190806685,
+      "to_h": 19004,
+      "switches": 88
+     }
+    }
+   ],
+   "placement": [
+    [
+     "RPC0",
+     0,
+     12
+    ],
+    [
+     "MTL0",
+     12,
+     24
+    ]
+   ],
+   "want": [
+    [
+     "RPC0",
+     0,
+     12
+    ],
+    [
+     "MTL0",
+     12,
+     24
+    ]
+   ],
+   "rpc_ports": [
+    42269
+   ],
+   "lan_control_rc": "0",
+   "lan_probe_rc": [
+    "1"
+   ],
+   "banner": "transport      : TCP",
+   "rpc_server": "1624376 /home/div0rce/.ucompute-acceptance/backends/llama.cpp/b11609/ggml-rpc-server -H 127.0.0.1 -p 42269 -t 6",
+   "bad_listeners": []
+  },
+  {
+   "step": "split_R1a_p1",
+   "ok": true,
+   "prompt_tokens": 44,
+   "ttft_ms": 153.6,
+   "tpot_ms": 38.583,
+   "per_token": {
+    "to_r": 17021.625,
+    "to_h": 3592.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "split_R1a_p2",
+   "ok": true,
+   "prompt_tokens": 50,
+   "ttft_ms": 349.4,
+   "tpot_ms": 33.997,
+   "per_token": {
+    "to_r": 17021.625,
+    "to_h": 3592.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "split_R1a_p3",
+   "ok": true,
+   "prompt_tokens": 47,
+   "ttft_ms": 140.6,
+   "tpot_ms": 36.992,
+   "per_token": {
+    "to_r": 17021.625,
+    "to_h": 3592.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "local_stays_local_R1a",
+   "ok": true,
+   "grew": {
+    "to_r": 64,
+    "to_h": 24
+   },
+   "loaded_split": null
+  },
+  {
+   "step": "local_R1a",
+   "ok": true,
+   "compare": [
+    {
+     "model": "R1a",
+     "prompt": 1,
+     "equal": true,
+     "equal_prefix_chars": 282
+    },
+    {
+     "model": "R1a",
+     "prompt": 2,
+     "equal": false,
+     "equal_prefix_chars": 135
+    },
+    {
+     "model": "R1a",
+     "prompt": 3,
+     "equal": false,
+     "equal_prefix_chars": 265
+    }
+   ],
+   "note": "as measured: Metal head with an x86 CPU stage (ADR-0005 D10)"
+  },
+  {
+   "step": "stage_gone_R1a",
+   "ok": true,
+   "within_s": 0.345,
+   "r_shell_error": null
+  },
+  {
+   "step": "session_R1b",
+   "ok": true,
+   "loads": [
+    {
+     "status": 200,
+     "ms": 86261.1,
+     "error": null,
+     "counters": {
+      "to_r": 402276324,
+      "to_h": 31781,
+      "switches": 100
+     }
+    },
+    {
+     "status": 200,
+     "ms": 82249.0,
+     "error": null,
+     "counters": {
+      "to_r": 402276324,
+      "to_h": 31781,
+      "switches": 100
+     }
+    }
+   ],
+   "placement": [
+    [
+     "RPC0",
+     0,
+     14
+    ],
+    [
+     "MTL0",
+     14,
+     28
+    ]
+   ],
+   "want": [
+    [
+     "RPC0",
+     0,
+     14
+    ],
+    [
+     "MTL0",
+     14,
+     28
+    ]
+   ],
+   "rpc_ports": [
+    39833
+   ],
+   "lan_control_rc": "0",
+   "lan_probe_rc": [
+    "1"
+   ],
+   "banner": "transport      : TCP",
+   "rpc_server": "1624594 /home/div0rce/.ucompute-acceptance/backends/llama.cpp/b11609/ggml-rpc-server -H 127.0.0.1 -p 39833 -t 6",
+   "bad_listeners": []
+  },
+  {
+   "step": "split_R1b_p1",
+   "ok": true,
+   "prompt_tokens": 44,
+   "ttft_ms": 306.6,
+   "tpot_ms": 49.017,
+   "per_token": {
+    "to_r": 25173.125,
+    "to_h": 6152.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "split_R1b_p2",
+   "ok": true,
+   "prompt_tokens": 50,
+   "ttft_ms": 345.1,
+   "tpot_ms": 51.77,
+   "per_token": {
+    "to_r": 25173.125,
+    "to_h": 6152.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "split_R1b_p3",
+   "ok": true,
+   "prompt_tokens": 47,
+   "ttft_ms": 305.1,
+   "tpot_ms": 51.667,
+   "per_token": {
+    "to_r": 25173.125,
+    "to_h": 6152.0,
+    "turns": 1.0
+   },
+   "sessions": 1,
+   "errors": [
+    null,
+    null
+   ]
+  },
+  {
+   "step": "local_stays_local_R1b",
+   "ok": true,
+   "grew": {
+    "to_r": 64,
+    "to_h": 24
+   },
+   "loaded_split": null
+  },
+  {
+   "step": "local_R1b",
+   "ok": true,
+   "compare": [
+    {
+     "model": "R1b",
+     "prompt": 1,
+     "equal": true,
+     "equal_prefix_chars": 282
+    },
+    {
+     "model": "R1b",
+     "prompt": 2,
+     "equal": true,
+     "equal_prefix_chars": 311
+    },
+    {
+     "model": "R1b",
+     "prompt": 3,
+     "equal": false,
+     "equal_prefix_chars": 164
+    }
+   ],
+   "note": "as measured: Metal head with an x86 CPU stage (ADR-0005 D10)"
+  },
+  {
+   "step": "stage_gone_R1b",
+   "ok": true,
+   "within_s": 0.243,
+   "r_shell_error": null
+  },
+  {
+   "step": "audit_join",
+   "ok": true,
+   "sessions": 4,
+   "driver_sessions": 4,
+   "joined": true,
+   "closed_both_sides": true,
+   "run_start": "2026-11-06T08:20:57Z",
+   "oldest": {
+    "h": "2026-11-06T08:22:06Z",
+    "r": "2026-11-06T08:22:07Z"
+   },
+   "whole_run": {
+    "h": true,
+    "r": true
+   }
+  },
+  {
+   "step": "canary_scan",
+   "ok": true,
+   "h_files": 3,
+   "hits": {
+    "h": [],
+    "r": [],
+    "audit": []
+   },
+   "r_shell_error": null
+  },
+  {
+   "step": "teardown",
+   "ok": true,
+   "rpc_server": "",
+   "bad_listeners": []
+  }
+ ]
+}

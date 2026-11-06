@@ -1,0 +1,80 @@
+[
+ {
+  "model": "R1a",
+  "prompt": 1,
+  "per_token": {
+   "to_r": 17021.625,
+   "to_h": 3592.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.749,
+   "to_h": 1.002
+  }
+ },
+ {
+  "model": "R1a",
+  "prompt": 2,
+  "per_token": {
+   "to_r": 17021.625,
+   "to_h": 3592.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.749,
+   "to_h": 1.002
+  }
+ },
+ {
+  "model": "R1a",
+  "prompt": 3,
+  "per_token": {
+   "to_r": 17021.625,
+   "to_h": 3592.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.749,
+   "to_h": 1.002
+  }
+ },
+ {
+  "model": "R1b",
+  "prompt": 1,
+  "per_token": {
+   "to_r": 25173.125,
+   "to_h": 6152.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.097,
+   "to_h": 1.001
+  }
+ },
+ {
+  "model": "R1b",
+  "prompt": 2,
+  "per_token": {
+   "to_r": 25173.125,
+   "to_h": 6152.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.097,
+   "to_h": 1.001
+  }
+ },
+ {
+  "model": "R1b",
+  "prompt": 3,
+  "per_token": {
+   "to_r": 25173.125,
+   "to_h": 6152.0,
+   "turns": 1.0
+  },
+  "ratio_to_hidden_x4": {
+   "to_r": 4.097,
+   "to_h": 1.001
+  }
+ }
+]

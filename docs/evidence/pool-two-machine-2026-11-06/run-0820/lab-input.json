@@ -1,0 +1,203 @@
+{
+ "link": "wifi",
+ "runs": [
+  {
+   "model": "R1a",
+   "config": "P",
+   "kind": "split",
+   "prompt": 1,
+   "prompt_tokens": 44,
+   "ttft_ms": 153.6,
+   "tpot_ms": 38.583,
+   "counters": {
+    "loaded": {
+     "to_r": 191503503,
+     "to_h": 176772,
+     "switches": 98
+    },
+    "after_n1": {
+     "to_r": 192003205,
+     "to_h": 334476,
+     "switches": 100
+    },
+    "after_n65": {
+     "to_r": 193592291,
+     "to_h": 722068,
+     "switches": 230
+    }
+   }
+  },
+  {
+   "model": "R1a",
+   "config": "P",
+   "kind": "split",
+   "prompt": 2,
+   "prompt_tokens": 50,
+   "ttft_ms": 349.4,
+   "tpot_ms": 33.997,
+   "counters": {
+    "loaded": {
+     "to_r": 194356861,
+     "to_h": 901340,
+     "switches": 240
+    },
+    "after_n1": {
+     "to_r": 194924315,
+     "to_h": 1080548,
+     "switches": 242
+    },
+    "after_n65": {
+     "to_r": 196581153,
+     "to_h": 1489644,
+     "switches": 372
+    }
+   }
+  },
+  {
+   "model": "R1a",
+   "config": "P",
+   "kind": "split",
+   "prompt": 3,
+   "prompt_tokens": 47,
+   "ttft_ms": 140.6,
+   "tpot_ms": 36.992,
+   "counters": {
+    "loaded": {
+     "to_r": 197311847,
+     "to_h": 1658164,
+     "switches": 382
+    },
+    "after_n1": {
+     "to_r": 197845425,
+     "to_h": 1826620,
+     "switches": 384
+    },
+    "after_n65": {
+     "to_r": 199468387,
+     "to_h": 2224964,
+     "switches": 514
+    }
+   }
+  },
+  {
+   "model": "R1a",
+   "kind": "local",
+   "prompt": 1,
+   "ttft_ms": 39.9,
+   "tpot_ms": 10.453
+  },
+  {
+   "model": "R1a",
+   "kind": "local",
+   "prompt": 2,
+   "ttft_ms": 29.7,
+   "tpot_ms": 10.355
+  },
+  {
+   "model": "R1a",
+   "kind": "local",
+   "prompt": 3,
+   "ttft_ms": 31.5,
+   "tpot_ms": 11.331
+  },
+  {
+   "model": "R1b",
+   "config": "P",
+   "kind": "split",
+   "prompt": 1,
+   "prompt_tokens": 44,
+   "ttft_ms": 306.6,
+   "tpot_ms": 49.017,
+   "counters": {
+    "loaded": {
+     "to_r": 403341238,
+     "to_h": 302189,
+     "switches": 110
+    },
+    "after_n1": {
+     "to_r": 404178860,
+     "to_h": 572533,
+     "switches": 112
+    },
+    "after_n65": {
+     "to_r": 406627562,
+     "to_h": 1236605,
+     "switches": 242
+    }
+   }
+  },
+  {
+   "model": "R1b",
+   "config": "P",
+   "kind": "split",
+   "prompt": 2,
+   "prompt_tokens": 50,
+   "ttft_ms": 345.1,
+   "tpot_ms": 51.77,
+   "counters": {
+    "loaded": {
+     "to_r": 407806308,
+     "to_h": 1543877,
+     "switches": 252
+    },
+    "after_n1": {
+     "to_r": 408757762,
+     "to_h": 1851085,
+     "switches": 254
+    },
+    "after_n65": {
+     "to_r": 411320296,
+     "to_h": 2552021,
+     "switches": 384
+    }
+   }
+  },
+  {
+   "model": "R1b",
+   "config": "P",
+   "kind": "split",
+   "prompt": 3,
+   "prompt_tokens": 47,
+   "ttft_ms": 305.1,
+   "tpot_ms": 51.667,
+   "counters": {
+    "loaded": {
+     "to_r": 412442126,
+     "to_h": 2840861,
+     "switches": 394
+    },
+    "after_n1": {
+     "to_r": 413336664,
+     "to_h": 3129637,
+     "switches": 396
+    },
+    "after_n65": {
+     "to_r": 415842282,
+     "to_h": 3812141,
+     "switches": 526
+    }
+   }
+  },
+  {
+   "model": "R1b",
+   "kind": "local",
+   "prompt": 1,
+   "ttft_ms": 108.4,
+   "tpot_ms": 16.842
+  },
+  {
+   "model": "R1b",
+   "kind": "local",
+   "prompt": 2,
+   "ttft_ms": 95.7,
+   "tpot_ms": 19.594
+  },
+  {
+   "model": "R1b",
+   "kind": "local",
+   "prompt": 3,
+   "ttft_ms": 112.2,
+   "tpot_ms": 18.167
+  }
+ ]
+}

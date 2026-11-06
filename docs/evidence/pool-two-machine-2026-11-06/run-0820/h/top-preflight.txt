@@ -1,0 +1,6 @@
+ %CPU   PID COMM
+ 50.7 26204 /usr/libexec/duetexpertd
+ 42.2   396 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 28.6 36773 /usr/libexec/triald
+ 22.0   323 /usr/libexec/logd
+ 20.8   352 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds

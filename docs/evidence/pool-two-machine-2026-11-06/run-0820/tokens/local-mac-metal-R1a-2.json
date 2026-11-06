@@ -1,0 +1,10 @@
+{
+ "text": " The process of a river carving a canyon over millions of years is a fascinating geological process that involves several key factors. Firstly, the river must have a sufficient flow to create enough water pressure to erode the rock and soil. Secondly, the river must have a sufficient gradient to carve the canyon. Thirdly, the river must",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 50,
+  "total_tokens": 115
+ },
+ "ttft_ms": 29.7,
+ "tpot_ms": 10.355
+}

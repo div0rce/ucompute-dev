@@ -1,0 +1,11 @@
+{
+ "text": " The process of a river carving a canyon over millions of years is a fascinating geological process that involves several key factors. The river's flow and velocity determine how much water it can carry, and the type of rock it can carry depends on the type of rock in the area. As the river flows, it erodes the rock",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 50,
+  "total_tokens": 115
+ },
+ "ttft_ms": 349.4,
+ "tpot_ms": 33.997,
+ "target": "split:98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf"
+}

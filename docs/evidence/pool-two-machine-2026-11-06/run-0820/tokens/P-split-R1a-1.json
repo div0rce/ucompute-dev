@@ -1,0 +1,11 @@
+{
+ "text": " The lighthouse keeper, a man named John, had been working at the lighthouse for years. He had seen many ships pass by, but never one that had a message in a bottle. He had always assumed that the lighthouse was just a place where people could take a break and rest. But one day, he",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 44,
+  "total_tokens": 109
+ },
+ "ttft_ms": 153.6,
+ "tpot_ms": 38.583,
+ "target": "split:98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf"
+}

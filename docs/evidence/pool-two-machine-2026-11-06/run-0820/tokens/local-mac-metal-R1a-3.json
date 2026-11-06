@@ -1,0 +1,10 @@
+{
+ "text": " The first tip is to water your houseplants regularly. The second tip is to fertilize them with a balanced fertilizer once a month. The third tip is to prune them to encourage new growth and prevent disease. \n\n1. Water your houseplants regularly. This is the first practical tip for keeping houseplants healthy during winter.",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 47,
+  "total_tokens": 112
+ },
+ "ttft_ms": 31.5,
+ "tpot_ms": 11.331
+}

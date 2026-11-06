@@ -1,0 +1,91 @@
+{
+ "utc": "2026-11-06T08:22:02Z",
+ "commit": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+ "ping": "PING 192.168.1.167 (192.168.1.167): 56 data bytes\n\n--- 192.168.1.167 ping statistics ---\n5 packets transmitted, 5 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 6.010/7.006/9.031/1.067 ms\n",
+ "h": {
+  "/health": {
+   "commit": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+   "status": "ok",
+   "version": "0.1.1"
+  },
+  "/api/status": {
+   "engine": {
+    "last_exit": null,
+    "loading_for_ms": null,
+    "loading_model_id": null,
+    "state": "idle"
+   },
+   "loaded": null,
+   "queue": {
+    "inflight": 0,
+    "max_concurrent": 4,
+    "max_queue": 32,
+    "queued": 0
+   },
+   "split": null,
+   "uptime_seconds": 71,
+   "version": "0.1.1"
+  },
+  "/api/network": {
+   "connections": 0,
+   "device_name": "mous",
+   "dial_addr": "192.168.1.176:18420",
+   "enabled": true,
+   "listen_addr": "0.0.0.0:18420",
+   "local_priority": "refuse_new",
+   "mdns": true,
+   "peer_id": "d5ef0ca88a68ca5477b2d46b0de8615109dcc904cc0d58a0226a33b13e9dc963",
+   "peer_quota": {
+    "max_concurrent": 4,
+    "requests_per_minute": 120,
+    "tokens_per_minute": 200000
+   },
+   "peer_slots": 3,
+   "serve_peers": false,
+   "short_label": "d5ef-0ca8-8a68"
+  }
+ },
+ "r": {
+  "/health": {
+   "commit": "1038a7f126e7d6e0204b67621332cbf1cc80e595",
+   "status": "ok",
+   "version": "0.1.1"
+  },
+  "/api/status": {
+   "engine": {
+    "last_exit": null,
+    "loading_for_ms": null,
+    "loading_model_id": null,
+    "state": "idle"
+   },
+   "loaded": null,
+   "queue": {
+    "inflight": 0,
+    "max_concurrent": 4,
+    "max_queue": 32,
+    "queued": 0
+   },
+   "split": null,
+   "uptime_seconds": 73,
+   "version": "0.1.1"
+  },
+  "/api/network": {
+   "connections": 0,
+   "device_name": "sentinel",
+   "dial_addr": "192.168.1.167:8193",
+   "enabled": true,
+   "listen_addr": "0.0.0.0:8193",
+   "local_priority": "refuse_new",
+   "mdns": true,
+   "peer_id": "98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf",
+   "peer_quota": {
+    "max_concurrent": 4,
+    "requests_per_minute": 120,
+    "tokens_per_minute": 200000
+   },
+   "peer_slots": 3,
+   "serve_peers": true,
+   "short_label": "98a1-b870-fe30"
+  }
+ }
+}

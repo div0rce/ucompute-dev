@@ -1,0 +1,10 @@
+{
+ "text": " The lighthouse keeper, John, had been on his post for years, watching over the vast ocean and the ships that sailed through it. He had seen it all - the calm seas, the stormy weather, and the occasional message in a bottle. But this one was different. It was a message in a bottle,",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 44,
+  "total_tokens": 109
+ },
+ "ttft_ms": 108.4,
+ "tpot_ms": 16.842
+}
