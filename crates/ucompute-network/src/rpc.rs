@@ -316,6 +316,10 @@ fn trip_error(t: Trip) -> UComputeError {
             ErrorCode::PolicyDenied,
             format!("graph op {op} is not allowed in a pooled session"),
         ),
+        Trip::GraphNode => UComputeError::new(
+            ErrorCode::PolicyDenied,
+            "a null graph node is not allowed in a pooled session",
+        ),
         Trip::GraphTooLarge { size } => UComputeError::new(
             ErrorCode::FrameTooLarge,
             format!("an RPC graph of {size} bytes is over the pooled session's bound"),
@@ -329,6 +333,7 @@ fn trip_outcome(t: Trip) -> &'static str {
         Trip::ByteCap { .. } => "byte_cap",
         Trip::Command { .. } => "refused_command",
         Trip::GraphOp { .. } => "refused_graph_op",
+        Trip::GraphNode => "refused_graph_node",
         Trip::GraphTooLarge { .. } => "refused_graph_size",
     }
 }
@@ -1203,7 +1208,8 @@ async fn serve_session(
                 _ = &mut h_end => {
                     tell_h = false;
                     let lost = conn.conn.close_reason().map(|r| map_conn_error(&r));
-                    shared.end(lost.unwrap_or_else(|| UComputeError::new(ErrorCode::PeerLost, "the head ended the pooled session")));
+                    // the connection still up: H closed it on purpose, so this is no failure (H's line has its reason)
+                    shared.end(lost.unwrap_or_else(|| UComputeError::new(ErrorCode::Cancelled, "the head ended the pooled session")));
                     break;
                 }
                 _ = tick.tick() => {

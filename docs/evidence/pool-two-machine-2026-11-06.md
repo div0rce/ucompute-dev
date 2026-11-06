@@ -1,7 +1,8 @@
 # WP-04 P1: one model split across two physical machines, 2026-11-06 — TWO-MACHINE, partial
 
-This Mac (H: MacBook Air, Apple M2, 8 GB, Metal) and sentinel (R: Ubuntu 26.04 x86_64, i9-9900K, CPU), home Wi-Fi, RTT
-6.0/7.0/9.0 ms, commit 1038a7f on both hosts (`/health` and R's tree equal HEAD). Run folder
+This Mac (H: MacBook Air, Apple M2, 8 GB, Metal) and sentinel (R: Ubuntu 26.04 x86_64, i9-9900K, CPU), home Wi-Fi (ICMP
+6.0/7.0/9.0 ms before the run, `manifest.json`; the QUIC connection's smoothed RTT 8.2/12.0/55.0 ms across the 18 checkpoints
+during it, the Core Lab's reading), commit 1038a7f on both hosts (`/health` and R's tree equal HEAD). Run folder
 `pool-two-machine-2026-11-06/run-0820`, 08:20:51–08:27:12 UTC, `tests/distributed/two_machine/split_two_machine.py`:
 **23 steps, 0 FAIL.** First genuine execution of one model across two independent machines in this project: each
 machine ran only its own layers, activations crossed UCompute's authenticated, encrypted transport, and tokens came back.
@@ -11,7 +12,7 @@ This is P1's automated part. It is not the whole of P1 and does not satisfy Gate
 ## The run started on the owner's instruction, with two gates lifted
 
 Registered preflight (`split_prereg.json`): this Mac on AC, at least 3.0 GB free, 1-minute load below 2.0 for 300 s. At
-start the Mac was on AC with 1.05 GB free and a load near 20 (a release build had just finished). The owner said in the
+start the Mac was on AC with 1.34 GB free at the preflight (1,336,344,576 B) and a load of 12.7–20.6 (a release build had just finished). The owner said in the
 engineering session on 2026-11-06, "no just start it". Amendment, written before any generation and kept in the run
 (`prereg.json`, `amendment_owner_start`): `h_free_min_bytes` 3.0 GB → 0, `h_load_max` 2.0 → 99, `quiet_s` 300 → 60.
 R's load limit, AC power, same commit, no other sessions and everything after preflight stayed as registered. The
@@ -47,6 +48,22 @@ the runner did not start it.
 **Tokens.** The prefix differences are the expected Metal head with an x86 CPU stage (ADR-0005 D10, OD-3; the lab's
 near-ties in S1-M): the text is valid, and not identical to a Metal-only run. F-03-04's criterion is same-backend, so this
 run does not meet it; configuration C (P1.4) is what speaks to it.
+
+## Independent score (Core Lab, 2026-11-06)
+
+`p1-predictions/RESULT-run-0820.md`, lab commit ce00165: **bytes, turns and placement PASS on all six runs; 4 of 4 denials
+typed; 3 of 3 canaries sent and 0 found in the 22 committed files; timing has no verdict under D-033.** The lab recomputed
+the byte figures from the raw counters and reproduced `lab-score.json` exactly. Its reading of that file's
+`ramp_down_on_real_hardware: supported`: not a result of this run. The field only compares TPOT with registered values, and
+with local Metal in the same run ×1.19–×1.20 slower than registered, the model allows ρ 1.65–2.86 (R1a) and 1.28–2.33 (R1b):
+compatible with 2.5, not a measurement of it.
+
+Facts of this loaded Mac, not typical values (lab): split TPOT ×3.54 and ×2.84 local Metal; tunnel upload goodput
+36.6–42.4 Mbit/s against the 100 and 300 the planner was shown; a split load takes 36–86 s because every load uploads
+weights R already holds; tunnel overhead +3.5 % on real Wi-Fi.
+
+**Defect found by the lab, fixed after this run:** every session closed `cancelled` on H and `peer_lost` on R, so R's audit
+read each clean close as a failure. R now records `cancelled` when H ends a session with the connection up.
 
 ## Still owed before milestone B and Gate D
 

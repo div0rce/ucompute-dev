@@ -1116,11 +1116,15 @@ async fn stage_close(p: &Pool, outcome: &str) -> serde_json::Value {
 /// A GRAPH_COMPUTE payload of b11609 (`| device u32 | uid u64 | n_nodes u32 | nodes u64 * n |
 /// n_tensors u32 | rpc_tensor (296 B) * n |`) with one tensor per op; `op` sits at byte 52.
 fn graph(ops: &[u32]) -> Vec<u8> {
+    graph_of(1, ops)
+}
+
+fn graph_of(node: u64, ops: &[u32]) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend(0u32.to_le_bytes());
     p.extend(7u64.to_le_bytes());
     p.extend(1u32.to_le_bytes());
-    p.extend(1u64.to_le_bytes());
+    p.extend(node.to_le_bytes());
     p.extend((ops.len() as u32).to_le_bytes());
     for (i, op) in ops.iter().enumerate() {
         let mut t = vec![0u8; 296];
@@ -1173,6 +1177,27 @@ async fn stage_refuses_a_function_pointer_graph_from_a_hostile_head_single_host(
     assert!(e.message.contains("graph op 95"), "{e}");
     assert!(s.counters().to_r < 33 + g.len() as u64, "{:?}", s.counters());
     assert!(closed_within(&mut c, Duration::from_secs(5)).await);
+}
+
+/// R refuses a graph with a null top-level node (CVE-2026-78148) from a head that bypasses H's
+/// bridge: rpc-server never gets the graph's last byte, so it is not crashed by it.
+#[tokio::test]
+async fn stage_refuses_a_null_graph_node_from_a_hostile_head_single_host() {
+    let Some(p) = pool().await else { return };
+    let g = graph_of(0, &[1]);
+    let s = p.open(spec()).await.unwrap();
+    let (mut send, mut recv) = raw_tunnel(&p, &s).await;
+    raw_hello(&mut send, &mut recv).await;
+    send.write_all(&g).await.unwrap();
+    let e = failure_within(&s, Duration::from_secs(5)).await;
+    assert_eq!(e.code, ErrorCode::PolicyDenied, "R's reason: {e}");
+    assert!(e.message.contains("null graph node"), "{e}");
+    let close = stage_close(&p, "refused_graph_node").await;
+    let to_r = close["fields"]["to_r"].as_u64().unwrap();
+    assert!(
+        (33..33 + g.len() as u64).contains(&to_r),
+        "rpc-server got HELLO and not the whole graph: {close}"
+    );
 }
 
 /// Every command a REAL b11609 session sent (lab R0 configuration A, the meter's fixture: 14
@@ -1571,6 +1596,10 @@ async fn head_that_never_reads_cannot_pin_the_stage_single_host() {
         .collect();
     // read session, TTL (reason not delivered), well-behaved, accept not delivered, well-behaved
     assert_eq!(reasons[1], "timeout", "{reasons:?}");
+    assert_eq!(
+        reasons[2], "cancelled",
+        "a well-behaved head's close is no failure: {reasons:?}"
+    );
     assert_eq!(reasons[3], "peer_lost", "{reasons:?}");
 }
 
