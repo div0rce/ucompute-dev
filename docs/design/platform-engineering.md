@@ -26,8 +26,8 @@ computing, with AI inference as the first workload. Working inference is not rew
 **Interfaces.** Core Lab supplies independently tested algorithms, measurements and reviews; Engineering owns production
 adoption. Website & DevEx consumes verified interfaces, packages and release documentation; Engineering owns the runtime and
 SDK implementations. Growth consumes approved claims and evidence and does not decide whether a capability ships.
-Program Control tracks dependencies and blocked handoffs and does not direct code; its repository is empty today, so
-this file and `critical-path.md` are what it reads.
+Program Control tracks dependencies and blocked handoffs in its own repository (`HANDOFFS.md`, `DEPENDENCIES.md`) and does not
+direct code; it reads this file and `critical-path.md`.
 
 **Operating rules.** Owner decisions and security gates stand. Reviewable branches and PRs, no rewritten history. Private
 pushes, public source publication, installer distribution and release approval are separate authorizations. No claim without
@@ -44,6 +44,15 @@ task by product impact, security risk, critical-path dependency and verified use
 | Linux reliability | Milestone C met at d3b178b: 24 h soak PASS with documented interference, tarball ALL PASS 16/16 |
 | Windows acceptance | Blocked: the laptop is off the network. App ALL PASS 13/13 at 77262a5 under the old name; nothing on renamed builds |
 | Private-alpha restrictions | Unchanged. Candidate 2 (0.1.1) published to the owner's Access cohort (D-031). It predates 578999f and D-026, so the next candidate carries them and needs its own record and approval |
+
+## Decisions on Core Lab findings (2026-11-06, HO-010)
+
+| Finding | Decision | Reason |
+|---|---|---|
+| LF-2: replace the null-node check with a membership check | **Declined** | At b11609 the server already refuses undeclared non-zero ids (`graph_compute`), so id 0 is the only gap and it is closed. The wider check adds code and a false-refusal risk with no protection at this pin. Revisit on any pin change, when the filter is re-derived anyway |
+| LF-3: Mode B on the same prompts in the next physical run | **Adopted** | One comparison settles the split's value against remote execution, and it is cheap to add to the run |
+| LF-4: every split load re-uploads weights R holds, 36–86 s against 2.1 s local | **Deferred to WP-05** | The cache is rpc-server's `-c`, which writes files on R at a client's word and which C3 refuses by design. A weight cache needs a security design of its own first |
+| LF-5: tunnel upload 37–42 Mbit/s against the 100 and 300 the planner was shown | **Adopted as a planning input** | A fact of this Wi-Fi under load, not a typical value. WP-05 takes bandwidth from F-02-07 measurements, never a default |
 
 ## Backlog, dependency order
 
