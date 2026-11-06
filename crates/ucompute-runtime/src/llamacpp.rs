@@ -101,7 +101,17 @@ impl LlamaCppBackend {
         if let (Some(split), Some(pid)) = (&req.split, child.id()) {
             split.engine_pid.set(pid);
         }
-        let client = reqwest::Client::builder().no_proxy().build().map_err(transport)?;
+        // No idle connection reuse: a pooled loopback connection the engine (cpp-httplib) has
+        // meanwhile closed fails the next request with "connection closed before message completed",
+        // which can only be reported as backend_failed. Measured SINGLE-HOST on sentinel, 2026-10-31:
+        // 0.53-0.56 % of admitted burst requests with reuse, 0 without; the Linux soak's 0.51 % has
+        // the same code, rate and burst shape, but it recorded no causes, so that link is inferred.
+        // A fresh loopback connection per request costs well under 1 ms.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .pool_max_idle_per_host(0)
+            .build()
+            .map_err(transport)?;
         if let Err(e) = process::wait_ready(&mut child, &client, port, deadline, &log_path, &api_key).await {
             process::stop(child).await;
             return Err(e);
@@ -341,7 +351,9 @@ impl LoadedLlama {
         }
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        Err(map_http_error(status, &body, &self.api_key))
+        let e = map_http_error(status, &body, &self.api_key);
+        tracing::debug!(status, body = %logparse::scrub(&body.chars().take(300).collect::<String>(), &self.api_key), code = e.code.as_str(), "engine refused a request");
+        Err(e)
     }
 
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
@@ -385,7 +397,17 @@ impl LoadedModel for LoadedLlama {
             PromptInput::Chat(messages) => ("/v1/chat/completions", chat_body(&req, messages), true),
         };
         let sent = Instant::now();
-        let resp = self.post(path, &body).await?;
+        // The first-token clock runs from submit (F-08-08): it bounds the wait for the engine's
+        // response headers here (the client has no timeout of its own), and what is left of it
+        // the wait for the first token in `StreamState::next`.
+        let resp = tokio::time::timeout(req.timeouts.first_token, self.post(path, &body))
+            .await
+            .map_err(|_| {
+                UComputeError::new(
+                    ErrorCode::Timeout,
+                    "the engine did not answer within the first-token timeout",
+                )
+            })??;
         let state = StreamState {
             resp: Some(resp),
             parser: sse::SseParser::default(),
@@ -513,7 +535,23 @@ fn parse_embeddings(v: &Value, n: usize) -> Result<Vec<Vec<f32>>> {
 }
 
 fn transport(e: reqwest::Error) -> UComputeError {
-    UComputeError::new(ErrorCode::BackendFailed, format!("engine HTTP transport failed: {e}"))
+    UComputeError::new(
+        ErrorCode::BackendFailed,
+        format!("engine HTTP transport failed: {}", chain(&e)),
+    )
+}
+
+/// `reqwest::Error` displays only its kind ("error sending request for url ..."); the cause (a
+/// reset, a connection closed before the response, a refused connect) is in its source chain,
+/// and a `backend_failed` must name it to be attributable (Linux soak, 2026-10-29).
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        msg.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    msg
 }
 
 /// Map an engine error reply. `err` is the `error` object of the body (or Null).
@@ -758,7 +796,7 @@ impl StreamState {
             let resp = self.resp.as_mut()?;
             let first = self.first_token_at.is_none();
             let per_item = if first {
-                self.timeouts.first_token
+                self.timeouts.first_token.saturating_sub(self.sent.elapsed())
             } else {
                 self.timeouts.inter_token
             };
@@ -767,7 +805,7 @@ impl StreamState {
                 _ = self.cancel.cancelled() => Err(UComputeError::new(ErrorCode::Cancelled, "generation cancelled")),
                 r = tokio::time::timeout(wait, resp.chunk()) => match r {
                     Err(_) => Err(UComputeError::new(ErrorCode::Timeout, if first { "no first token within the first-token timeout" } else { "no token within the inter-token timeout" })),
-                    Ok(Err(e)) => Err(UComputeError::new(ErrorCode::BackendFailed, format!("engine stream failed: {e}"))),
+                    Ok(Err(e)) => Err(UComputeError::new(ErrorCode::BackendFailed, format!("engine stream failed: {}", chain(&e)))),
                     Ok(Ok(None)) => Err(UComputeError::new(ErrorCode::BackendFailed, "engine closed the stream before signalling completion")),
                     Ok(Ok(Some(bytes))) => Ok(bytes),
                 },
@@ -1284,8 +1322,29 @@ http.server.HTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_fo
 
         let model = against_fake_engine(stalled_engine(0).await);
         let t = Instant::now();
-        let mut s = model.generate(req, CancellationToken::new()).await.unwrap();
+        let mut s = model.generate(req.clone(), CancellationToken::new()).await.unwrap();
         let e = s.next().await.unwrap().unwrap_err();
+        assert_eq!(e.code, ErrorCode::Timeout, "{e}");
+        assert!(e.message.contains("first-token"), "{e}");
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+
+        // FAKE engine (not llama-server): accepts every connection and never writes a byte, as an
+        // engine whose HTTP workers are all taken does to a queued connection. Before the bound in
+        // `generate` this wait had no timer at all (the outer 3 s turns such a hang into a failure).
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = l.accept().await {
+                held.push(sock);
+            }
+        });
+        let model = against_fake_engine(port);
+        let t = Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(3), model.generate(req, CancellationToken::new()))
+            .await
+            .expect("the wait for the engine's answer is bounded");
+        let e = r.err().expect("no stream from an engine that never answered");
         assert_eq!(e.code, ErrorCode::Timeout, "{e}");
         assert!(e.message.contains("first-token"), "{e}");
         assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());

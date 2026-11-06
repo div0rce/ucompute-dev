@@ -150,6 +150,7 @@ export const NETWORK: NetworkState = {
   dial_addr: null,
   peer_quota: { requests_per_minute: 60, tokens_per_minute: 20000, max_concurrent: 3 },
   peer_slots: 3,
+  local_priority: "refuse_new",
 };
 /** What the daemon reports while the endpoint is bound. */
 export const NETWORK_ON: NetworkState = { ...NETWORK, enabled: true, listen_addr: "0.0.0.0:8193", mdns: true, dial_addr: "192.168.1.10:8193" };
@@ -410,9 +411,9 @@ export function installFakeDaemon(
     // Peer networking (ADR-0003 / F-10-05 / F-10-10).
     if (path === "/api/network" && method === "GET") return json(fake.network);
     if (path === "/api/network" && method === "PUT") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled?: boolean; serve_peers?: boolean };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled?: boolean; serve_peers?: boolean; local_priority?: NetworkState["local_priority"] };
       const enabled = body.enabled ?? fake.network.enabled;
-      fake.network = { ...(enabled ? NETWORK_ON : NETWORK), peer_id: fake.network.peer_id, short_label: fake.network.short_label, serve_peers: body.serve_peers ?? fake.network.serve_peers };
+      fake.network = { ...(enabled ? NETWORK_ON : NETWORK), peer_id: fake.network.peer_id, short_label: fake.network.short_label, serve_peers: body.serve_peers ?? fake.network.serve_peers, local_priority: body.local_priority ?? fake.network.local_priority };
       return json(fake.network);
     }
     if (path === "/api/peers" && method === "GET") return json({ peers: fake.peers.map(withGroups), discovered: fake.network.enabled ? fake.discovered : [], revocations: fake.revocations });

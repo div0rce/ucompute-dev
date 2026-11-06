@@ -1,0 +1,11 @@
+{
+ "text": " The first tip is to water your houseplants regularly. The second tip is to fertilize them with a balanced fertilizer once a month. The third tip is to prune them to encourage new growth and prevent disease. \n\n1. Water your houseplants regularly. This is the first tip. Watering your houseplants regularly is crucial",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 47,
+  "total_tokens": 112
+ },
+ "ttft_ms": 140.6,
+ "tpot_ms": 36.992,
+ "target": "split:98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf"
+}

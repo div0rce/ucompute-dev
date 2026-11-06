@@ -19,7 +19,10 @@
 //! - **Graph ops**: a `GRAPH_COMPUTE` node whose op carries a function pointer (`MAP_CUSTOM1..3`,
 //!   `CUSTOM`) or is not an op at all trips the tunnel before the payload's last byte. R copies
 //!   `op` and `op_params` unchecked (`deserialize_tensor`), and its CPU backend calls the pointer
-//!   (`ggml_compute_forward_custom`).
+//!   (`ggml_compute_forward_custom`). CVE-2026-78147; present in b11609 and upstream master.
+//! - **Graph nodes**: a top-level node id of 0 trips the tunnel the same way. `graph_compute` lets it
+//!   through as a null node and the backend dereferences it (CVE-2026-78148; upstream PR 25670 is
+//!   unmerged). The b11609 client never sends one: id 0 means "no source" only inside a tensor.
 //!
 //! **Run it on R's side too.** R must not trust H: R's pump calls `on_chunk(.., Dir::ToR, ..)` on
 //! the bytes from the tunnel before writing them to rpc-server. A refused chunk is never written.
@@ -104,6 +107,8 @@ pub enum Trip {
     GraphOp {
         op: u32,
     },
+    /// A top-level graph node with id 0, which R would run as a null node.
+    GraphNode,
     GraphTooLarge {
         size: u64,
     },
@@ -228,7 +233,8 @@ impl Tunnel {
     }
 }
 
-/// The op of every tensor R would deserialize from a `GRAPH_COMPUTE` payload, laid out as
+/// Every top-level node id and the op of every tensor R would deserialize from a `GRAPH_COMPUTE`
+/// payload, laid out as
 /// `| device u32 | uid u64 | n_nodes u32 | nodes u64 * n_nodes | n_tensors u32 | rpc_tensor * n_tensors |`.
 /// A payload too short for its counts is not checked further: R refuses it unread.
 fn check_graph(p: &[u8]) -> Result<(), Trip> {
@@ -239,6 +245,10 @@ fn check_graph(p: &[u8]) -> Result<(), Trip> {
     let Some(n_nodes) = u32_at(12) else { return Ok(()) };
     let at = 16 + n_nodes as usize * 8;
     let Some(n_tensors) = u32_at(at) else { return Ok(()) };
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    if p[16..at].chunks_exact(8).any(|id| id.iter().all(|b| *b == 0)) {
+        return Err(Trip::GraphNode);
+    }
     // `as_chunks` is Rust 1.88; the workspace's rust-version is 1.85
     #[allow(clippy::chunks_exact_to_as_chunks)]
     for t in p[at + 4..].chunks_exact(RPC_TENSOR).take(n_tensors as usize) {
@@ -261,10 +271,11 @@ mod tests {
         v
     }
 
-    // A REAL session (lab tools/rpc_capture.py, this Mac, b11609, 2026-10-24): R0 configuration A
-    // behind a recording proxy, every chunk in the proxy's read order with its real length and
-    // timing, payload bytes zeroed and the real command headers kept. K lines carry the proxy's own
-    // totals after the load, after n_predict 1 and after n_predict 65.
+    // A REAL session (lab tools/rpc_capture.py, this Mac, b11609; recaptured in lab 7de354b): R0
+    // configuration A behind a recording proxy, every chunk in the proxy's read order with its real
+    // length and timing, payload bytes zeroed except the real command headers and the real
+    // GRAPH_COMPUTE payloads (`g<offset>`). K lines carry the proxy's own totals after the load,
+    // after n_predict 1 and after n_predict 65.
     const R0A: &str = include_str!("fixtures/rpc-session-b11609-r0a.txt");
 
     #[test]
@@ -277,6 +288,7 @@ mod tests {
         // (the recorder located headers with the lab's Python parser; the meter re-parses the bytes)
         let (mut episodes, mut expected) = (0, 0);
         let mut implied: Vec<(usize, bool)> = Vec::new(); // per tunnel: header bytes still to come, armed
+        let (mut graphs, mut ops) = (0, std::collections::BTreeSet::new());
         for line in R0A.lines().filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split(' ').collect();
             if f[0] == "K" {
@@ -307,6 +319,14 @@ mod tests {
                     for i in 0..hex.len() / 2 {
                         chunk[off + i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
                     }
+                    // the ops the graph check will read (check_graph's layout; whole payloads)
+                    let p = &chunk[off..off + hex.len() / 2];
+                    let u32_at = |i: usize| u32::from_le_bytes(p[i..i + 4].try_into().unwrap());
+                    let at = 16 + u32_at(12) as usize * 8;
+                    for t in 0..u32_at(at) as usize {
+                        ops.insert(u32_at(at + 4 + t * RPC_TENSOR + OP_AT));
+                    }
+                    graphs += 1;
                     continue;
                 }
                 let off: usize = off.parse().unwrap();
@@ -343,7 +363,13 @@ mod tests {
         assert_eq!(per(loaded.to_r, one.to_r, full.to_r), 6696.765625);
         assert_eq!(per(loaded.to_h, one.to_h, full.to_h), 1159.25);
         assert_eq!(per(loaded.switches, one.switches, full.switches) / 2.0, 0.9609375);
-        // every command of the real session is in ALLOWED (on_chunk would have tripped above)
+        // every command of the real session is in ALLOWED and every op of its real graphs passes
+        // the graph check (on_chunk would have tripped above); the lab reads ops in 0-48, 74 and 100
+        assert_eq!(graphs, 3);
+        assert_eq!(
+            ops.into_iter().collect::<Vec<_>>(),
+            [0, 1, 2, 7, 25, 29, 36, 37, 38, 42, 48, 74, 100]
+        );
         // healthy on loopback: R never stays silent anywhere near T_rpc (10 s) while H waits on it
         assert!(longest < Duration::from_secs(1), "longest armed silence {longest:?}");
         // every compute or readback got its reply, the meter armed for each, and for nothing else:
@@ -413,6 +439,17 @@ mod tests {
             Ok(()),
             "an empty graph has nothing to refuse"
         );
+    }
+
+    #[test]
+    fn a_null_top_level_node_is_refused_before_the_graphs_last_byte() {
+        let mut g = graph(&[1]);
+        g[HEADER + 16..HEADER + 24].fill(0); // the one node id
+        let s = Session::new(1 << 40);
+        let (mut t, now) = (Tunnel::default(), Instant::now());
+        let (body, last) = g.split_at(g.len() - 1);
+        t.on_chunk(&s, Dir::ToR, body, now).unwrap();
+        assert_eq!(t.on_chunk(&s, Dir::ToR, last, now), Err(Trip::GraphNode));
     }
 
     #[test]

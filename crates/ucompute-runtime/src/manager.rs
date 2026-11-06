@@ -31,12 +31,14 @@ pub struct ModelManager {
     exits: std::sync::Mutex<Vec<Exit>>,
 }
 
-/// One unexpected engine exit, keyed by model and requested device: three failed `--device gpu`
-/// starts say nothing about the CPU engine. `code` and `hint` are the failure's own, so a model
-/// whose file breaks every start is still refused as `ModelFileInvalid`.
+/// One unexpected engine exit, keyed by model, requested device and split: three failed `--device
+/// gpu` starts say nothing about the CPU engine, and a split engine that died with its pooled
+/// session (WP-04: the peer went away) nothing about a local one. `code` and `hint` are the
+/// failure's own, so a model whose file breaks every start is still refused as `ModelFileInvalid`.
 struct Exit {
     model_id: String,
     device: DevicePreference,
+    split: bool,
     at: Instant,
     code: ErrorCode,
     hint: Option<String>,
@@ -229,15 +231,23 @@ impl ModelManager {
         };
         tracing::warn!(model = %exit.model_id, pid = ?exit.pid, reason = %exit.reason, in_flight = exit.in_flight, "engine exited unexpectedly; slot freed, the next request starts it again");
         let device = s.opts.device.unwrap_or_else(|| self.default_device());
-        self.record_exit(exit, device, ErrorCode::BackendFailed, None);
+        self.record_exit(exit, device, s.opts.split.is_some(), ErrorCode::BackendFailed, None);
         lock(&self.view).loaded = None;
     }
 
     /// Count `exit` toward the restart bound and show it as the last exit.
-    fn record_exit(&self, exit: EngineExit, device: DevicePreference, code: ErrorCode, hint: Option<String>) {
+    fn record_exit(
+        &self,
+        exit: EngineExit,
+        device: DevicePreference,
+        split: bool,
+        code: ErrorCode,
+        hint: Option<String>,
+    ) {
         lock(&self.exits).push(Exit {
             model_id: exit.model_id.clone(),
             device,
+            split,
             at: Instant::now(),
             code,
             hint,
@@ -245,16 +255,16 @@ impl ModelManager {
         lock(&self.view).last_exit = Some(exit);
     }
 
-    /// Refused once `model_id`'s engine on `device` has exited [`MAX_RESTARTS`] times within
-    /// [`RESTART_WINDOW`], so a model that crashes on every start is not restarted in a loop:
-    /// the last exit's own code and hint when it named a cause (`ModelFileInvalid` for a broken
-    /// model file, `GpuUnavailable`), else `BackendFailed`.
-    fn restart_allowed(&self, model_id: &str, device: DevicePreference) -> Result<()> {
+    /// Refused once `model_id`'s engine on `device`, split or not, has exited [`MAX_RESTARTS`]
+    /// times within [`RESTART_WINDOW`], so a model that crashes on every start is not restarted in
+    /// a loop: the last exit's own code and hint when it named a cause (`ModelFileInvalid` for a
+    /// broken model file, `GpuUnavailable`), else `BackendFailed`.
+    fn restart_allowed(&self, model_id: &str, device: DevicePreference, split: bool) -> Result<()> {
         let mut exits = lock(&self.exits);
         exits.retain(|x| x.at.elapsed() < RESTART_WINDOW);
         let recent: Vec<&Exit> = exits
             .iter()
-            .filter(|x| x.model_id == model_id && x.device == device)
+            .filter(|x| x.model_id == model_id && x.device == device && x.split == split)
             .collect();
         let (Some(first), Some(last)) = (recent.first(), recent.last()) else {
             return Ok(());
@@ -323,7 +333,7 @@ impl ModelManager {
             refuse_if_busy(s, Arc::strong_count(&s.model) > 1)?;
         }
         let device = opts.device.unwrap_or_else(|| self.default_device());
-        self.restart_allowed(model_id, device)?;
+        self.restart_allowed(model_id, device, opts.split.is_some())?;
         let _loading = LoadingMark::new(&self.view, model_id);
         let (path, sha256) = self.resolve(model_id)?;
         // F-05-01: the bytes handed to the engine are the bytes the manifest promised. Hashing a
@@ -365,7 +375,7 @@ impl ModelManager {
                         in_flight: 0,
                         at_utc: ucompute_artifacts::store::utc_now(),
                     };
-                    self.record_exit(exit, device, e.code, e.hint.clone());
+                    self.record_exit(exit, device, opts.split.is_some(), e.code, e.hint.clone());
                 }
                 return Err(e);
             }
@@ -403,10 +413,10 @@ impl ModelManager {
 
     /// Stop the split engine whose `--rpc` ports are `rpc_ports`, in use or not: its pooled session
     /// has ended, so its requests fail with the session's reason anyway (ADR-0005 D7). Leaves any
-    /// other loaded model alone.
+    /// other loaded model alone. No `reap`: a split engine that already died with its session
+    /// (the peer's RPC reset) is not an unexpected exit, so it never counts toward the restart bound.
     pub async fn unload_split(&self, rpc_ports: &[u16]) -> Result<()> {
         let mut slot = self.loaded.lock().await;
-        self.reap(&mut slot);
         if slot
             .as_ref()
             .and_then(|s| s.opts.split.as_ref())
@@ -1355,6 +1365,51 @@ mod tests {
             m.status().await.is_some(),
             "a load that cannot fit the machine keeps the old engine"
         );
+    }
+
+    /// WP-04 (round 8 failure:F3): split engines that die with their session (the peer's RPC
+    /// reset aborts llama-server, during the load or after) never trip the bound of local loads of
+    /// that model, which Mode B shares; a split that dies on every start is still bounded on its
+    /// own. A dead split engine stopped by `unload_split` (its session ended) records no exit.
+    /// FAKE backend and engines, SYNTHETIC model.
+    #[tokio::test]
+    async fn split_exits_never_count_toward_the_local_restart_bound() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut m, backend) = fake_manager(
+            HardwareReport::default(),
+            Some("llama-server exited with signal: 6 (SIGABRT) before becoming ready:\nrpc"),
+        );
+        m.available_memory = || Some(1 << 30);
+        let split = LoadOptions {
+            split: Some(split3(50052)),
+            ..Default::default()
+        };
+        for _ in 0..MAX_RESTARTS {
+            m.ensure_loaded("tiny", split.clone()).await.err().unwrap();
+        }
+        let e = m.ensure_loaded("tiny", split).await.err().unwrap();
+        assert!(e.message.contains("3 times in the last 60 s"), "{e}");
+        assert_eq!(backend.loads.load(SeqCst), MAX_RESTARTS, "the split bound holds");
+        m.ensure_loaded("tiny", LoadOptions::default()).await.err().unwrap();
+        assert_eq!(
+            backend.loads.load(SeqCst),
+            MAX_RESTARTS + 1,
+            "a local load still starts"
+        );
+
+        let m = manager(HardwareReport::default());
+        for _ in 0..=MAX_RESTARTS {
+            let (mut s, dead) = mortal("a");
+            s.opts.split = Some(split3(50053));
+            *m.loaded.lock().await = Some(s);
+            dead.store(true, SeqCst);
+            m.unload_split(&[50053]).await.unwrap();
+            assert!(m.status().await.is_none(), "the dead split engine's slot is freed");
+        }
+        assert!(m.snapshot().last_exit.is_none(), "{:?}", m.snapshot().last_exit);
+        let device = m.default_device();
+        assert!(m.restart_allowed("a", device, true).is_ok());
+        assert!(m.restart_allowed("a", device, false).is_ok());
     }
 
     /// F-08-04: an engine that exits during its load counts toward [`MAX_RESTARTS`] like one that

@@ -10,7 +10,7 @@ import { refresh } from "../../state/live";
 import { chatHistory, daemon, lastError, privacy, runTarget, settings } from "../../state/stores";
 import { ui } from "../../state/ui";
 import { installFakeDaemon, NETWORK, NETWORK_ON, PEER, PEERS_E1 } from "../../test/mocks";
-import { KEPT, PAGES } from "./Settings";
+import { KEPT, LOCAL_PRIORITY, PAGES } from "./Settings";
 
 beforeEach(() => {
   daemon.set({ reachable: true, version: "0.1.0", status: null, spawned: false });
@@ -101,6 +101,37 @@ describe("Settings", () => {
     await screen.findByText("Sharing is on.");
     expect(puts(fake, "/api/network")).toEqual([{ enabled: true, serve_peers: true }]);
     expect(screen.getByText(/60 requests\/min · 20,000 tokens\/min · 3 at once/)).toBeTruthy();
+  });
+
+  it("Sharing: local priority (D-026) offers three plain choices, the default marked and checked, and applies by keyboard", async () => {
+    const user = userEvent.setup();
+    const fake = await open("sharing", { network: NETWORK_ON });
+    const group = await screen.findByRole("radiogroup", { name: "When this computer runs its own work on the processor" });
+    expect(document.getElementById(group.getAttribute("aria-describedby")!)!.textContent).toMatch(/model running on the CPU\. Models on the GPU are not affected\./);
+    const radios = within(group).getAllByRole("radio");
+    expect(radios.map((r) => r.getAttribute("value"))).toEqual(["refuse_new", "preempt", "none"]);
+    expect(LOCAL_PRIORITY.map((o) => o.label)).toEqual(["Finish their requests, take no new ones (default)", "Stop their requests", "Share the processor"]);
+    const def = within(group).getByRole("radio", { name: /Finish their requests, take no new ones \(default\)/ });
+    expect(def).toHaveProperty("checked", true);
+    expect(within(group).getByText(/turned away while your own work runs and for 2 seconds after/)).toBeTruthy();
+    expect(within(group).getByText(/stopped and they are told to try again later/)).toBeTruthy();
+    expect(within(group).getByText(/about a third to a half slower/)).toBeTruthy();
+    // Keyboard: focus the checked radio, arrow to the next choice; it applies at once.
+    def.focus();
+    await user.keyboard("{ArrowDown}");
+    await screen.findByText("Saved: stop their requests.");
+    expect(puts(fake, "/api/network")).toEqual([{ local_priority: "preempt" }]);
+    expect(fake.network.local_priority).toBe("preempt");
+    await waitFor(() => expect(within(group).getByRole("radio", { name: /Stop their requests/ })).toHaveProperty("checked", true));
+    await user.click(within(group).getByRole("radio", { name: /Share the processor/ }));
+    await screen.findByText("Saved: share the processor.");
+    expect(puts(fake, "/api/network")).toEqual([{ local_priority: "preempt" }, { local_priority: "none" }]);
+  });
+
+  it("Sharing: an older service without local_priority shows the default", async () => {
+    const { local_priority: _omitted, ...older } = NETWORK_ON;
+    await open("sharing", { network: older });
+    expect(await screen.findByRole("radio", { name: /\(default\)/ })).toHaveProperty("checked", true);
   });
 
   it.each(["network", "sharing"])("%s: last known service values are not shown as current while the service is not running", async (page) => {

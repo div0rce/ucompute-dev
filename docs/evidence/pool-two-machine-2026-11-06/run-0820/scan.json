@@ -1,0 +1,14 @@
+{
+ "canaries": [
+  "UCOMPUTE-CANARY-D5DFDB64E3AEB0AB",
+  "UCOMPUTE-CANARY-4F2DF3728656CA72",
+  "UCOMPUTE-CANARY-364003C269A56E40"
+ ],
+ "h_files_scanned": 3,
+ "hits": {
+  "h": [],
+  "r": [],
+  "audit": []
+ },
+ "r_shell_error": null
+}

@@ -19,6 +19,7 @@
 //! reload, no `Overloaded` for local requests), its engine-slot semaphore (a peer takes a free
 //! slot or is refused, it never queues ahead of local work) and a process-wide cap on peer
 //! generations. Error frames carry codes and this module's own messages, never local paths.
+use crate::local_priority::{on_cpu, LocalWork};
 use crate::proto::{
     control_message::Body, read_frame, write_frame, Cancel, ControlMessage, ErrorMsg, RemoteChunk, RemoteRequest,
 };
@@ -302,6 +303,9 @@ pub struct ServeOptions {
     /// This device as a pooled-inference stage host (WP-04); None refuses every pooled session
     /// after the policy check.
     pub rpc: Option<Arc<crate::rpc::Stage>>,
+    /// Local work first on CPU engines (D-026): the daemon's [`LocalWork`], shared with its local
+    /// requests. `None`: no local-priority rule (tests, CLI one-shots).
+    pub local: Option<Arc<LocalWork>>,
 }
 
 impl ServeOptions {
@@ -316,6 +320,7 @@ impl ServeOptions {
             engine_slots: None,
             jobs: Jobs::new(),
             rpc: None,
+            local: None,
         }
     }
 }
@@ -536,15 +541,33 @@ async fn execute(
     if *have != req.model_sha256 {
         return Err(integrity(&req.model_id, &req.model_sha256, have));
     }
+    // D-026: on a CPU engine, local work first (refused before any tokens are charged).
+    let cancel = CancellationToken::new();
+    let local = match &opts.local {
+        Some(w) if on_cpu(model.info()) => Some(w.peer_started(cancel.clone())?),
+        _ => None,
+    };
+    let preempted = |e: UComputeError| match &local {
+        Some(g) => g.map_err(e),
+        None => e,
+    };
     // ponytail: the whole max_tokens is charged up front (refused as Overloaded when the per-minute
     // budget cannot cover it); refund the unused part if quotas ever bite on LAN use.
     opts.quotas.charge_tokens(peer, u64::from(greq.max_tokens))?;
-    let cancel = CancellationToken::new();
     let _watcher = AbortOnDrop(tokio::spawn(watch_cancel(recv, cancel.clone())));
-    let mut stream = model.generate(greq, cancel.clone()).await?;
+    let mut stream = model.generate(greq, cancel.clone()).await.map_err(preempted)?;
     let mut usage = Usage::default();
     let outcome = loop {
-        let Some(ev) = stream.next().await else { break "ended" };
+        let Some(ev) = stream.next().await else {
+            if local.as_ref().is_some_and(|g| g.preempted()) {
+                let e = preempted(UComputeError::new(ErrorCode::Cancelled, "generation cancelled"));
+                job_event(job, &Err(e.clone()));
+                refuse(send, &e).await;
+                break e.code.as_str();
+            }
+            break "ended";
+        };
+        let ev = ev.map_err(preempted);
         job_event(job, &ev);
         match ev {
             Ok(ev) => {

@@ -149,7 +149,13 @@ export interface NetworkState {
   peer_quota: { requests_per_minute: number; tokens_per_minute: number; max_concurrent: number };
   /** Engine slots paired devices may use at once. */
   peer_slots: number;
+  /** D-026: what happens to paired devices' requests while this computer runs its own on the CPU. Older daemons omit it. */
+  local_priority?: LocalPriority;
 }
+
+/** D-026. `refuse_new` (the default): new requests from paired devices are turned away during local work on the CPU and
+ * for 2 s after; `preempt`: running ones are stopped too; `none`: no rule. */
+export type LocalPriority = "refuse_new" | "preempt" | "none";
 
 /** A pinned device as the daemon stores it (`ucompute_identity::PeerRecord`). */
 export interface PeerRecord {
@@ -596,7 +602,7 @@ export const api = {
   // Peer networking (ADR-0003). Every call below is refused by the daemon while networking is disabled,
   // except reading the state itself.
   network: (o?: ReqOpts) => get<NetworkState>("/api/network", o),
-  setNetwork: (body: { enabled: boolean; serve_peers: boolean }) =>
+  setNetwork: (body: { enabled?: boolean; serve_peers?: boolean; local_priority?: LocalPriority }) =>
     json<NetworkState>("/api/network", { method: "PUT", body: JSON.stringify(body) }),
   peers: async (o?: ReqOpts): Promise<Mesh> => {
     const m = await get<Partial<Mesh> & Pick<Mesh, "peers" | "discovered">>("/api/peers", o);

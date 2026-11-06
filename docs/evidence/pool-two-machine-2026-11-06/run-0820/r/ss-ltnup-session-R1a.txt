@@ -1,0 +1,21 @@
+udp UNCONN 0      0          127.0.0.1:55760 0.0.0.0:* users:(("ucompute",pid=1623479,fd=13))                               
+udp UNCONN 0      0            0.0.0.0:8193  0.0.0.0:* users:(("ucompute",pid=1623479,fd=10))                               
+udp UNCONN 0      0         127.0.0.54:53    0.0.0.0:*                                                                      
+udp UNCONN 0      0      127.0.0.53%lo:53    0.0.0.0:*                                                                      
+udp UNCONN 0      0          127.0.0.1:323   0.0.0.0:*                                                                      
+udp UNCONN 0      0          127.0.0.1:58336 0.0.0.0:* users:(("ucompute",pid=1623479,fd=17))                               
+udp UNCONN 0      0            0.0.0.0:5353  0.0.0.0:* users:(("ucompute",pid=1623479,fd=12),("ucompute",pid=1623479,fd=11))
+udp UNCONN 0      0            0.0.0.0:5353  0.0.0.0:* users:(("ucompute",pid=1623479,fd=21),("ucompute",pid=1623479,fd=20))
+udp UNCONN 0      0            0.0.0.0:5353  0.0.0.0:*                                                                      
+udp UNCONN 0      0              [::1]:323      [::]:*                                                                      
+udp UNCONN 0      0               [::]:5353     [::]:*                                                                      
+udp UNCONN 0      0                  *:5353        *:* users:(("ucompute",pid=1623479,fd=22),("ucompute",pid=1623479,fd=19))
+udp UNCONN 0      0                  *:5353        *:* users:(("ucompute",pid=1623479,fd=16),("ucompute",pid=1623479,fd=14))
+tcp LISTEN 0      4096      127.0.0.54:53    0.0.0.0:*                                                                      
+tcp LISTEN 0      4096       127.0.0.1:631   0.0.0.0:*                                                                      
+tcp LISTEN 0      128        127.0.0.1:8192  0.0.0.0:* users:(("ucompute",pid=1623479,fd=9))                                
+tcp LISTEN 0      1          127.0.0.1:42269 0.0.0.0:* users:(("ggml-rpc-server",pid=1624376,fd=3))                         
+tcp LISTEN 0      4096         0.0.0.0:22    0.0.0.0:*                                                                      
+tcp LISTEN 0      4096   127.0.0.53%lo:53    0.0.0.0:*                                                                      
+tcp LISTEN 0      4096           [::1]:631      [::]:*                                                                      
+tcp LISTEN 0      4096            [::]:22       [::]:*                                                                      

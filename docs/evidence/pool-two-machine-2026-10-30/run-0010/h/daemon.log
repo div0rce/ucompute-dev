@@ -1,0 +1,7 @@
+[2m2026-10-31T00:10:28.541964Z[0m [32m INFO[0m [2mucompute_identity[0m[2m:[0m generated new device identity [3mdevice[0m[2m=[0md5ef-0ca8-8a68
+listening on http://127.0.0.1:18320
+peer id d5ef0ca88a68ca5477b2d46b0de8615109dcc904cc0d58a0226a33b13e9dc963
+peer endpoint udp://0.0.0.0:18420 (serving peers: no, mdns: on)
+[2m2026-10-31T00:10:28.553640Z[0m [32m INFO[0m [2mucompute_api[0m[2m:[0m ucompute api listening [3maddr[0m[2m=[0m127.0.0.1:18320
+[2m2026-10-31T00:10:28.598484Z[0m [32m INFO[0m [2mucompute_network::transport[0m[2m:[0m peer endpoint listening [3maddr[0m[2m=[0m0.0.0.0:18420
+[2m2026-10-31T00:10:28.601611Z[0m [32m INFO[0m [2mucompute_network::discovery[0m[2m:[0m mdns advertising [3minstance[0m[2m=[0md5ef0ca88a68 [3mport[0m[2m=[0m18420 [3mpairing[0m[2m=[0mfalse

@@ -1,4 +1,5 @@
 import "./activity.css";
+import { version } from "../../../package.json";
 import { useState } from "react";
 import { api, ApiError, getBaseUrl, shortLabel } from "../../api/client";
 import { ERROR_CODES, explain } from "../../api/errors";
@@ -143,7 +144,7 @@ export default function Activity() {
 
   async function copyDiagnostics() {
     // The log's path holds the account name: it is shown, not copied.
-    const app = { app: "ucompute-desktop 0.1.0", service_url: getBaseUrl(), service_spawned_by_app: d.spawned, service_restarts_by_app: d.restarts ?? 0, service_restarts_given_up: !!d.gaveUp, reachable: d.reachable, generated_at: new Date().toISOString() };
+    const app = { app: `ucompute-desktop ${version}`, service_url: getBaseUrl(), service_spawned_by_app: d.spawned, service_restarts_by_app: d.restarts ?? 0, service_restarts_given_up: !!d.gaveUp, reachable: d.reachable, generated_at: new Date().toISOString() };
     const log = d.logPath ? ` The service's own log is in ${d.logPath}.` : "";
     let report: Record<string, unknown>;
     let what: string;

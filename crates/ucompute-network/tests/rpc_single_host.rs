@@ -19,10 +19,15 @@ use tokio::time::timeout;
 use ucompute_artifacts::Store;
 use ucompute_core::{ErrorCode, Paths};
 use ucompute_identity::{Group, GroupPolicy};
-use ucompute_network::proto::{control_message::Body, encode_frame, RpcTunnelOpen};
+use ucompute_network::proto::{
+    control_message::Body, encode_frame, read_frame, write_frame, Hello, RpcSessionAccept, RpcSessionOpen,
+    RpcTunnelOpen,
+};
 use ucompute_network::remote::{serve_peer_with, ServeOptions};
 use ucompute_network::rpc::{Limits, SplitSession, SplitSpec, Stage, MAX_TUNNELS, RPC_RESET, TEST_POOL_ENV};
-use ucompute_network::transport::{Node, PeerConnection};
+use ucompute_network::tls::{self, PeerPolicy};
+use ucompute_network::transport::{sign_capabilities, Node, PeerConnection};
+use ucompute_network::{ALPN_WORKLOAD, MAX_CAPABILITIES_BYTES, MAX_CONTROL_FRAME, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 use ucompute_policy::{PolicyConfig, PolicyEngine, PrivacyMode};
 use ucompute_runtime::manager::ModelManager;
 use ucompute_runtime::EnginePid;
@@ -1111,11 +1116,15 @@ async fn stage_close(p: &Pool, outcome: &str) -> serde_json::Value {
 /// A GRAPH_COMPUTE payload of b11609 (`| device u32 | uid u64 | n_nodes u32 | nodes u64 * n |
 /// n_tensors u32 | rpc_tensor (296 B) * n |`) with one tensor per op; `op` sits at byte 52.
 fn graph(ops: &[u32]) -> Vec<u8> {
+    graph_of(1, ops)
+}
+
+fn graph_of(node: u64, ops: &[u32]) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend(0u32.to_le_bytes());
     p.extend(7u64.to_le_bytes());
     p.extend(1u32.to_le_bytes());
-    p.extend(1u64.to_le_bytes());
+    p.extend(node.to_le_bytes());
     p.extend((ops.len() as u32).to_le_bytes());
     for (i, op) in ops.iter().enumerate() {
         let mut t = vec![0u8; 296];
@@ -1170,10 +1179,33 @@ async fn stage_refuses_a_function_pointer_graph_from_a_hostile_head_single_host(
     assert!(closed_within(&mut c, Duration::from_secs(5)).await);
 }
 
+/// R refuses a graph with a null top-level node (CVE-2026-78148) from a head that bypasses H's
+/// bridge: rpc-server never gets the graph's last byte, so it is not crashed by it.
+#[tokio::test]
+async fn stage_refuses_a_null_graph_node_from_a_hostile_head_single_host() {
+    let Some(p) = pool().await else { return };
+    let g = graph_of(0, &[1]);
+    let s = p.open(spec()).await.unwrap();
+    let (mut send, mut recv) = raw_tunnel(&p, &s).await;
+    raw_hello(&mut send, &mut recv).await;
+    send.write_all(&g).await.unwrap();
+    let e = failure_within(&s, Duration::from_secs(5)).await;
+    assert_eq!(e.code, ErrorCode::PolicyDenied, "R's reason: {e}");
+    assert!(e.message.contains("null graph node"), "{e}");
+    let close = stage_close(&p, "refused_graph_node").await;
+    let to_r = close["fields"]["to_r"].as_u64().unwrap();
+    assert!(
+        (33..33 + g.len() as u64).contains(&to_r),
+        "rpc-server got HELLO and not the whole graph: {close}"
+    );
+}
+
 /// Every command a REAL b11609 session sent (lab R0 configuration A, the meter's fixture: 14
-/// commands, each at the smallest size the session sent it) passes both filters and reaches the
-/// REAL rpc-server whole, one command per engine connection after HELLO. The head is SYNTHETIC
-/// (zero payloads), so rpc-server may refuse their contents; the session stays up.
+/// commands, each at the smallest size the session sent it), plus `FREE_BUFFER` (4, at unload) and
+/// `SET_TENSOR_HASH` (7, which a real R1b load sends for its tensors over 10 MiB; the R0 capture has
+/// neither), passes both filters and reaches the REAL rpc-server whole, one command per engine
+/// connection after HELLO. The head is SYNTHETIC (zero payloads), so rpc-server may refuse their
+/// contents; the session stays up.
 #[tokio::test]
 async fn a_real_sessions_commands_all_reach_the_stage_synthetic_head_single_host() {
     let Some(p) = pool().await else { return };
@@ -1184,8 +1216,9 @@ async fn a_real_sessions_commands_all_reach_the_stage_synthetic_head_single_host
             continue;
         }
         for h in &f[5..] {
-            let hex = h.split_once(':').unwrap().1;
-            if hex.len() == 18 {
+            let (off, hex) = h.split_once(':').unwrap();
+            // a whole header; `g<offset>` is a GRAPH_COMPUTE payload, not a header
+            if !off.starts_with('g') && hex.len() == 18 {
                 let b = hex::decode(hex).unwrap();
                 let size = u64::from_le_bytes(b[1..].try_into().unwrap());
                 let e = cmds.entry(b[0]).or_insert(size);
@@ -1194,6 +1227,8 @@ async fn a_real_sessions_commands_all_reach_the_stage_synthetic_head_single_host
         }
     }
     assert_eq!(cmds.len(), 14, "{cmds:?}");
+    // b11609 sizes: FREE_BUFFER's remote_ptr; SET_TENSOR_HASH's rpc_tensor (296), offset and hash
+    assert!(cmds.insert(4, 8).is_none() && cmds.insert(7, 296 + 16).is_none());
     let s = p.open(spec()).await.unwrap();
     let mut sent = Vec::new();
     for (&c, &size) in &cmds {
@@ -1408,4 +1443,245 @@ async fn packet_capture_contains_no_plaintext_canary_single_host() {
     assert!(datagrams.len() > 10, "{} datagrams", datagrams.len());
     assert!(ucompute_network::scan_for_plaintext(&datagrams, &[CANARY]).is_empty());
     assert_eq!(ucompute_network::scan_for_plaintext(&[sent], &[CANARY]), vec![0]);
+}
+
+// ---------------------------------------------------------------- resources (round 8 review)
+
+/// R caps each session's traffic itself, per direction, at two loads of H's cap
+/// (`stage_byte_cap`): a hostile head can bypass H's meter or start its engine without end, and R
+/// sees no engine starts. Over the cap R ends the session with a typed `overloaded` that reaches
+/// H, never forwards the bytes over it, and stops rpc-server. H's own cap is the default here.
+#[tokio::test]
+async fn stage_byte_cap_per_session_closes_typed_single_host() {
+    let Some(p) = pool_with(Setup::default(), |s| s.byte_cap = Some(40)).await else {
+        return;
+    };
+    let s = p.open(spec()).await.unwrap();
+    let (pid, _) = p.stage.session().unwrap();
+    let mut c = head(&s).await;
+    hello(&mut c).await; // 33 up, 36 down: within 40 each way
+    c.write_all(&cmd(ALLOC_BUFFER, &[0; 12])).await.unwrap(); // 54 up
+    let e = failure_within(&s, Duration::from_secs(5)).await;
+    assert_eq!(e.code, ErrorCode::Overloaded, "R's reason reaches H: {e}");
+    assert!(e.message.contains("over the 40-byte cap"), "{e}");
+    assert_eq!(s.counters().to_r, 54, "H's own cap did not bind");
+    assert!(closed_within(&mut c, Duration::from_secs(5)).await);
+    assert!(
+        wait_dead(pid, Duration::from_secs(6)).await.is_some(),
+        "R stopped rpc-server"
+    );
+    let tunnel = stage_close(&p, "byte_cap").await;
+    assert!(
+        tunnel["fields"]["to_r"].as_u64().unwrap() <= 40,
+        "nothing over the cap reached rpc-server: {tunnel}"
+    );
+    poll_until(Duration::from_secs(5), || !p.r_lines("session_close").is_empty())
+        .await
+        .unwrap();
+    assert_eq!(p.r_lines("session_close")[0]["fields"]["reason"], "overloaded");
+}
+
+/// A hostile head on its own QUIC connection to R, whose streams grant R `window` bytes each and
+/// are never read once the control handshake is done (H's Hello and Capabilities, as a connector).
+/// R serves it with `p`'s stage. The handles keep the connection open.
+async fn stingy_head(
+    p: &Pool,
+    window: u32,
+) -> (quinn::Endpoint, quinn::Connection, quinn::SendStream, quinn::RecvStream) {
+    let mut t = quinn::TransportConfig::default();
+    t.stream_receive_window(quinn::VarInt::from_u32(window));
+    t.keep_alive_interval(Some(Duration::from_secs(1)));
+    let mut cc = tls::client_config(&p.h.identity, PeerPolicy::Pinned(p.h.peers.clone()), ALPN_WORKLOAD).unwrap();
+    cc.transport_config(Arc::new(t));
+    let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    ep.set_default_client_config(cc);
+    let conn = ep
+        .connect(p.nr.local_addr().unwrap(), "ucompute")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let hello = Hello {
+        major: PROTOCOL_MAJOR,
+        minor: PROTOCOL_MINOR,
+        ucompute_version: "9.9.9".into(),
+        peer_id: p.h.id().0.to_vec(),
+        nonce: vec![1; 16],
+    };
+    write_frame(&mut send, &Body::Hello(hello).into()).await.unwrap();
+    let theirs = timeout(Duration::from_secs(10), read_frame(&mut recv, MAX_CONTROL_FRAME)).await;
+    assert!(matches!(theirs, Ok(Ok(Some(_)))), "R's Hello");
+    let caps = sign_capabilities(&p.h.identity, "{}".into(), 0, &[], &[]).unwrap();
+    write_frame(&mut send, &Body::Capabilities(caps).into()).await.unwrap();
+    let theirs = timeout(Duration::from_secs(10), read_frame(&mut recv, MAX_CAPABILITIES_BYTES)).await;
+    assert!(matches!(theirs, Ok(Ok(Some(_)))), "R's Capabilities");
+    let inn = timeout(Duration::from_secs(5), p.nr.accept()).await.unwrap().unwrap();
+    let opts = ServeOptions {
+        rpc: Some(p.stage.clone()),
+        ..ServeOptions::standalone()
+    };
+    tokio::spawn(serve_peer_with(
+        inn,
+        manager(&p.r.paths, engine_dir().unwrap()),
+        p.nr.policy.clone(),
+        p.r.audit.clone(),
+        opts,
+    ));
+    (ep, conn, send, recv)
+}
+
+/// The stage's frames on the session stream: the accept, then R's reason.
+fn accept_frame_len(a: &RpcSessionAccept) -> usize {
+    encode_frame(&Body::RpcSessionAccept(a.clone()).into()).len()
+}
+
+/// A head that never reads its session stream and grants it no more credit cannot hold R's
+/// rpc-server or its one session slot (review stage-writes-unbounded-pin-slot): R's writes on that
+/// stream are bounded, and at the end rpc-server stops and the slot frees before R tells the head
+/// why. Two heads: one whose window takes R's accept but not R's closing reason (the session runs
+/// to its 2 s TTL, then the reason cannot be written), and one whose window cannot take the
+/// accept. Both free the slot within the TTL plus a few seconds, and a well-behaved head gets the
+/// next session.
+#[tokio::test]
+async fn head_that_never_reads_cannot_pin_the_stage_single_host() {
+    let Some(p) = pool().await else { return };
+    // the accept's size on this host (its device name varies): read it from a session that is read
+    let s = p.open(spec()).await.unwrap();
+    let accept = accept_frame_len(s.accepted()) as u32;
+    drop(s);
+    poll_until(Duration::from_secs(5), || p.stage.session().is_none())
+        .await
+        .unwrap();
+    // R's closing reason is longer than 8 bytes, so `accept + 8` takes the accept only
+    for (window, blocked) in [(accept + 8, "the closing reason"), (accept - 1, "the accept")] {
+        let (_ep, conn, _control, _control_recv) = stingy_head(&p, window).await;
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        let open = RpcSessionOpen {
+            session_id: vec![9; 16],
+            model_sha256: "ab".repeat(32),
+            engine_release: "b11609".into(),
+            layer_start: 0,
+            layer_end: 3,
+            n_layer: 6,
+            est_bytes: 64 << 20,
+            ttl_s: 2,
+        };
+        let t0 = Instant::now();
+        write_frame(&mut send, &Body::RpcSessionOpen(open).into())
+            .await
+            .unwrap();
+        poll_until(Duration::from_secs(10), || p.stage.session().is_some())
+            .await
+            .expect("R started a stage for the stingy head");
+        let (pid, _) = p.stage.session().unwrap();
+        let freed = poll_until(Duration::from_secs(8), || p.stage.session().is_none()).await;
+        let took = t0.elapsed();
+        eprintln!("SINGLE-HOST window {window} (blocks {blocked}): slot freed {took:?} after the open");
+        assert!(
+            freed.is_some(),
+            "{blocked} blocked: the slot is still held {took:?} after the open"
+        );
+        assert!(!alive(pid), "{blocked} blocked: rpc-server {pid} still runs");
+        let s = p.open(spec()).await.unwrap();
+        assert!(s.failure().is_none());
+        drop(s);
+        poll_until(Duration::from_secs(5), || p.stage.session().is_none())
+            .await
+            .unwrap();
+    }
+    let reasons: Vec<_> = p
+        .r_lines("session_close")
+        .iter()
+        .map(|l| l["fields"]["reason"].as_str().unwrap().to_string())
+        .collect();
+    // read session, TTL (reason not delivered), well-behaved, accept not delivered, well-behaved
+    assert_eq!(reasons[1], "timeout", "{reasons:?}");
+    assert_eq!(
+        reasons[2], "cancelled",
+        "a well-behaved head's close is no failure: {reasons:?}"
+    );
+    assert_eq!(reasons[3], "peer_lost", "{reasons:?}");
+}
+
+/// A local flood of the bridge (review bridge-owner-check-unbounded): owner checks run at most
+/// MAX_TUNNELS at once and the others are reset at once without a check (`owner_checks_busy`);
+/// every connection is reset and R sees none; the audit gets at most one `rpc_bridge_refused` line
+/// a second, and H's close line counts them all. The engine is another process (`sleep`), so
+/// every check runs in full (an `lsof` child on macOS).
+#[tokio::test]
+async fn bridge_flood_runs_bounded_owner_checks_and_rate_limited_audit_single_host() {
+    let Some(p) = pool().await else { return };
+    let mut sleeper = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let engine = EnginePid::default();
+    engine.set(sleeper.id());
+    let s = p.open(SplitSpec { engine, ..spec() }).await.unwrap();
+    const N: usize = 64;
+    let t = Instant::now();
+    let mut conns = Vec::new();
+    for _ in 0..N {
+        // a reset can beat the connect's own return on loopback
+        if let Ok(c) = TcpStream::connect(("127.0.0.1", s.rpc_port())).await {
+            conns.push(c);
+        }
+    }
+    for c in &mut conns {
+        assert!(
+            closed_within(c, Duration::from_secs(20)).await,
+            "every connection is reset"
+        );
+    }
+    let took = t.elapsed();
+    let refused = lines(&p.h, "rpc_bridge_refused");
+    eprintln!(
+        "SINGLE-HOST bridge flood: {N} connections reset in {took:?}, {} audit lines: {:?}",
+        refused.len(),
+        refused.iter().map(|l| &l["fields"]).collect::<Vec<_>>()
+    );
+    assert!(
+        !refused.is_empty() && refused.len() as u64 <= took.as_secs() + 2,
+        "one line a second at most: {refused:?}"
+    );
+    if cfg!(target_os = "macos") {
+        // the 9th connection arrives while 8 lsof checks still run
+        assert_eq!(refused[0]["fields"]["reason"], "owner_checks_busy", "{refused:?}");
+    }
+    assert!(p.r_lines("rpc_tunnel_open").is_empty(), "R saw no tunnel");
+    assert!(s.failure().is_none(), "{:?}", s.failure());
+    drop(s);
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    poll_until(Duration::from_secs(5), || !lines(&p.h, "session_close").is_empty())
+        .await
+        .unwrap();
+    let close = &lines(&p.h, "session_close")[0]["fields"];
+    assert_eq!(close["refused"], N as u64, "{close}");
+    let written: u64 = refused.iter().map(|l| l["fields"]["refusals"].as_u64().unwrap()).sum();
+    assert!(written <= N as u64, "{refused:?}");
+}
+
+/// rpc-server's log goes after a clean stop and stays after `backend_failed`, llama-server's rule
+/// (review rpc-server-logs-never-removed).
+#[tokio::test]
+async fn rpc_server_log_removed_on_clean_stop_kept_on_backend_failed_single_host() {
+    let Some(p) = pool().await else { return };
+    let s = p.open(spec()).await.unwrap();
+    let (pid, _) = p.stage.session().unwrap();
+    assert_eq!(p.rpc_server_logs(), 1);
+    drop(s);
+    assert!(wait_dead(pid, Duration::from_secs(6)).await.is_some());
+    poll_until(Duration::from_secs(5), || p.stage.session().is_none())
+        .await
+        .unwrap();
+    assert_eq!(p.rpc_server_logs(), 0, "a clean stop removes the log");
+
+    let s = p.open(spec()).await.unwrap();
+    let (pid, _) = p.stage.session().unwrap();
+    // SAFETY: plain signal to our own child.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let e = failure_within(&s, Duration::from_secs(5)).await;
+    assert_eq!(e.code, ErrorCode::BackendFailed, "{e}");
+    poll_until(Duration::from_secs(5), || p.stage.session().is_none())
+        .await
+        .unwrap();
+    assert_eq!(p.rpc_server_logs(), 1, "the failed stage's log is kept");
 }

@@ -1,0 +1,18 @@
+PASS SHA256SUMS verifies {'output': 'ucompute: OK\nLICENSE: OK\nTHIRD_PARTY_NOTICES.txt: OK\nucompute.service: OK\nREADME.md: OK'}
+PASS systemd-analyze verify finds nothing wrong in the shipped unit {'output': []}
+PASS the shipped unit has the documented ExecStart 
+PASS unit starts {'output': ''}
+PASS healthy within 10 s of start 
+PASS ucompute setup provisions the pinned engine {'output': 'engine   llama.cpp b11609 verified at /tmp/ucompute-verify-s64i10jj/data/backends/llama.cpp/b11609'}
+PASS ldd resolves the engine {'missing': []}
+PASS fixture pulled {'status': 200}
+PASS fixture loads on the CPU {'status': 200, 'body': '{"model_id":"stories15M-q4_0","model_sha256":"66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739","backend_name":"llama.cpp","backend_version":"0.6.0-dev (build 11609, commit fcac19079)","device_requested":"cpu","device_actual":"cpu","offloaded_layers":0,"total_layers":6,"n_ctx":128,"t'}
+PASS golden CPU completion 
+PASS SIGKILL: systemd restarts the daemon and it is healthy within 10 s {'old_pid': 1409646, 'new_pid': 1409753, 'seconds': 2.67}
+PASS SIGKILL: the killed daemon's engine is gone {'old_engines': [1409708], 'left': []}
+PASS golden again after the restart 
+PASS stop frees the port {'output': ''}
+PASS stop leaves no engine {'left': []}
+PASS removing the unit and binary keeps the data folder 
+ALL PASS
+VERIFY_EXIT=0

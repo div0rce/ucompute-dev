@@ -9,7 +9,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import random
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -382,6 +384,75 @@ class Mesh:
         return ""
 
 
+def gguf_text(s):
+    b = s.encode()
+    return struct.pack("<Q", len(b)) + b
+
+
+def synthetic_gguf(path, tensors, seed, align=64, align_type=(4, "<I")):
+    """A SYNTHETIC GGUF v3 file, not a model: every KV shape the reader must walk past, general.alignment among them,
+    then `tensors` (name, bytes) in order, their data pseudo-random, so 64 bytes of one tensor occur nowhere else."""
+    values = [("general.architecture", 8, gguf_text("synthetic")),
+              ("general.alignment", align_type[0], struct.pack(align_type[1], align)),
+              ("general.flag", 7, b"\x01"), ("x.big", 10, struct.pack("<Q", 7)),
+              ("x.names", 9, struct.pack("<IQ", 8, 2) + gguf_text("a") + gguf_text("bc")),
+              ("x.ids", 9, struct.pack("<IQ", 5, 3) + struct.pack("<3i", 1, 2, 3))]
+    out = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(values))
+    for key, kind, value in values:
+        out += gguf_text(key) + struct.pack("<I", kind) + value
+    offset = 0
+    for name, size in tensors:
+        out += gguf_text(name) + struct.pack("<I2QIQ", 2, size, 1, 0, offset)
+        offset += size
+    out += b"\0" * (-len(out) % align)
+    Path(path).write_bytes(out + random.Random(seed).randbytes(offset))
+
+
+class FakeFlight:
+    """SYNTHETIC stand-in for the driver's Flight: no thread and no socket; the first token and the end of the stream
+    are moments on the fake clock, and an injected failure (SplitMesh.fail) sets the end."""
+    LOAD, TPOT = 40.0, 0.036
+
+    def __init__(self, mesh, base, body):
+        self.mesh, self.clock, self.tokens, self.finish = mesh, mesh.clock, 0, None
+        self.first_at = self.error_at = self.ended_at = self.end_at = self.end_error = None
+        r = mesh.sse(base, body)
+        self.status, self.error = r["status"], r["error"]
+        if self.error:
+            self.error_at = self.ended_at = self.clock.t
+            return
+        mesh.flight = self
+        self.first_at = self.clock.t + self.LOAD
+        self.natural = self.first_at + self.TPOT * body["max_tokens"]
+
+    def wait_first(self, within):
+        if self.first_at is None or self.first_at > self.clock.t + within:
+            return False
+        self.clock.t = max(self.clock.t, self.first_at)
+        self.tokens = 3
+        return True
+
+    def wait_done(self, within):
+        if self.ended_at is not None:
+            return True
+        end = self.natural if self.end_at is None else self.end_at
+        if end > self.clock.t + within:
+            self.clock.t += within
+            return False
+        self.clock.t = max(self.clock.t, end)
+        self.ended_at = end
+        if self.end_error:
+            self.error, self.error_at = self.end_error, end
+        return True
+
+    def cancel(self):
+        if self.ended_at is None:
+            self.ended_at = self.clock.t
+            self.mesh.flight = None
+            if "cancel_ends_session" in self.mesh.bad:
+                self.mesh.close("cancelled")
+
+
 class SplitMesh(Mesh):
     """SYNTHETIC head (A, this Mac's dev daemon) and stage host (B, sentinel) for split_two_machine.py, unpaired at
     the start like a fresh head home. A split request passes the gates in the order openai::run and rpc.rs check
@@ -389,12 +460,29 @@ class SplitMesh(Mesh):
     one turn per token) plus a prefill, so the lab's scorer accepts the run. The texts, timings, `ss`, `who` and
     the other shell outputs are canned. Nothing here is P1 or evidence of UCompute.
 
-    `bad`: dirty, busy_r, other_user, r_engine_left, low_memory (preflight); stage_spawns_on_refusal,
-    stage_refusal_untyped (P1.1); wrong_placement, public_rpc, rpc_reachable, rdma_banner (the session);
-    session_changes (a prompt's checkpoints); local_uses_split; rpc_outlives_session; leaks_prompt (R's logs);
-    no_close_audit."""
-    PER = {"R1a": (14150, 3592), "R1b": (21830, 6152)}
+    The steps beyond the core run are as canned: the footprint and VmHWM values are worked out from the SYNTHETIC
+    GGUF's layer sizes (install()), a failure ends the request in flight on the fake clock with a code chosen here (the
+    real codes are for the physical run to show), and the traffic through the driver's relay is opaque random records:
+    its Relay class is the real one, but no daemon sends it a datagram.
+
+    `bad`: dirty, busy_r, other_user, desktop_login, r_engine_left, low_memory, r_tree_modified, r_tree_head,
+    r_stale_build, h_dirty_build (preflight); r_ip_v6; stage_spawns_on_refusal, stage_refusal_untyped (P1.1);
+    wrong_placement, public_rpc, rpc_reachable, lan_down, rdma_banner (the session); session_changes (a prompt's
+    checkpoints); local_uses_split; rpc_outlives_session; leaks_prompt (R's logs); no_close_audit, extra_session,
+    audit_full_page; head_keeps_all_layers, stage_holds_all, no_footprint, ctx_differs, r_no_model, ssh_drops (memory);
+    bypass_relay, redial_race, relay_invisible, relay_short, wire_canary, wire_weights, blind_scanner (capture);
+    c_wrong_placement, c_stage_gpu, cpu_ignored (configuration C); late_<code> (12 s), slow_<code> (7 s), hang_<code>,
+    untyped_<code>, no_stage_close, no_head_close, job_stuck, cancel_ends_session, pdeathsig_slow, r_teardown_slow,
+    no_reap, repair_fails, unload_refused (the failure cases)."""
+    HEAD = "abc123"
+    BLOBS = {"Cargo.toml": "1" * 40, "crates/ucompute-api/src/lib.rs": "2" * 40, "scripts/mac-host.sh": "3" * 40}
+    # The lab's amended predictions (02ec3f5): steady state plus one decode-graph upload over 64 steps.
+    PER = {"R1a": (16921, 3592), "R1b": (25058, 6152)}
     TIMES = {"R1a": (230.0, 36.0), "R1b": (350.0, 54.0)}  # TTFT and TPOT (ms) inside the lab's Wi-Fi bands
+    NORM, GATE, INPUT, OUTPUT = 6_400, 32_000, 64_000, 70_400  # the SYNTHETIC GGUF's tensor sizes
+    BLOCK = NORM + GATE
+    BASE = 20 << 20  # a process's peak without weights
+    FAKE_H_PID, FAKE_R_PID = 7001, 7002
 
     def __init__(self, bad=()):
         super().__init__(bad)
@@ -405,19 +493,136 @@ class SplitMesh(Mesh):
         prereg = json.loads((HERE / "split_prereg.json").read_text())
         self.models = {m["model"]: m for m in prereg["models"]}
         self.tokens = {p["text"]: p["tokens"] for p in prereg["prompts"]}
+        self.canaries = [p["canary"] for p in prereg["prompts"]]
         self.session, self.sessions, self.loaded_split, self.leak, self.requests = None, 0, None, False, 0
+        self.flight, self.wire, self.engine, self.orphan = None, None, "local", False
+        self.revoked_once, self.raced, self.pending, self.devices, self.blobs, self.last_model = False, False, [], {}, {}, None
+
+    def install(self, home):
+        """SYNTHETIC manifests and blobs of the prereg's models in a head home: what the driver reads layers from."""
+        for i, (model, m) in enumerate(self.models.items()):
+            blob = Path(home, "models", "blobs", f"sha256-{i:064x}")
+            blob.parent.mkdir(parents=True, exist_ok=True)
+            tensors = [("token_embd.weight", self.INPUT)]
+            for b in range(m["n_layer"]):
+                tensors += [(f"blk.{b}.attn_norm.weight", self.NORM), (f"blk.{b}.ffn_gate.weight", self.GATE)]
+            tensors += [("output_norm.weight", self.NORM), ("output.weight", self.OUTPUT - self.NORM)]
+            synthetic_gguf(blob, tensors, i)
+            manifest = Path(home, "models", "manifests", model + ".json")
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(json.dumps({"id": model, "sha256": f"{i:064x}"}))
+            self.blobs[model] = blob
+
+    def patch(self, d):
+        """The driver's own Relay for its control and for what fake traffic is recorded to (`wire`)."""
+        mesh, real = self, d.Relay
+
+        class Wire(real):
+            def __init__(self, target, path):
+                super().__init__(target, path)
+                if target[1] == 8193:  # the capture, not the control's loopback sink
+                    mesh.wire = self
+        d.Relay = Wire
+        self.driver = d
+        if "blind_scanner" in self.bad:
+            d.scan_capture = lambda path, needles: {"datagrams": 0, "hits": {}}
+
+    def Flight(self, base, body, timeout=900):
+        return FakeFlight(self, base, body)
+
+    def tick(self):
+        super().tick()
+        while self.pending and self.pending[0][0] <= self.clock.t:
+            self.pending.pop(0)[1]()
 
     def pooled(self, me, pid):
         return any(pid in g["members"] and g["policy"].get("allow_pooled_inference") for g in me.groups.values())
 
-    def close(self):
+    def close(self, reason="cancelled", head=True, stage=True):
         if self.session:
             sid = self.session["id"]
             if "no_close_audit" not in self.bad:
-                self.log(self.H, "session_close", self.R.id, role="head", session=sid)
-                self.log(self.R, "session_close", self.H.id, role="stage", session=sid)
+                if head and "no_head_close" not in self.bad:
+                    self.log(self.H, "session_close", self.R.id, role="head", session=sid, reason=reason)
+                if stage and "no_stage_close" not in self.bad:
+                    self.log(self.R, "session_close", self.H.id, role="stage", session=sid, reason=reason)
             self.leak |= "rpc_outlives_session" in self.bad
         self.session, self.loaded_split = None, None
+
+    def fail(self, code, after, head=True, stage=True):
+        """A session's end with `code`, which reaches the request in flight `after` s later."""
+        fl = self.flight
+        if fl is None or fl.ended_at is not None or f"hang_{code}" in self.bad:
+            return
+        after = 12.0 if f"late_{code}" in self.bad else 7.0 if f"slow_{code}" in self.bad else after
+        fl.end_at = self.clock.t + after
+        fl.end_error = {"code": "transport" if f"untyped_{code}" in self.bad else code, "message": code}
+        self.close(code, head, stage)
+
+    def inject(self, me, method, p, body):
+        """What a change does to the session (ADR-0005 D7). The codes are this fake's."""
+        if me is self.R and p.endswith("/revoke"):
+            self.revoked_once = True
+            self.fail("peer_revoked", 1.0)
+        elif me is self.H and p.endswith("/disconnect"):
+            self.fail("peer_held", 1.0)
+        elif me is self.R and p == "/api/groups" and method == "PUT" and not self.pooled(self.R, self.H.id):
+            self.fail("peer_unauthorized", 1.2)
+        elif me is self.H and p == "/api/privacy" and method == "PUT" and body.get("mode") == "local_only":
+            self.fail("policy_denied", 1.2)
+        elif me is self.H and p == "/api/network" and method == "PUT" and not body.get("enabled", True):
+            self.fail("peer_lost", 1.5)
+
+    def kill_daemon(self, who):
+        """SIGKILL: nothing of the daemon writes another line. R's rpc-server dies with it (PDEATHSIG); H's request sees
+        its socket end, and R notices at its idle timeout."""
+        self.unlink(self.H, self.R)
+        if who is self.R:
+            self.R.up = False
+            self.fail("peer_lost", 6.0, stage=False)
+            return f"ms={2000 if 'pdeathsig_slow' in self.bad else 120}\n"
+        self.H.up, self.orphan = False, True
+        if self.flight and self.flight.ended_at is None:
+            self.flight.end_at, self.flight.end_error = self.clock.t + 0.05, {"code": "transport", "message": "reset"}
+        self.pending.append((self.clock.t + (9.0 if "r_teardown_slow" in self.bad else 4.5),
+                             lambda: self.close("peer_lost", head=False)))
+        return ""
+
+    def start_daemon(self, who, other):
+        who.up = True
+        self.orphan = "no_reap" in self.bad and who is self.H
+        self.dial(who, other, None)
+
+    def weights(self, m, who):
+        """The weight bytes `who` holds: all of them, H's share or R's share of config P."""
+        k, n = m["split_at"], m["n_layer"]
+        total = self.BLOCK * n + self.INPUT + self.OUTPUT
+        return {"full": total, "h": total - self.BLOCK * k, "r": self.BLOCK * k}[who]
+
+    def on_wire(self):
+        """Opaque SYNTHETIC records where a real capture has datagrams; the relay's byte counts follow the session's."""
+        c = self.conn(self.H, self.R)
+        wire, s = self.wire, self.session
+        if not (wire and c and s and c["addr"] == f"127.0.0.1:{wire.port}"):
+            return
+        wire.record(0, random.Random(self.requests).randbytes(1200))
+        wire.record(1, random.Random(-self.requests).randbytes(1200))
+        if "wire_canary" in self.bad:
+            wire.record(0, b"xx" + self.canaries[0].encode() + b"yy")
+        if "wire_weights" in self.bad:
+            data = Path(self.blobs[s["model"]]).read_bytes()
+            for i in range(0, len(data), 1200):
+                wire.record(0, data[i:i + 1200])
+        wire.bytes[0] = 1000 if "relay_short" in self.bad else s["c"]["to_r"] + 1000
+        wire.bytes[1] = s["c"]["to_h"] + 1000
+
+    def record(self, me, pid):
+        r = super().record(me, pid)
+        c = r["connection"]
+        if c and me is self.R and self.wire and "relay_invisible" not in self.bad \
+                and self.conn(self.H, self.R)["addr"] == f"127.0.0.1:{self.wire.port}":
+            c["remote_addr"] = f"10.0.0.1:{self.wire.back_port}"  # R sees the relay's socket, not H's
+        return r
 
     def open(self, model):
         self.close()
@@ -427,6 +632,10 @@ class SplitMesh(Mesh):
                         "c": {"to_r": 200_000_000, "to_h": 9_000, "switches": 40}}  # the upload
         self.log(self.H, "session_open", self.R.id, role="head", session=sid)
         self.log(self.R, "session_open", self.H.id, role="stage", session=sid)
+        if "extra_session" in self.bad and self.sessions == 1:  # one the driver never sees in /api/status
+            for d, role in ((self.H, "head"), (self.R, "stage")):
+                for kind in ("session_open", "session_close"):
+                    self.log(d, kind, None, role=role, session="f" * 32)
 
     def traffic(self, m, tokens, n):
         c, (up, down), act = self.session["c"], self.PER[m["label"]], m["hidden"] * 4
@@ -435,23 +644,61 @@ class SplitMesh(Mesh):
         c["switches"] += 6 + 2 * (n - 1)
 
     def route(self, me, method, p, body):
+        if p == "/health":
+            stale = (me is self.R and "r_stale_build" in self.bad) or (me is self.H and "h_dirty_build" in self.bad)
+            return 200, {"status": "ok", "version": "1.0.0",
+                         "commit": "0ld000" if stale and me is self.R else self.HEAD + ("-dirty" if stale else "")}
+        if p == "/api/network" and method == "GET" and me is self.R and "r_ip_v6" in self.bad:
+            return 200, {**super().route(me, method, p, body)[1], "dial_addr": "[fe80::1]:8193"}
+        if p == "/api/audit" and "audit_full_page" in self.bad:  # a page of 1000 that starts after the run did
+            return 200, {"events": [me.audit[0]] * (1000 - len(me.audit)) + me.audit}
         if p == "/api/status":
             s = self.session if me is self.H else None
             split = self.loaded_split if me is self.H else None
-            return 200, {"loaded": me.loaded and {"model_id": me.loaded, "split": split},
-                         "split": s and {"session": s["id"], **s["c"]}}
+            local = me is self.H and split is None
+            return 200, {"loaded": me.loaded and {
+                "model_id": me.loaded, "split": split, "pid": self.FAKE_H_PID if me is self.H else self.FAKE_R_PID,
+                "n_ctx": 512 if local and "ctx_differs" in self.bad else 1024, "parallel_slots": 4, "threads": 4,
+                "device_requested": self.devices.get(me.key, "auto"), "device_actual": "SYNTHETIC"},
+                "split": s and {"session": s["id"], **s["c"],
+                                "stage_device": "MTL0" if "c_stage_gpu" in self.bad else "CPU (SYNTHETIC)"}}
         if p == "/api/unload":
+            if "unload_refused" in self.bad and me is self.H and self.session:
+                return 409, {"error": {"code": "overloaded", "message": "overloaded"}}
             me.loaded = None
+            self.devices.pop(me.key, None)
             if me is self.H:
                 self.close()
             return 204, None
-        return super().route(me, method, p, body)
+        if p == "/api/jobs":
+            return 200, {"active": [{"id": "stuck"}] if "job_stuck" in self.bad else [], "recent": []}
+        if p == "/api/models":
+            return 200, {"models": [{"id": k, "downloaded": not (me is self.R and "r_no_model" in self.bad)}
+                                    for k in self.models]}
+        if p.startswith("/api/models/") and p.endswith("/load") and "cpu_ignored" not in self.bad:
+            self.devices[me.key] = body.get("device", "auto")
+        if p == "/api/pair/join" and "repair_fails" in self.bad and self.revoked_once:
+            return 502, {"error": {"code": "peer_lost", "message": "peer_lost"}}
+        if p.endswith("/connect") and self.wire and body.get("addr") == f"127.0.0.1:{self.wire.port}" \
+                and "bypass_relay" not in self.bad:
+            me.held.discard(self.R.id)
+            if "redial_race" in self.bad and not self.raced:  # R's redial lands first: H's connect returns that one
+                self.raced = True
+                self.link(me, self.R, self.R, me.addrs[0])
+                return 200, self.record(me, self.R.id)
+            self.link(me, self.R, me, body["addr"])
+            me.pins[self.R.id]["last_addr"] = body["addr"]
+            return 200, self.record(me, self.R.id)
+        reply = super().route(me, method, p, body)
+        self.inject(me, method, p, body)
+        return reply
 
     def sse(self, base, body, timeout=900):
         self.tick()
         me, tgt, m = self.d[base], body.get("target", "local"), self.models[body["model"]]
         n, tokens = body["max_tokens"], self.tokens.get(body["prompt"], 2)
         ttft, tpot = self.TIMES[m["label"]]
+        self.last_model = m
 
         def err(status, code, msg=None):
             return {"status": status, "text": "", "usage": None, "target": None, "placement": None,
@@ -465,6 +712,8 @@ class SplitMesh(Mesh):
             if "local_uses_split" in self.bad and self.session:
                 self.traffic(m, tokens, n)
             me.loaded, self.loaded_split = body["model"], None
+            if me is self.H:
+                self.engine = "local"
             return ok()
         pid = tgt[len("split:"):]
         if me.privacy != "trusted_group" or not me.enabled:
@@ -485,11 +734,14 @@ class SplitMesh(Mesh):
                 "session_changes" in self.bad and self.requests % 2 == 0):
             self.open(body["model"])
         self.traffic(m, tokens, n)
+        self.on_wire()
         k, nl = m["split_at"], m["n_layer"]
         devs = ("MTL0", "RPC0") if "wrong_placement" in self.bad else ("RPC0", "MTL0")
+        if body.get("split_mode") == "same_backend":
+            devs = ("MTL0", "RPC0") if "c_wrong_placement" in self.bad else ("CPU", "RPC0")
         self.loaded_split = [{"device": devs[0], "first_block": 0, "end_block": k},
                              {"device": devs[1], "first_block": k, "end_block": nl}]
-        me.loaded = body["model"]
+        me.loaded, self.engine = body["model"], "split"
         return ok({"stages": self.loaded_split, "session": self.session["id"]})
 
     def ss(self, rpc):
@@ -502,7 +754,52 @@ class SplitMesh(Mesh):
             lines.append(f'tcp LISTEN 0 1 {host}:{port} 0.0.0.0:* users:(("ggml-rpc-server",pid=5151,fd=3))')
         return "\n".join(lines) + "\n"
 
+    def footprint_text(self):
+        m = self.last_model
+        hosted = self.weights(m, "h" if self.engine == "split" and "head_keeps_all_layers" not in self.bad else "full")
+        kb = (self.BASE + hosted) >> 10
+        return (f"llama-server [{self.FAKE_H_PID}]: 64-bit    Footprint: {kb} KB (16384 bytes per page)\n"
+                "  Dirty      Clean  Reclaimable    Regions    Category\n"
+                "    ---        ---          ---        ---    ---\n"
+                f" {kb} KB      35 MB          0 B       3348    TOTAL\n\nAuxiliary data:\n"
+                f"    phys_footprint: {kb} KB\n"
+                + ("" if "no_footprint" in self.bad else f"    phys_footprint_peak: {kb} KB\n"))
+
+    def shell_extra(self, where, key, kw):
+        """The commands of the steps beyond the core run; None for the others."""
+        m = self.last_model
+        if (where, key) == ("r", "proc_status"):
+            if "ssh_drops" in self.bad:
+                raise self.driver.RShellError("R command 'proc_status' exited 255: SYNTHETIC")
+            rpc = str(kw["pid"]) != str(self.FAKE_R_PID)
+            hosted = self.weights(m, "r" if rpc and "stage_holds_all" not in self.bad else "full")
+            return f"Name:\tx\nVmPeak:\t  9 kB\nVmHWM:\t  {(self.BASE + hosted) >> 10} kB\nVmRSS:\t  1 kB\n"
+        if (where, key) == ("h", "footprint"):
+            return self.footprint_text()
+        if key == "argv":
+            return "SYNTHETIC argv\n"
+        if (where, key) == ("r", "kill_rpc"):
+            self.fail("backend_failed", 2.0)
+            return ""
+        if (where, key) == ("r", "kill_daemon"):
+            return self.kill_daemon(self.R)
+        if (where, key) == ("r", "start"):
+            self.start_daemon(self.R, self.H)
+            return "100\n"
+        if (where, key) == ("h", "alive"):
+            return "4242\n" if self.orphan else ""
+        if (where, key) == ("h", "run"):
+            if kw["cmd"] == "fake h kill":
+                return self.kill_daemon(self.H)
+            self.start_daemon(self.H, self.R)
+            return ""
+        return None
+
     def shell(self, where, key, **kw):
+        self.tick()
+        extra = self.shell_extra(where, key, kw)
+        if extra is not None:
+            return extra
         bad, rpc = self.bad, self.session is not None or self.leak
         if where == "r":
             return {
@@ -511,6 +808,13 @@ class SplitMesh(Mesh):
                 "ss": self.ss(rpc),
                 "who": ("kyle pts/1 2026-10-29 10:00 (10.0.0.77)\n" if "other_user" in bad else "")
                 + "div0rce pts/0 2026-10-29 09:00 (10.0.0.1)\nssh_client=10.0.0.1\n",
+                "sessions": ("Id=2\nName=div0rce\nClass=user\nType=wayland\nState=active\nRemote=no\nRemoteHost=\n"
+                             "Service=gdm-password\nSeat=seat0\n\n" if "desktop_login" in bad else "")
+                + "Id=c7\nName=div0rce\nClass=user\nType=tty\nState=active\nRemote=yes\nRemoteHost=10.0.0.1\n"
+                  "Service=sshd\nSeat=\n\nself=c7\nuser=div0rce\nssh_client=10.0.0.1\n",
+                "tree": ("0ld000" if "r_tree_head" in bad else self.HEAD) + "\n" + "".join(
+                    f"{p}\t{'9' * 40 if 'r_tree_modified' in bad and p == 'Cargo.toml' else h}\n"
+                    for p, h in sorted(self.BLOBS.items())),
                 "load": ("1.50" if "busy_r" in bad else "0.12") + " 0.20 0.30 1/300 4242\n",
                 "top": "%CPU PID COMMAND\n 1.0 1 systemd\n",
                 "banner": "transport : "
@@ -518,7 +822,9 @@ class SplitMesh(Mesh):
                 "scan": "/home/x/.ucompute-acceptance/logs/engine-1.log\n" if "leaks_prompt" in bad else "",
             }[key]
         return {
-            "git": "abc123\n" + (" M crates/x.rs\n" if "dirty" in bad else ""),
+            "git": self.HEAD + "\n" + (" M crates/x.rs\n" if "dirty" in bad else "")
+                   + ("?? docs/evidence/pool-two-machine-x/\n" if "untracked_out" in bad else ""),
+            "tree": "".join(f"100644 blob {h}\t{p}\n" for p, h in sorted(self.BLOBS.items())),
             "procs": "",
             "load": "{ 0.50 0.60 0.70 }\n",
             "power": "Now drawing from 'AC Power'\n",
@@ -528,7 +834,8 @@ class SplitMesh(Mesh):
                    "Pages active: 9.\nPages inactive: 50000.\nPages speculative: 1000.\n",
             "top": "%CPU PID COMMAND\n 2.0 1 launchd\n",
             "ping": "round-trip min/avg/max/stddev = 5.1/12.5/24.0/3.0 ms\n",
-            "nc": "rc=0\n" if "rpc_reachable" in bad else "rc=1\n",
+            "nc": "rc=1\n" if kw.get("port") == 22 and "lan_down" in bad else
+                  "rc=0\n" if kw.get("port") == 22 or "rpc_reachable" in bad else "rc=1\n",
         }[key]
 
 
@@ -546,9 +853,11 @@ def drive(script, mesh, *flags, restore=0):
     d = load(script)
     mesh.golden = getattr(d, "GOLDEN", mesh.golden)
     d.call, d.time, d.state = mesh.call, mesh.clock, (lambda *a: restore if a[0] == "restore" else 0)
-    for name in ("sh", "stream", "sse", "shell"):
-        if hasattr(d, name):
+    for name in ("sh", "stream", "sse", "shell", "Flight"):
+        if hasattr(d, name) and hasattr(mesh, name):
             setattr(d, name, getattr(mesh, name))
+    if hasattr(d, "Relay") and hasattr(mesh, "patch"):
+        mesh.patch(d)
     out = tempfile.mkdtemp()
     buf, code = io.StringIO(), None
     try:
@@ -562,7 +871,7 @@ def drive(script, mesh, *flags, restore=0):
                 code = e
         res = Path(out) / "results.json"
         steps = json.loads((res if res.exists() else Path(out) / "steps.json").read_text())["steps"]
-        files = {str(p.relative_to(out)): p.read_text() for p in Path(out).rglob("*")
+        files = {str(p.relative_to(out)): p.read_text(errors="replace") for p in Path(out).rglob("*")
                  if p.is_file() and p.name not in ("raw.jsonl", "results.json")}
     finally:
         d.RAW and d.RAW.close()

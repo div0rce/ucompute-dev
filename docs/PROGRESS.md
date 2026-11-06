@@ -4,6 +4,22 @@ Names: this record uses the current names (D-030). What it describes ran under t
 
 Newest first. Every entry: date, agent, what changed, counts, evidence, next commands.
 
+## 2026-10-29/30 — Claude Code — D-026 built; candidate 2 ready; Mac migrated; WP-04 fix pass and S1-M (unit, SINGLE-HOST)
+
+**Implemented / verified:**
+- **Milestone C met at d3b178b:** the renamed Linux tarball (0.1.1, SHA-256 `3b7cfa37…a4f6`) ALL PASS 16/16 on sentinel (`docs/evidence/linux-install-d3b178b/`), and the soak gate below.
+- Milestone C soak gate met: the third 24 h Linux soak at d3b178b PASS with documented interference (0 untyped with a 960 s client timeout; 0 `backend_failed` in 4.69 M admitted burst requests; 2,607 engine kills recovered within 1 s; `docs/evidence/linux-soak-2026-10-31.md`). The install gate (renamed tarball) is next.
+- Stable runtime (milestone C): the soak's frequent `backend_failed` traced to the engine client reusing connections llama-server had closed; fixed (no idle reuse) and reproduced before/after twice on sentinel, 0.53–0.56 % → 0; the first-token clock now runs from submit (`docs/evidence/burst-failures-linux-2026-10-31.md`). Sentinel: kernel crash during the desktop-session teardown, a short rustc fault burst after it, Linux suite 616 passed / 3 known failures, S1-L closed. P1: two starts, no measurement (a runner bug fixed; then this Mac's battery, memory, load and a near-full disk); a watcher starts it once this Mac is on AC.
+- Milestone A1 met for candidate 2: UCompute 0.1.1 (`c1166ba9…b937`) approved by the owner (D-031) and published by the website on the stage-snapshot link behind Access (ce71dc1, 4441b78); engineering re-verified the published file's size and hash through Access from this Mac. Second 24 h Linux soak collected: FAIL as registered (2 untyped no-response in 5.3 M requests, engine alive; `docs/evidence/linux-soak-2026-10-29.md`); milestone C open; a SINGLE-HOST investigation runs on the Mac. D-032: fourth workstream (Growth) and the cross-workstream handoff.
+- D-026 local-work priority on CPU engines: `local_priority` setting (default `refuse_new`, opt-in `preempt`, `none`), API, app Settings › Sharing selection; unit and SINGLE-HOST tests on this Mac with real engines (`docs/VERIFICATION.md` 2026-10-30 D-026). F-06-04 stays IMPLEMENTED_UNVERIFIED: the flood bound with D-026 is to be measured on sentinel.
+- WP-04 fix pass (4ddec61) and S1-M with the `--cache-ram 0` change (f7fe48e); candidate 2 (0.1.1, SHA-256 `c1166ba9…b937`) built and verified ALL PASS 19/19, promotion record awaiting the owner's approval; this Mac migrated to it (`docs/evidence/migration-mac-2026-10-29.md`); D-030 (no trace of the former name); CI on both PRs green.
+
+**Ledger:** NOT_STARTED 103 · IN_PROGRESS 6 · IMPLEMENTED_UNVERIFIED 8 · VERIFIED 36 · BLOCKED 0 · INFEASIBLE 0 (153 rows).
+
+**Limitations:** D-026 not run on sentinel or two machines; split requests and embeddings are not counted as local work; the restart test is in process only. The second Linux soak is still running (ends about 07:43 UTC 2026-10-30).
+
+**Next:** collect the soak (moving its home into the backup, not deleting it); migrate sentinel (`~/ucompute-migration-2026-10-29`, backup then verified model carry-over); sync and build HEAD there; S1-L and the Linux suite, D-026's flood tests included; R's half of the preflight; end the desktop session; P1 with `run_mac_linux.sh SPLIT=1`.
+
 ## 2026-10-28/29 — Claude Code — candidate 1 published; Windows app verified; soaks; WP-04 round 8; GitHub sync; total rename to UCompute (unit, SINGLE-HOST, one-machine packaged checks)
 
 **Implemented / verified:**

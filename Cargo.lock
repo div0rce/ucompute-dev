@@ -123,9 +123,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -4816,7 +4816,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ucompute-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4846,7 +4846,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-artifacts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "hex",
@@ -4864,7 +4864,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4893,7 +4893,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4902,7 +4902,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -4916,7 +4916,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-hardware"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4927,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-identity"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "ring",
@@ -4940,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-integration-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",
@@ -4959,7 +4959,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-models"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4970,7 +4970,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-network"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "hex",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-observability"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5014,7 +5014,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-policy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5026,7 +5026,7 @@ dependencies = [
 
 [[package]]
 name = "ucompute-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures-util",

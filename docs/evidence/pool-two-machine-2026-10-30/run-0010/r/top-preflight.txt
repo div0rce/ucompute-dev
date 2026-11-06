@@ -1,0 +1,6 @@
+%CPU     PID COMMAND
+ 0.0    2464 gnome-shell
+ 0.0   64598 ucompute
+ 0.0   67727 kworker/4:2-events
+ 0.0   66959 kworker/8:2-memcg
+ 0.0   67365 kworker/0:0-events

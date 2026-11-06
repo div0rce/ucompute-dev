@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify a packaged macOS UCompute.app and its .dmg end to end, on the exact shipped binaries.
 
-    python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/UCompute_0.1.0_aarch64.dmg \
+    python3 -I apps/desktop/scripts/verify_packaged_app.py --dmg target/release/bundle/dmg/UCompute_0.1.1_aarch64.dmg \
         --work <empty scratch dir> [--out evidence.json]
 
 What it checks (stdlib only, no repo build artefacts are used at run time):

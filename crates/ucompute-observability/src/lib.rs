@@ -53,6 +53,7 @@ pub const SECURITY_KINDS: &[&str] = &[
     "peer_removed",
     "privacy_changed",
     "network_changed",
+    "local_priority_changed",
     "group_updated",
 ];
 /// `tail` reads each file backwards in blocks of this size.

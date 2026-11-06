@@ -1,0 +1,6 @@
+%CPU     PID COMMAND
+ 1.0 1621512 gnome-shell
+ 0.6 1623479 ucompute
+ 0.1 1619152 kworker/8:2-cgroup_offline
+ 0.0 1621335 systemd
+ 0.0 1619835 kworker/u65:2-rb_allocator

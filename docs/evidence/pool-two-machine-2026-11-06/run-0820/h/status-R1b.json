@@ -1,0 +1,72 @@
+{
+ "engine": {
+  "last_exit": null,
+  "loading_for_ms": null,
+  "loading_model_id": null,
+  "state": "ready"
+ },
+ "loaded": {
+  "backend_name": "llama.cpp",
+  "backend_version": "0.6.0-dev (build 11609, commit fcac19079)",
+  "context_note": null,
+  "device_actual": "RPC0 (127.0.0.1:55492), MTL0",
+  "device_requested": "auto",
+  "fallback_reason": null,
+  "in_flight": 0,
+  "load_ms": 78687.219625,
+  "loaded_at_utc": "2026-11-06T08:26:37Z",
+  "loaded_for": "local",
+  "model_id": "qwen2.5-1.5b-instruct-q4_k_m",
+  "model_sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+  "n_ctx": 1024,
+  "offloaded_layers": 29,
+  "parallel_slots": 4,
+  "pid": 52934,
+  "split": [
+   {
+    "device": "RPC0",
+    "end_block": 14,
+    "first_block": 0
+   },
+   {
+    "device": "MTL0",
+    "end_block": 28,
+    "first_block": 14
+   }
+  ],
+  "threads": 4,
+  "total_layers": 28
+ },
+ "queue": {
+  "inflight": 0,
+  "max_concurrent": 4,
+  "max_queue": 32,
+  "queued": 0
+ },
+ "split": {
+  "ended": null,
+  "model_id": "qwen2.5-1.5b-instruct-q4_k_m",
+  "peer": "98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf",
+  "session": "6b1a8e5573c0f75d70877353e2a25278",
+  "split_at": 14,
+  "split_mode": "pooled",
+  "stage_device": "CPU (Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz)",
+  "stages": [
+   {
+    "device": "RPC0",
+    "end_block": 14,
+    "first_block": 0
+   },
+   {
+    "device": "MTL0",
+    "end_block": 28,
+    "first_block": 14
+   }
+  ],
+  "switches": 100,
+  "to_h": 31781,
+  "to_r": 402276324
+ },
+ "uptime_seconds": 342,
+ "version": "0.1.1"
+}

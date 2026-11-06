@@ -1,0 +1,148 @@
+{
+ "R1a": {
+  "runs": [
+   {
+    "prompt": 1,
+    "to_r": 17021.6,
+    "to_h": 3592.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 38.583,
+    "tpot_band": [
+     20.0,
+     46.2
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 153.6,
+    "ttft_band": [
+     150.8,
+     295.0
+    ],
+    "ttft_ok": true,
+    "prefix_match_with_local": null
+   },
+   {
+    "prompt": 2,
+    "to_r": 17021.6,
+    "to_h": 3592.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 33.997,
+    "tpot_band": [
+     20.0,
+     46.2
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 349.4,
+    "ttft_band": [
+     161.2,
+     318.8
+    ],
+    "ttft_ok": false,
+    "prefix_match_with_local": null
+   },
+   {
+    "prompt": 3,
+    "to_r": 17021.6,
+    "to_h": 3592.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 36.992,
+    "tpot_band": [
+     20.0,
+     46.2
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 140.6,
+    "ttft_band": [
+     156.0,
+     306.2
+    ],
+    "ttft_ok": false,
+    "prefix_match_with_local": null
+   }
+  ],
+  "bytes_ok": true,
+  "turns_ok": true,
+  "tpot_consistent": true,
+  "ttft_ok": false,
+  "median_tpot_ms": 36.992,
+  "ramp_down_on_real_hardware": "supported"
+ },
+ "R1b": {
+  "runs": [
+   {
+    "prompt": 1,
+    "to_r": 25173.1,
+    "to_h": 6152.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 49.017,
+    "tpot_band": [
+     29.0,
+     68.8
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 306.6,
+    "ttft_band": [
+     228.0,
+     453.8
+    ],
+    "ttft_ok": true,
+    "prefix_match_with_local": null
+   },
+   {
+    "prompt": 2,
+    "to_r": 25173.1,
+    "to_h": 6152.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 51.77,
+    "tpot_band": [
+     29.0,
+     68.8
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 345.1,
+    "ttft_band": [
+     249.8,
+     500.0
+    ],
+    "ttft_ok": true,
+    "prefix_match_with_local": null
+   },
+   {
+    "prompt": 3,
+    "to_r": 25173.1,
+    "to_h": 6152.0,
+    "turns": 1.0,
+    "bytes_ok": true,
+    "turns_ok": true,
+    "tpot_ms": 51.667,
+    "tpot_band": [
+     29.0,
+     68.8
+    ],
+    "tpot": "consistent",
+    "ttft_ms": 305.1,
+    "ttft_band": [
+     238.5,
+     477.5
+    ],
+    "ttft_ok": true,
+    "prefix_match_with_local": null
+   }
+  ],
+  "bytes_ok": true,
+  "turns_ok": true,
+  "tpot_consistent": true,
+  "ttft_ok": true,
+  "median_tpot_ms": 51.667,
+  "ramp_down_on_real_hardware": "supported"
+ }
+}

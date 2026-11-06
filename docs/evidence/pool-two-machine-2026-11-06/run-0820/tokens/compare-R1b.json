@@ -1,0 +1,20 @@
+[
+ {
+  "model": "R1b",
+  "prompt": 1,
+  "equal": true,
+  "equal_prefix_chars": 282
+ },
+ {
+  "model": "R1b",
+  "prompt": 2,
+  "equal": true,
+  "equal_prefix_chars": 311
+ },
+ {
+  "model": "R1b",
+  "prompt": 3,
+  "equal": false,
+  "equal_prefix_chars": 164
+ }
+]

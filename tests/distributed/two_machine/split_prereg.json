@@ -62,7 +62,7 @@
    "max_tokens": 1
   }
  },
- "checkpoints": "per prompt, one split session, nothing in between: loaded, after_n1, after_n65; each read from GET /api/status split {to_r, to_h, switches} 0.2 s after the stream's [DONE]",
+ "checkpoints": "per prompt, one split session: a max_tokens 1 warm-up request on the same prompt, then loaded, after_n1, after_n65 with nothing in between; each read from GET /api/status split {to_r, to_h, switches} 0.2 s after the stream's [DONE]. The warm-up (amended 2026-10-29 before any P1 run, from S1-M) takes the first request's one-time graph upload out of the decode-only subtraction",
  "timing": "client side on H, the max_tokens 65 stream: ttft_ms = request sent to the first chunk with non-empty text; tpot_ms = ([DONE] time - ttft_ms) / (usage.completion_tokens - 1)",
  "t_rpc_s": 10,
  "byte_cap": "2 x est_bytes + 1 GiB per direction per load (ADR-0005 D6; lab C5-NUMBERS.md: 1,454 MB for R1a, 1,877 MB for R1b)",

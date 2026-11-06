@@ -9,9 +9,9 @@ It starts nothing. Point it at a daemon started with its own UCOMPUTE_HOME and p
 
 Each cycle runs, in an order drawn from --seed: a golden completion (JSON), a golden stream, a stream cancelled by
 closing the socket, a chat completion, a pull that must hit the cache, an overload burst, and every --kill-every
-cycles a SIGKILL of the engine. Every --sample seconds one JSONL line: the daemon's RSS and open files, its engines
-and any orphaned engine, the log size, the error-code histogram and the p95 of golden completions in that window.
-The last line is the verdict.
+cycles a SIGKILL of the engine. Every --sample seconds one JSONL line: the daemon's RSS and open files, the host's
+load averages (/proc/loadavg; null where it does not exist), its engines and any orphaned engine, the log size, the
+error-code histogram and the p95 of golden completions in that window. The last line is the verdict.
 
 Bounds, fixed before any run: zero untyped errors (an error response without a known `error.code`, or no response
 at all); zero orphaned engines (an engine of --home whose parent is not the daemon) at every sample; every golden
@@ -78,12 +78,19 @@ def verdict(samples, untyped, not_golden, slow_recoveries, rss_mib, fd_growth):
     return fails
 
 
-def call(api, method, path, body=None, timeout=120):
+# How long a client request waits for its answer: above every bound the daemon applies to one request, admission
+# queue 30 s + a load in progress 300 s + generation total 600 s (`ucompute-core` `Timeouts::default`), plus 30 s.
+# A daemon that gives up therefore answers with a typed error before the client gives up, and an untyped no-response
+# means the daemon exceeded all of its bounds (the 2026-10-29 soak's 120 s equalled the daemon's first-token timeout).
+REQUEST_TIMEOUT = 960
+
+
+def call(api, method, path, body=None, timeout=None):
     req = urllib.request.Request(api + path, data=None if body is None else json.dumps(body).encode(), method=method,
                                  headers={"Content-Type": "application/json"})
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as r:
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read()
@@ -96,14 +103,14 @@ def call(api, method, path, body=None, timeout=120):
     return status, val, (time.monotonic() - t0) * 1000
 
 
-def sse(api, path, body, stop_after=None, timeout=120):
+def sse(api, path, body, stop_after=None, timeout=None):
     """(200, data events) or (status, error body); an error event inside the stream reads as a 500 with its body.
     With stop_after, closes the socket after that many events (a client cancel)."""
     req = urllib.request.Request(api + path, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     evs = []
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or REQUEST_TIMEOUT) as r:
             for line in r:
                 line = line.decode().strip()
                 if not line.startswith("data:") or line == "data: [DONE]":
@@ -157,6 +164,15 @@ def fds(pid):
     except OSError:
         out = subprocess.run(["lsof", "-n", "-P", "-p", str(pid)], capture_output=True, text=True).stdout
         return max(0, len(out.splitlines()) - 1) if out else None
+
+
+def loadavg(path="/proc/loadavg"):
+    """The 1, 5 and 15 minute load averages from /proc/loadavg; None where it does not exist (macOS)."""
+    try:
+        with open(path) as f:
+            return [float(x) for x in f.read().split()[:3]]
+    except (OSError, ValueError):
+        return None
 
 
 class Soak:
@@ -249,7 +265,7 @@ class Soak:
         except OSError:
             log = None
         row = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "elapsed_s": round(time.monotonic() - t_start),
-               "cycles": self.cycles, "rss_kib": rss_kib(self.a.pid), "fds": fds(self.a.pid), "engines": len(mine),
+               "cycles": self.cycles, "rss_kib": rss_kib(self.a.pid), "fds": fds(self.a.pid), "loadavg": loadavg(), "engines": len(mine),
                "orphans": orphans, "log_bytes": log, "golden_p95_ms": p95(self.lat), "golden_n": len(self.lat),
                "codes": dict(self.codes), "kills_recovered_s": self.kills, "errors": self.errors}
         out.write(json.dumps(row) + "\n")
@@ -259,6 +275,7 @@ class Soak:
 
 
 def main():
+    global REQUEST_TIMEOUT
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--api", default="http://127.0.0.1:18500")
     ap.add_argument("--pid", type=int, required=True, help="the daemon's pid")
@@ -273,7 +290,10 @@ def main():
     ap.add_argument("--only", help="comma-separated steps to run (golden,golden_stream,cancel,chat,pull,overload); all by default")
     ap.add_argument("--rss-mib", type=float, default=64)
     ap.add_argument("--fd-growth", type=int, default=16)
+    ap.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT,
+                    help="seconds a request waits for its answer (above the daemon's queue + load + total bounds)")
     a = ap.parse_args()
+    REQUEST_TIMEOUT = a.request_timeout
     if not a.api.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:")):
         sys.exit("loopback API only")
     a.home = os.path.abspath(os.path.expanduser(a.home))

@@ -49,6 +49,10 @@ Raw files rewritten under this note:
 - `docs/evidence/release-gate-3379fe9/clippy-windows-gnu.txt`
 - `docs/evidence/release-gate-3379fe9/summary.txt`
 - `docs/evidence/windows-app-2026-10-29/verify-77262a5.json`
+- `docs/evidence/linux-soak-2026-10-29/daemon.log.gz`
+- `docs/evidence/linux-soak-2026-10-29/interference.log.gz`
+- `docs/evidence/linux-soak-2026-10-29/soak.jsonl.gz`
+- `docs/evidence/linux-soak-2026-10-29/version.txt`
 
 Screenshots: in `docs/evidence/img/windows-app-chat-ran-on-mac-2026-10-19.png` and `docs/evidence/img/windows-app-wrong-pairing-code-2026-10-19.png` the app's name label at the top of the sidebar (pixels x 44-127, y 16-47) was painted over with the sidebar's white (D-030); no other pixel changed. The originals are in git history. The screenshots in `docs/evidence/img/desktop-ui2/` already showed UCompute and are unchanged.
 

@@ -1,0 +1,11 @@
+{
+ "text": " Keep the plant away from cold drafts and direct sunlight. The second tip is to water the plant only when the soil is dry. The third tip is to place the plant in a warm, humid environment. The label on the pot says UCOMPUTE-CANARY-364003C269A",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 47,
+  "total_tokens": 112
+ },
+ "ttft_ms": 305.1,
+ "tpot_ms": 51.667,
+ "target": "split:98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf"
+}

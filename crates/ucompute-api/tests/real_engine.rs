@@ -760,3 +760,101 @@ async fn jobs_list_a_real_streaming_chat_with_live_tokens_on_fixture() {
     );
     srv.stop().await;
 }
+
+/// F-08-08 bounded response, SINGLE-HOST (one host, the real pinned engine on stories15M; nothing
+/// is mocked): repeated 40-bursts against a daemon with 4 slots, a 32-deep queue and a SHORT
+/// first-token timeout. Every request gets an answer, every non-2xx answer a typed code, and every
+/// admitted request answers within queue_timeout + first_token + a margin, the client waiting far
+/// longer than that, and no admitted request ends `backend_failed` on the live engine. That last
+/// check guards the no-reuse engine client only probabilistically: with idle connection reuse, three
+/// 40-round runs on sentinel (2026-10-31) had 2, 0 and 1 `backend_failed` (the 8-minute burst driver
+/// measured 0.53 %); raise `UCOMPUTE_BURST_ROUNDS` (default 40) for a stronger check. A pass bounds
+/// the admitted requests of THIS run; it is not proof that the Linux soak's two unanswered requests
+/// cannot recur.
+#[tokio::test(flavor = "multi_thread")]
+async fn bursts_answer_within_the_first_token_bound_single_host() {
+    let timeouts = Timeouts {
+        first_token: Duration::from_secs(2),
+        ..Timeouts::default()
+    };
+    let queue_timeout = Duration::from_secs(5);
+    let Some(srv) = fixture_server(ApiConfig {
+        max_concurrent: 4,
+        max_queue: 32,
+        queue_timeout_ms: queue_timeout.as_millis() as u64,
+        timeouts,
+        ..ApiConfig::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let c = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .unwrap();
+    // load first, so the bound below never includes the engine start
+    let r = c
+        .post(srv.url(&format!("/api/models/{MODEL_ID}/load")))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap_or_default());
+    let bound = queue_timeout + timeouts.first_token + Duration::from_secs(3);
+    let rounds: usize = std::env::var("UCOMPUTE_BURST_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let body = json!({"model": MODEL_ID, "prompt": PROMPT, "max_tokens": 64, "temperature": 0});
+    let mut codes = std::collections::BTreeMap::<String, usize>::new();
+    let mut slowest = Duration::ZERO;
+    for round in 0..rounds {
+        let tasks: Vec<_> = (0..40)
+            .map(|_| {
+                let (c, url, body) = (c.clone(), srv.url("/v1/completions"), body.clone());
+                tokio::spawn(async move {
+                    let t = Instant::now();
+                    let r = c.post(url).json(&body).send().await;
+                    let r = match r {
+                        Ok(r) => Ok((r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    (t.elapsed(), r)
+                })
+            })
+            .collect();
+        for t in tasks {
+            let (took, r) = t.await.unwrap();
+            let (status, v) = r.unwrap_or_else(|e| panic!("round {round}: no answer at all after {took:?}: {e}"));
+            let code = if status == 200 {
+                "ok".to_string()
+            } else {
+                v["error"]["code"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("round {round}: untyped HTTP {status}: {v}"))
+                    .to_string()
+            };
+            if code != "overloaded" {
+                slowest = slowest.max(took);
+                assert!(
+                    took <= bound,
+                    "round {round}: an admitted request answered after {took:?} > {bound:?}: {v}"
+                );
+            }
+            *codes.entry(code).or_default() += 1;
+        }
+    }
+    eprintln!("SINGLE-HOST bursts: rounds={rounds} codes={codes:?} slowest_admitted={slowest:?} bound={bound:?}");
+    assert!(
+        codes.get("ok").copied().unwrap_or(0) > 0,
+        "no completion succeeded: {codes:?}"
+    );
+    assert_eq!(
+        codes.get("backend_failed"),
+        None,
+        "an admitted request failed on a live engine (idle connection reuse?): {codes:?}"
+    );
+    srv.stop().await;
+}

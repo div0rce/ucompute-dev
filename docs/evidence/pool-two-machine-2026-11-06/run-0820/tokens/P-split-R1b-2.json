@@ -1,0 +1,11 @@
+{
+ "text": " Rivers carve canyons over millions of years by a process called erosion. This process involves the river moving through the land, carrying sediment with it. As the river moves, it erodes the land around it, creating a series of channels and valleys. Over time, the river continues to move and erode, creating a",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 50,
+  "total_tokens": 115
+ },
+ "ttft_ms": 345.1,
+ "tpot_ms": 51.77,
+ "target": "split:98a1b870fe303498822af3b48cd8db970c83f798f3b067e47d99d1c273a919cf"
+}

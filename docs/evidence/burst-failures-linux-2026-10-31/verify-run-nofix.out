@@ -1,0 +1,9 @@
+start 2026-10-31T16:21:53Z tag=nofix min=6 port=18711 sha=26254fae76e08673
+{"model_id":"stories15M-q4_0","model_sha256":"66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739","backend_name":"llama.cpp","backend_version":"0.6.0-dev (build 11609, commit fcac19079)","device_requested":"cpu","device_actual":"cpu","offloaded_layers":0,"total_layers":6,"n_ctx":128,"t
+149420 /home/div0rce/verify/home-nofix/backends/llama.cpp/b11609/llama-server -m /home/div0rce/verify/home-nofix/models/blobs/sha256-66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739 --host 127.0.0.1 --port 40587 --api-key-file /home/div0rce/verify/home-nofix/logs/engine-2365bc94-715e-449d-949c-095981fa47d4.key -c 128 -t 8 -np 4 -ctk f16 -ctv f16 --metrics --no-webui --offline --log
+SINGLE-HOST verifier bursts=703 requests=28120 admitted=25308 codes={'overloaded': 2812, 'ok': 25175, 'backend_failed': 133}
+backend_failed=133 rate_of_admitted=0.526% slowest_admitted_ms=704
+cause 133 x backend_failed: engine HTTP transport failed: error sending request for url (http://127.0.0.1:PORT/completion): client error (SendRequest): connection closed before message completed
+ok texts: {' named Benny was hopping in a field. He ': 25175}
+load: 8.34 5.97 2.90 1/611 177766
+end 2026-10-31T16:28:01Z

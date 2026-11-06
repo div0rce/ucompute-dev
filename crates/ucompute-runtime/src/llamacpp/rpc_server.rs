@@ -5,7 +5,8 @@
 //! The launch is fixed: `-H 127.0.0.1 -p <port> -t <threads>`. Never `-c`: the local file cache
 //! keeps weights on R's disk and lets a client load tensors by hash. Never `-d`: every device a
 //! server exposes becomes an `RPCk` on H, and the split maps `RPCk` to the k-th endpoint, so a
-//! server must expose exactly one device ([`start`] refuses more).
+//! server must expose exactly one device ([`start`] refuses more). The one exception is a
+//! SINGLE-HOST test's `-d CPU` ([`TEST_STAGE_CPU_ENV`]), still one device.
 //!
 //! Does not claim a sandbox (F-06-08): a same-user process stays ADR-0005 R6.
 //!
@@ -20,7 +21,7 @@
 
 use super::{process, sockets};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
@@ -34,6 +35,25 @@ pub struct RpcServer {
     pub port: u16,
     /// The one device the server exposes, as its banner names it, e.g. `MTL0 (Apple M2)`.
     pub device: String,
+    /// Its stdout and stderr; the caller removes it after a clean stop, as for llama-server's.
+    pub log_path: PathBuf,
+}
+
+/// The SINGLE-HOST test flag under which a non-Linux device hosts a stage, and only for a loopback
+/// peer (`ucompute_network::rpc::single_host_pool_test`).
+pub const TEST_POOL_ENV: &str = "UCOMPUTE_TEST_SINGLE_HOST_POOL";
+/// SINGLE-HOST test only (plan S1-M, configuration C with ggml-cpu on both stages): with
+/// [`TEST_POOL_ENV`] also `1`, `-d CPU` holds the server to its CPU device instead of this Mac's
+/// Metal. It still exposes exactly one device. Production sets neither, so its line stays [`args`].
+pub const TEST_STAGE_CPU_ENV: &str = "UCOMPUTE_TEST_STAGE_CPU";
+
+/// The extra arguments of a SINGLE-HOST CPU stage ([`TEST_STAGE_CPU_ENV`]), else none.
+pub fn test_device_args(pool: Option<OsString>, cpu: Option<OsString>) -> &'static [&'static str] {
+    if pool.is_some_and(|v| v == "1") && cpu.is_some_and(|v| v == "1") {
+        &["-d", "CPU"]
+    } else {
+        &[]
+    }
 }
 
 /// The banner and the listener appear within a second on this Mac (b11609, Metal).
@@ -118,6 +138,10 @@ pub async fn start_at(
     let log = std::fs::File::create(&log_path)?;
     let mut cmd = Command::new(&binary);
     cmd.args(args(port, threads))
+        .args(test_device_args(
+            std::env::var_os(TEST_POOL_ENV),
+            std::env::var_os(TEST_STAGE_CPU_ENV),
+        ))
         .env_clear()
         .envs(environment(std::env::vars_os()))
         .stdin(Stdio::null())
@@ -135,9 +159,18 @@ pub async fn start_at(
         )
     })?;
     match wait_ready(&mut child, port, &log_path).await {
-        Ok(device) => Ok(RpcServer { child, port, device }),
+        Ok(device) => Ok(RpcServer {
+            child,
+            port,
+            device,
+            log_path,
+        }),
         Err(e) => {
             process::stop(child).await;
+            // a squatted port is in the message and [`start`] retries: its log holds nothing
+            if e.message.contains(SQUATTED) {
+                let _ = std::fs::remove_file(&log_path);
+            }
             Err(e)
         }
     }
@@ -240,12 +273,16 @@ fn listener_state(_pid: u32, _port: u16) -> Result<sockets::Listener> {
 }
 
 /// Linux, between fork and exec (async-signal-safe calls only): die with the daemon, refuse to run
-/// if the daemon already died, cap the address space, and yield the CPU to the daemon.
+/// if the daemon already died, cap the address space, and yield the CPU to the daemon. The cap and
+/// the nice only ever tighten what the daemon has: an unprivileged process can lower its RLIMIT_AS
+/// and raise its nice, never the reverse, so a daemon already niced above 10 or under a lower hard
+/// limit keeps those instead of failing every spawn.
 #[cfg(target_os = "linux")]
 fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
     let daemon = std::process::id() as libc::pid_t;
     // SAFETY: the closure runs in the forked child before exec and makes only async-signal-safe
-    // syscalls (prctl, getppid, setrlimit, setpriority, _exit); it allocates nothing.
+    // syscalls (prctl, getppid, getrlimit, setrlimit, getpriority, setpriority, _exit); it
+    // allocates nothing.
     unsafe {
         cmd.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
@@ -256,6 +293,15 @@ fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
                 libc::_exit(1);
             }
             if let Some(cap) = mem_cap {
+                let mut now = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_AS, &mut now) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // rlim_cur <= rlim_max; RLIM_INFINITY is the largest value
+                let cap = cap.min(now.rlim_cur);
                 let limit = libc::rlimit {
                     rlim_cur: cap,
                     rlim_max: cap,
@@ -264,7 +310,8 @@ fn confine(cmd: &mut Command, mem_cap: Option<u64>) {
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
+            // a failed getpriority reads as -1: then 10 is set, or the spawn fails as before
+            if libc::getpriority(libc::PRIO_PROCESS, 0) < 10 && libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -287,6 +334,19 @@ mod tests {
         assert!(!a
             .iter()
             .any(|x| x == "-c" || x == "--cache" || x == "-d" || x == "--device"));
+    }
+
+    #[test]
+    fn rpc_server_cpu_stage_only_under_both_test_flags() {
+        let on = || Some(OsString::from("1"));
+        assert_eq!(test_device_args(on(), on()), ["-d", "CPU"]);
+        assert!(
+            test_device_args(None, on()).is_empty(),
+            "never without the pool test flag"
+        );
+        assert!(test_device_args(on(), None).is_empty());
+        assert!(test_device_args(Some("0".into()), on()).is_empty());
+        assert!(test_device_args(on(), Some("true".into())).is_empty());
     }
 
     #[test]

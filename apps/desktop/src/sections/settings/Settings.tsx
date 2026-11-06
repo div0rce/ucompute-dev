@@ -2,7 +2,7 @@ import "./settings.css";
 import { useState, type ReactNode } from "react";
 // Named import: Vite tree-shakes JSON, so only the version reaches the bundle (not the dependency list).
 import { version as appVersion } from "../../../package.json";
-import { api, getBaseUrl, shortLabel, type PrivacyMode } from "../../api/client";
+import { api, getBaseUrl, shortLabel, type LocalPriority, type PrivacyMode } from "../../api/client";
 import { explain, type MappedError } from "../../api/errors";
 import { devDaemonUrl, refreshStatus } from "../../daemon";
 import { clock, humanBytes, num, plural } from "../../format";
@@ -55,7 +55,7 @@ function useNetworkPut() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState<MappedError | null>(null);
   const [busy, setBusy] = useState(false);
-  async function put(body: { enabled: boolean; serve_peers: boolean }, done: string) {
+  async function put(body: Parameters<typeof api.setNetwork>[0], done: string) {
     setBusy(true);
     setError(null);
     setStatus("");
@@ -221,6 +221,56 @@ function Network() {
   );
 }
 
+/** D-026: the three local-priority choices, the default first; one sentence of trade-off each (tested verbatim). */
+export const LOCAL_PRIORITY: { value: LocalPriority; label: string; help: string }[] = [
+  {
+    value: "refuse_new",
+    label: "Finish their requests, take no new ones (default)",
+    help: "Requests already running finish, and new ones are turned away while your own work runs and for 2 seconds after, so your replies stay fast.",
+  },
+  {
+    value: "preempt",
+    label: "Stop their requests",
+    help: "Your work gets the processor at once, but requests paired devices already started here are stopped and they are told to try again later.",
+  },
+  {
+    value: "none",
+    label: "Share the processor",
+    help: "Paired devices' requests keep running beside yours, which can make your own replies about a third to a half slower.",
+  },
+];
+
+/** D-026: a radio group that applies at once (PUT /api/network `local_priority`). */
+function LocalPriorityChoice({ current, busy, put }: { current: LocalPriority; busy: boolean; put: (body: { local_priority: LocalPriority }, done: string) => Promise<void> }) {
+  return (
+    <fieldset className="settings-fieldset">
+      <legend>When this computer runs its own work on the processor</legend>
+      <p id="local-priority-help" className="note settings-help">
+        What happens to requests from paired devices while you use a model running on the CPU. Models on the GPU are not affected.
+      </p>
+      <div className="settings-modes" role="radiogroup" aria-label="When this computer runs its own work on the processor" aria-describedby="local-priority-help">
+        {LOCAL_PRIORITY.map((o) => (
+          <label key={o.value} className="settings-mode">
+            <input
+              type="radio"
+              name="local-priority"
+              value={o.value}
+              checked={current === o.value}
+              // aria-disabled, not disabled: a keyboard user's focus stays on the group while the change applies.
+              aria-disabled={busy || undefined}
+              onChange={() => !busy && void put({ local_priority: o.value }, `Saved: ${o.label.replace(" (default)", "").toLowerCase()}.`)}
+            />
+            <span>
+              <strong>{o.label}</strong>
+              <span className="note">{o.help}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function Sharing() {
   const reachable = daemon.use().reachable;
   const netData = network.use().data;
@@ -241,6 +291,7 @@ function Sharing() {
       ) : (
         <UnknownSwitch label="Run requests for paired devices" reachable={reachable} />
       )}
+      {net ? <LocalPriorityChoice current={net.local_priority ?? "refuse_new"} busy={busy} put={put} /> : null}
       {outcome}
       <KV
         items={[

@@ -46,6 +46,7 @@ use ucompute_core::{ErrorCode, Paths, Result, UComputeError};
 use ucompute_identity::{utc_now, DeviceIdentity, Group, PeerId, PeerRecord, Revocation};
 use ucompute_network::discovery::{Advertiser, Browser, DiscoveredPeer, UnreachablePeer, LISTED_SECS};
 use ucompute_network::health::PeerHealth;
+use ucompute_network::local_priority::LocalPriority;
 use ucompute_network::pairing;
 use ucompute_network::proto::{control_message::Body, read_frame, write_frame, ControlMessage, RevocationMsg};
 use ucompute_network::transport::{ControlStream, HeldControl, Node, PeerConnection};
@@ -86,6 +87,10 @@ pub struct Settings {
     /// Limits on what paired devices may run here (F-06-04); read once when the daemon starts.
     #[serde(default)]
     pub peer_quota: PeerQuota,
+    /// Local work first on CPU engines (D-026); `refuse_new` when absent. Applies to the next
+    /// peer request, without restarting the endpoint.
+    #[serde(default)]
+    pub local_priority: LocalPriority,
 }
 
 /// `config.json` `"peer_quota"`: per-peer token buckets for requests served to paired devices.
@@ -149,8 +154,9 @@ impl PeerQuota {
             engine_slots: Some(engine_slots),
             peer_slots: Arc::new(tokio::sync::Semaphore::new(self.peer_slots(engine_slot_count))),
             jobs: ucompute_observability::jobs::Jobs::new(),
-            // set by `AppState::new` (WP-04 stage host)
+            // set by `AppState::new` (WP-04 stage host; D-026 local work)
             rpc: None,
+            local: None,
         }
     }
 }
@@ -202,6 +208,10 @@ impl SettingsCell {
 
     pub(crate) fn peer_quota(&self) -> PeerQuota {
         self.value.peer_quota
+    }
+
+    pub(crate) fn local_priority(&self) -> LocalPriority {
+        self.value.local_priority
     }
 }
 
@@ -346,12 +356,14 @@ impl AppState {
             };
             cell.stamp = stamp;
         }
+        self.local_work.set_mode(cell.value.local_priority);
         cell.value
     }
 
     /// Replace the in-memory settings until `config.json` next changes (not persisted;
     /// `serve_on` uses it to show networking off when the endpoint could not start).
     pub fn set_settings(&self, s: Settings) {
+        self.local_work.set_mode(s.local_priority);
         lock(&self.settings).value = s;
     }
 
@@ -368,6 +380,7 @@ impl AppState {
             after.save(&self.paths)?;
             cell.value = after;
             cell.stamp = file_stamp(&Settings::path(&self.paths));
+            self.local_work.set_mode(after.local_priority);
         }
         Ok((before, after))
     }
@@ -689,6 +702,7 @@ impl AppState {
         json!({
             "enabled": node.is_some(),
             "serve_peers": s.serve_peers,
+            "local_priority": s.local_priority,
             "listen_addr": listen.map(|a| a.to_string()),
             // null too when bound on every interface without a route: 0.0.0.0 is not dialable.
             "dial_addr": listen.map(routable).filter(|a| !a.ip().is_unspecified()).map(|a| a.to_string()),
@@ -1310,6 +1324,9 @@ pub struct NetworkBody {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub serve_peers: Option<bool>,
+    /// D-026: `refuse_new`, `preempt` or `none`; any other value is `invalid_request`.
+    #[serde(default)]
+    pub local_priority: Option<LocalPriority>,
 }
 
 /// Changes are persisted (a read-modify-write of `config.json`, so a concurrent CLI privacy change
@@ -1323,10 +1340,23 @@ pub async fn network_put(
     let (before, after) = st.update_settings(|s| Settings {
         network_enabled: body.enabled.unwrap_or(s.network_enabled),
         serve_peers: body.serve_peers.unwrap_or(s.serve_peers),
+        local_priority: body.local_priority.unwrap_or(s.local_priority),
         ..s
     })?;
+    if after.local_priority != before.local_priority {
+        st.audit(
+            "local_priority_changed",
+            None,
+            json!({ "local_priority": after.local_priority }),
+        );
+    }
+    // The local-priority rule is read per peer request; only the rest restarts the endpoint.
+    let network_changed = Settings {
+        local_priority: before.local_priority,
+        ..after
+    } != before;
     let running = st.net.lock().await.node.is_some();
-    if after != before || after.network_enabled != running {
+    if network_changed || after.network_enabled != running {
         if let Err(e) = st.apply_network().await {
             st.update_settings(|s| Settings {
                 network_enabled: false,

@@ -1,0 +1,6 @@
+ %CPU   PID COMM
+ 62.4 24326 /System/Library/PrivateFrameworks/CacheDelete.framework/deleted
+ 48.0 24898 /usr/libexec/triald_system
+ 33.5  8969 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd
+ 13.6 68822 /System/Library/CoreServices/TimeMachine/backupd
+  9.8  8249 /System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd

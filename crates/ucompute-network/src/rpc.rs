@@ -18,12 +18,14 @@
 //! this daemon's own sockets, and re-checks on every tick.
 //!
 //! **Limits** ([`Limits`]): one session per R, [`MAX_TUNNELS`] tunnels open at once, the TTL, the
-//! idle close, H's `T_rpc` silence watchdog and per-load byte cap ([`byte_cap`], `rpc_meter`), the
+//! idle close, H's `T_rpc` silence watchdog and per-load byte cap ([`byte_cap`], `rpc_meter`), R's
+//! per-session byte cap of two loads ([`stage_byte_cap`]) and address-space cap within what
+//! admission found free, H's bound on concurrent owner checks, R's bounded writes to H, the
 //! command allowlist and graph-op check on both sides (R enforces them against H: a hostile head
 //! cannot send `COMM_INIT`), and the policy and ownership tick on both sides.
 //!
-//! **Teardown.** Any end resets every tunnel and the session stream; R kills rpc-server and checks
-//! that no listener is left. The reason ([`SplitSession::failure`]) is this side's own when it
+//! **Teardown.** Any end resets every tunnel and the session stream; R kills rpc-server, checks
+//! that no listener is left and frees its slot before it tells H why. The reason ([`SplitSession::failure`]) is this side's own when it
 //! knows one (policy, hold, cap, watchdog), R's when R says why, otherwise `peer_lost`. Nothing
 //! falls back to local (D7): the caller unloads the split engine and fails its requests with that
 //! reason (C6).
@@ -61,8 +63,11 @@ pub const RPC_RESET: u32 = 0x5250;
 pub const MAX_TUNNELS: usize = 8;
 /// `UCOMPUTE_TEST_SINGLE_HOST_POOL=1` lets a non-Linux device host a stage, and only for a peer whose
 /// address is loopback ([`single_host_pool_test`]).
-pub const TEST_POOL_ENV: &str = "UCOMPUTE_TEST_SINGLE_HOST_POOL";
+pub const TEST_POOL_ENV: &str = rpc_server::TEST_POOL_ENV;
 const ACCEPT_WAIT: Duration = Duration::from_secs(30);
+/// R's writes on a session stream (the accept, the closing reason): a head that grants no
+/// flow-control credit is a lost head, and cannot hold rpc-server or the slot.
+const WRITE_WAIT: Duration = Duration::from_secs(5);
 const CHUNK: usize = 64 << 10;
 const SESSION_ID_BYTES: usize = 16;
 /// Memory R keeps for itself at admission (D6).
@@ -73,6 +78,12 @@ const MEMORY_RESERVE: u64 = 2 << 30;
 // requests of R1a/R1b, before the 30 min TTL; scale it with the TTL if that is wrong for users).
 pub fn byte_cap(est_bytes: u64) -> u64 {
     est_bytes.saturating_mul(2).saturating_add(1 << 30)
+}
+
+/// R's byte cap per direction and session: two loads' worth of H's cap. R sees no engine starts,
+/// so it cannot count per load; two loads allow the runtime's one retry after a lost port race.
+pub fn stage_byte_cap(granted: u64) -> u64 {
+    byte_cap(granted).saturating_mul(2)
 }
 
 /// R is Linux only in this build (ADR-0005 D3), except a SINGLE-HOST test with a loopback peer.
@@ -149,8 +160,18 @@ async fn tell(send: &mut SendStream, e: &UComputeError) {
         message: short(&e.message),
     })
     .into();
-    let _ = write_frame(send, &msg).await;
-    let _ = send.finish();
+    if write_bounded(send, &msg).await {
+        let _ = send.finish();
+    }
+}
+
+/// One write of R to H within [`WRITE_WAIT`]; past it the head is lost and the stream is reset.
+async fn write_bounded(send: &mut SendStream, msg: &ControlMessage) -> bool {
+    let r = tokio::time::timeout(WRITE_WAIT, write_frame(send, msg)).await;
+    if r.is_err() {
+        let _ = send.reset(reset_code());
+    }
+    matches!(r, Ok(Ok(())))
 }
 
 fn reset_code() -> VarInt {
@@ -172,6 +193,10 @@ struct Shared {
     last_open: Mutex<Option<Instant>>,
     /// H: the engine start whose connections were carried last (`EnginePid` count).
     load: AtomicU32,
+    /// H: connections the bridge refused, and (when, how many) at the last `rpc_bridge_refused`
+    /// line: at most one line a second, so a local flood cannot fill the audit log.
+    refused: AtomicU64,
+    refused_line: Mutex<(Option<Instant>, u64)>,
     started: Instant,
 }
 
@@ -186,6 +211,8 @@ impl Shared {
             opened: AtomicU64::new(0),
             last_open: Mutex::new(None),
             load: AtomicU32::new(0),
+            refused: AtomicU64::new(0),
+            refused_line: Mutex::new((None, 0)),
             started: Instant::now(),
         })
     }
@@ -269,6 +296,7 @@ impl Shared {
             "to_h": c.to_h,
             "switches": c.switches,
             "tunnels": self.opened.load(Ordering::Relaxed),
+            "refused": self.refused.load(Ordering::Relaxed),
             "duration_ms": self.started.elapsed().as_millis() as u64,
         })
     }
@@ -278,7 +306,7 @@ fn trip_error(t: Trip) -> UComputeError {
     match t {
         Trip::ByteCap { dir, total, cap } => UComputeError::new(
             ErrorCode::Overloaded,
-            format!("pooled traffic {dir:?} reached {total} bytes, over the {cap}-byte cap for one load"),
+            format!("pooled traffic {dir:?} reached {total} bytes, over the {cap}-byte cap"),
         ),
         Trip::Command { cmd } => UComputeError::new(
             ErrorCode::PolicyDenied,
@@ -287,6 +315,10 @@ fn trip_error(t: Trip) -> UComputeError {
         Trip::GraphOp { op } => UComputeError::new(
             ErrorCode::PolicyDenied,
             format!("graph op {op} is not allowed in a pooled session"),
+        ),
+        Trip::GraphNode => UComputeError::new(
+            ErrorCode::PolicyDenied,
+            "a null graph node is not allowed in a pooled session",
         ),
         Trip::GraphTooLarge { size } => UComputeError::new(
             ErrorCode::FrameTooLarge,
@@ -301,6 +333,7 @@ fn trip_outcome(t: Trip) -> &'static str {
         Trip::ByteCap { .. } => "byte_cap",
         Trip::Command { .. } => "refused_command",
         Trip::GraphOp { .. } => "refused_graph_op",
+        Trip::GraphNode => "refused_graph_node",
         Trip::GraphTooLarge { .. } => "refused_graph_size",
     }
 }
@@ -698,6 +731,8 @@ async fn run_head(
     let bridge = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let mut tick = tokio::time::interval(spec.limits.tick);
     let mut idle_since = Some(Instant::now());
+    // owner checks at once (each one a `lsof` child on macOS, a /proc scan on Linux)
+    let checks = Arc::new(tokio::sync::Semaphore::new(MAX_TUNNELS));
     {
         let r_end = session_end(&mut recv);
         tokio::pin!(r_end);
@@ -709,7 +744,12 @@ async fn run_head(
                     break;
                 }
                 a = listener.accept() => if let Ok((tcp, from)) = a {
-                    tokio::spawn(head_tunnel(conn.clone(), audit.clone(), tcp, bridge, from, shared.clone(), spec.engine.clone()));
+                    match checks.clone().try_acquire_owned() {
+                        Ok(check) => {
+                            tokio::spawn(head_tunnel(conn.clone(), audit.clone(), tcp, bridge, from, shared.clone(), spec.engine.clone(), check));
+                        }
+                        Err(_) => bridge_refused(&audit, &peer, &shared, bridge, &tcp, "owner_checks_busy"),
+                    }
                 },
                 _ = tick.tick() => {
                     let reason = match node.upgrade() {
@@ -738,6 +778,10 @@ async fn run_head(
     record(&audit, "session_close", &peer, shared.close_fields("head", &reason));
 }
 
+/// Whether [`engine_owns`] can prove anything on this platform; a head elsewhere refuses a split
+/// before any connection (`ucompute-api` `split::ensure`).
+pub const HEAD_OWNER_CHECK: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 /// The client end `client` -> 127.0.0.1:`bridge` belongs to the split engine: its start count, else
 /// None. The whole accepted address is matched, not its port: another local process can reuse the
 /// engine's client port from 127.0.0.2 or a LAN address. Fails closed where no owner check exists.
@@ -753,6 +797,29 @@ fn engine_owns(engine: &EnginePid, bridge: u16, client: SocketAddr) -> Option<u3
     owned.then_some(load)
 }
 
+/// Resets a bridge connection (RST) and audits it, one line a second at most: the line says how
+/// many refusals it stands for, and the session's close line has the total.
+fn bridge_refused(audit: &Audit, peer: &PeerId, shared: &Shared, bridge: u16, tcp: &TcpStream, reason: &str) {
+    let _ = tcp.set_zero_linger();
+    let client = tcp.peer_addr().map_or(0, |a| a.port());
+    let total = shared.refused.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = Instant::now();
+    let mut line = lock(&shared.refused_line);
+    if line.0.is_some_and(|t| now < t + Duration::from_secs(1)) {
+        return;
+    }
+    let refusals = total - line.1;
+    *line = (Some(now), total);
+    tracing::info!(peer = %peer.short_label(), client, reason, refusals, "pooled bridge refused a connection");
+    record(
+        audit,
+        "rpc_bridge_refused",
+        peer,
+        serde_json::json!({ "session": shared.hex(), "bridge_port": bridge, "client_port": client, "reason": reason, "refusals": refusals }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn head_tunnel(
     conn: Arc<PeerConnection>,
     audit: Arc<Audit>,
@@ -761,23 +828,15 @@ async fn head_tunnel(
     from: SocketAddr,
     shared: Arc<Shared>,
     engine: EnginePid,
+    check: tokio::sync::OwnedSemaphorePermit,
 ) {
     let peer = conn.peer_id;
-    let client = from.port();
-    let refused = |reason: &str| {
-        tracing::info!(peer = %peer.short_label(), client, reason, "pooled bridge refused a connection");
-        record(
-            &audit,
-            "rpc_bridge_refused",
-            &peer,
-            serde_json::json!({ "session": shared.hex(), "bridge_port": bridge, "client_port": client, "reason": reason }),
-        );
-        let _ = tcp.set_zero_linger();
-    };
+    let refused = |reason: &str| bridge_refused(&audit, &peer, &shared, bridge, &tcp, reason);
     let owner = tokio::task::spawn_blocking(move || engine_owns(&engine, bridge, from))
         .await
         .ok()
         .flatten();
+    drop(check);
     let Some(load) = owner else {
         return refused("not_the_engine");
     };
@@ -852,6 +911,8 @@ pub struct Stage {
     /// Bytes available now (`ucompute_hardware::available_memory`).
     pub available_memory: fn() -> Option<u64>,
     pub limits: Limits,
+    /// Per direction and session; None is [`stage_byte_cap`]`(granted)`.
+    pub byte_cap: Option<u64>,
     busy: AtomicBool,
     session: Mutex<Option<Arc<StageSession>>>,
 }
@@ -892,6 +953,7 @@ impl Stage {
             threads,
             available_memory: ucompute_hardware::available_memory,
             limits: Limits::default(),
+            byte_cap: None,
             busy: AtomicBool::new(false),
             session: Mutex::new(None),
         }
@@ -902,8 +964,8 @@ impl Stage {
         lock(&self.session).as_ref().map(|s| (s.pid, s.port))
     }
 
-    /// Admission in ADR-0005's order; the session slot on success.
-    fn admit(&self, conn: &PeerConnection, open: &RpcSessionOpen) -> Result<Slot<'_>> {
+    /// Admission in ADR-0005's order; the session slot and rpc-server's address-space cap on success.
+    fn admit(&self, conn: &PeerConnection, open: &RpcSessionOpen) -> Result<(Slot<'_>, u64)> {
         if open.session_id.len() != SESSION_ID_BYTES
             || open.layer_start >= open.layer_end
             || open.layer_end > open.n_layer
@@ -930,19 +992,8 @@ impl Stage {
             ));
         }
         let slot = Slot(self);
-        let need = open.est_bytes.saturating_add(open.est_bytes / 10);
-        let have = (self.available_memory)().unwrap_or(0).saturating_sub(MEMORY_RESERVE);
-        if need > have {
-            return Err(UComputeError::new(
-                ErrorCode::InsufficientMemory,
-                format!(
-                    "the stage needs {} MiB and this device can give {} MiB while keeping 2 GiB free",
-                    need >> 20,
-                    have >> 20
-                ),
-            ));
-        }
-        Ok(slot)
+        let cap = memory_grant(open.est_bytes, (self.available_memory)().unwrap_or(0))?;
+        Ok((slot, cap))
     }
 
     fn lookup(&self, id: &[u8], conn: usize, peer: &PeerId) -> Option<Arc<StageSession>> {
@@ -956,8 +1007,27 @@ impl Stage {
 /// R's address-space cap for its rpc-server.
 // ponytail: granted × 1.5 + 1 GiB; C6 replaces it with granted + the range's largest tensor (held
 // twice during SET_TENSOR) + the measured idle baseline and thread stacks (ADR-0005 D3).
-fn mem_cap(granted: u64) -> Option<u64> {
-    Some(granted.saturating_add(granted / 2).saturating_add(1 << 30))
+fn mem_cap(granted: u64) -> u64 {
+    granted.saturating_add(granted / 2).saturating_add(1 << 30)
+}
+
+/// Admission's memory rule and rpc-server's cap from the same figure (D6): `est × 1.1` must fit in
+/// `available` less [`MEMORY_RESERVE`], and the cap is [`mem_cap`] clamped to that room, so no
+/// `est_bytes` a head claims lets rpc-server commit into the reserve.
+fn memory_grant(est: u64, available: u64) -> Result<u64> {
+    let need = est.saturating_add(est / 10);
+    let have = available.saturating_sub(MEMORY_RESERVE);
+    if need > have {
+        return Err(UComputeError::new(
+            ErrorCode::InsufficientMemory,
+            format!(
+                "the stage needs {} MiB and this device can give {} MiB while keeping 2 GiB free",
+                need >> 20,
+                have >> 20
+            ),
+        ));
+    }
+    Ok(mem_cap(est).min(have))
 }
 
 /// Clients of the stage's port that are not this daemon's sockets (ADR-0005 D3). An error counts as
@@ -1051,37 +1121,39 @@ async fn serve_session(
             Some(s) => s.admit(&conn, &open).map(|slot| (s, slot)),
         },
     };
-    let (stage, slot) = match admitted {
-        Ok((s, slot)) => (s.clone(), slot),
+    let (stage, (slot, cap)) = match admitted {
+        Ok((s, admitted)) => (s.clone(), admitted),
         Err(e) => {
             rejected(&e);
             return tell(&mut send, &e).await;
         }
     };
     let granted = open.est_bytes;
-    let cap = if cfg!(target_os = "linux") {
-        mem_cap(granted)
-    } else {
-        None
-    };
-    let server = match rpc_server::start(&stage.engine_dir, &stage.logs, stage.threads, cap).await {
+    let cap = cfg!(target_os = "linux").then_some(cap);
+    let started = rpc_server::start(&stage.engine_dir, &stage.logs, stage.threads, cap)
+        .await
+        .and_then(|s| match s.child.id() {
+            Some(pid) => Ok((s, pid)),
+            None => Err(UComputeError::new(ErrorCode::BackendFailed, "rpc-server exited")),
+        });
+    let (server, pid) = match started {
         Ok(s) => s,
         Err(e) => {
             rejected(&e);
-            return refuse(&mut send, &e).await;
+            drop(slot);
+            if tokio::time::timeout(WRITE_WAIT, refuse(&mut send, &e)).await.is_err() {
+                let _ = send.reset(reset_code());
+            }
+            return;
         }
     };
-    let (port, device) = (server.port, server.device.clone());
-    let Some(pid) = server.child.id() else {
-        return refuse(
-            &mut send,
-            &UComputeError::new(ErrorCode::BackendFailed, "rpc-server exited"),
-        )
-        .await;
-    };
+    let (port, device, log) = (server.port, server.device.clone(), server.log_path.clone());
     let mut child = server.child;
-    // R meters to enforce the command allowlist; the byte cap is H's
-    let shared = Shared::new(open.session_id.clone(), u64::MAX);
+    // R meters the command allowlist and its own byte cap per session; H's cap is per load
+    let shared = Shared::new(
+        open.session_id.clone(),
+        stage.byte_cap.unwrap_or_else(|| stage_byte_cap(granted)),
+    );
     *lock(&stage.session) = Some(Arc::new(StageSession {
         shared: shared.clone(),
         conn: conn.conn.stable_id(),
@@ -1113,7 +1185,7 @@ async fn serve_session(
         device,
     })
     .into();
-    if write_frame(&mut send, &accept).await.is_err() {
+    if !write_bounded(&mut send, &accept).await {
         shared.end(UComputeError::new(
             ErrorCode::PeerLost,
             "the head left before the session started",
@@ -1136,7 +1208,8 @@ async fn serve_session(
                 _ = &mut h_end => {
                     tell_h = false;
                     let lost = conn.conn.close_reason().map(|r| map_conn_error(&r));
-                    shared.end(lost.unwrap_or_else(|| UComputeError::new(ErrorCode::PeerLost, "the head ended the pooled session")));
+                    // the connection still up: H closed it on purpose, so this is no failure (H's line has its reason)
+                    shared.end(lost.unwrap_or_else(|| UComputeError::new(ErrorCode::Cancelled, "the head ended the pooled session")));
                     break;
                 }
                 _ = tick.tick() => {
@@ -1167,11 +1240,7 @@ async fn serve_session(
         .get()
         .cloned()
         .unwrap_or_else(|| UComputeError::new(ErrorCode::PeerLost, "ended"));
-    if tell_h {
-        tell(&mut send, &reason).await;
-    } else {
-        let _ = send.reset(reset_code());
-    }
+    // rpc-server and the slot go first: telling H waits on H's flow control (bounded)
     let _ = recv.stop(reset_code());
     process::stop(child).await;
     let left = listener_left(port).await;
@@ -1181,11 +1250,20 @@ async fn serve_session(
             "a listener is still on the pooled stage's port after rpc-server stopped"
         );
     }
+    // like llama-server's: a clean end leaves nothing to diagnose
+    if reason.code != ErrorCode::BackendFailed {
+        let _ = std::fs::remove_file(&log);
+    }
     tracing::info!(peer = %peer.short_label(), session = %shared.hex(), code = %reason.code, "pooled stage ended");
     let mut fields = shared.close_fields("stage", &reason);
     fields["listener_left"] = left.into();
     record(&audit, "session_close", &peer, fields);
     drop(slot);
+    if tell_h {
+        tell(&mut send, &reason).await;
+    } else {
+        let _ = send.reset(reset_code());
+    }
 }
 
 async fn serve_tunnel(
@@ -1293,6 +1371,57 @@ mod tests {
         assert_eq!(byte_cap(0), 1 << 30);
         assert_eq!(byte_cap(190_200_000), 2 * 190_200_000 + (1 << 30));
         assert_eq!(byte_cap(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn stage_byte_cap_is_two_loads() {
+        assert_eq!(stage_byte_cap(0), 2 << 30);
+        assert_eq!(stage_byte_cap(190_200_000), 2 * byte_cap(190_200_000));
+        assert_eq!(stage_byte_cap(u64::MAX), u64::MAX);
+    }
+
+    /// Admission and the address-space cap agree (review rlimit-cap-exceeds-admission): for every
+    /// admitted estimate the cap fits in what admission found free less the 2 GiB reserve, and
+    /// still holds the grant and its 10 %.
+    #[test]
+    fn rpc_server_cap_never_exceeds_what_admission_found_free() {
+        let gib = 1u64 << 30;
+        let mut ests: Vec<u64> = vec![0, 1, 9, 10, 11, u64::MAX / 2, u64::MAX - 1, u64::MAX];
+        ests.extend((0..64).map(|i| 1u64 << i));
+        ests.extend((1..=400).map(|i| i * (64 << 20) + 12_345));
+        let avails = [
+            0,
+            MEMORY_RESERVE,
+            3 * gib,
+            6 * gib,
+            8 * gib,
+            13 * gib,
+            64 * gib,
+            u64::MAX,
+        ];
+        let mut admitted = 0;
+        for &available in &avails {
+            let have = available.saturating_sub(MEMORY_RESERVE);
+            for &est in &ests {
+                let need = est.saturating_add(est / 10);
+                match memory_grant(est, available) {
+                    Ok(cap) => {
+                        admitted += 1;
+                        assert!(cap <= have, "est {est}, available {available}: cap {cap} > {have}");
+                        assert!(cap >= need, "est {est}: cap {cap} below the grant's {need}");
+                        assert!(cap <= mem_cap(est));
+                    }
+                    Err(e) => {
+                        assert!(need > have, "est {est} fits in {have} but was refused: {e}");
+                        assert_eq!(e.code, ErrorCode::InsufficientMemory);
+                    }
+                }
+            }
+        }
+        assert!(admitted > 1000, "the grid admits most estimates: {admitted}");
+        // the reviewer's case: 4 GiB claimed on 8 GiB free; mem_cap alone would be 7 GiB
+        assert_eq!(memory_grant(4 * gib, 8 * gib).unwrap(), 6 * gib);
+        assert_eq!(memory_grant(gib, 64 * gib).unwrap(), mem_cap(gib));
     }
 
     /// The test flag lifts the Linux-only stage rule for a loopback peer and never for a LAN one.

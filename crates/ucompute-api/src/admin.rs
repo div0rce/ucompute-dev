@@ -21,8 +21,9 @@ use ucompute_runtime::DevicePreference;
 /// Hand-written OpenAPI 3.1 document covering every entry of `crate::ROUTES`.
 pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
+/// `commit`: the commit this binary was built from (build.rs), so two hosts can be checked to run the same build.
 pub async fn health() -> axum::Json<Value> {
-    axum::Json(json!({"status": "ok", "version": ucompute_core::VERSION}))
+    axum::Json(json!({"status": "ok", "version": ucompute_core::VERSION, "commit": env!("UCOMPUTE_BUILD_COMMIT")}))
 }
 
 /// 200 when a request could be served now: no model loaded, or the loaded engine answers a

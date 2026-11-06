@@ -1,0 +1,1 @@
+1624376 /home/div0rce/.ucompute-acceptance/backends/llama.cpp/b11609/ggml-rpc-server -H 127.0.0.1 -p 42269 -t 6

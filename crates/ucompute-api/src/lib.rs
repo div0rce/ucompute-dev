@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use ucompute_core::{ErrorCode, Paths, Result, UComputeError};
+use ucompute_core::{ErrorCode, Paths, Result, Timeouts, UComputeError};
 use ucompute_identity::{DeviceIdentity, PeerStore};
 use ucompute_models::GgufMetadata;
 use ucompute_network::NetworkConfig;
@@ -79,6 +79,10 @@ pub struct ApiConfig {
     /// setting when `UCOMPUTE_HOME/config.json` does not exist yet.
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Generation timeouts of local and split runs; `Timeouts::default()` unless a test shortens
+    /// them to prove a bound.
+    #[serde(default)]
+    pub timeouts: Timeouts,
 }
 
 fn default_cors_origins() -> Vec<String> {
@@ -105,6 +109,7 @@ impl Default for ApiConfig {
             default_device: ucompute_runtime::DevicePreference::Auto,
             cors_origins: default_cors_origins(),
             network: NetworkConfig::default(),
+            timeouts: Timeouts::default(),
         }
     }
 }
@@ -163,6 +168,9 @@ pub struct AppState {
     pulls: Arc<Semaphore>,
     /// The pooled session this device heads, if any (WP-04, [`split`]).
     split: Mutex<Option<split::Active>>,
+    /// Local generations on the CPU engine and the peer generations beside them (D-026); its mode
+    /// follows `config.json` `local_priority` (set whenever the settings are read).
+    pub local_work: Arc<ucompute_network::local_priority::LocalWork>,
 }
 
 impl AppState {
@@ -185,8 +193,10 @@ impl AppState {
         let audit = Arc::new(Audit::open(&paths)?);
         let settings = mesh::SettingsCell::load(&paths, &config)?;
         let peer_quota = settings.peer_quota();
+        let local_work = ucompute_network::local_priority::LocalWork::new(settings.local_priority());
         let mut peer_serve =
             peer_quota.serve_options(load_options(&config), admission.slots(), admission.max_concurrent);
+        peer_serve.local = Some(local_work.clone());
         // WP-04: this device as a stage host. The policy decides who may use it (pooled inference
         // with a pinned peer in a group that allows it, Sharing on), `rpc::Stage` the platform.
         peer_serve.rpc = split::engine_release().ok().map(|release| {
@@ -227,6 +237,7 @@ impl AppState {
             meta_cache: Mutex::new(HashMap::new()),
             pulls: Arc::new(Semaphore::new(MAX_PULLS)),
             split: Mutex::new(None),
+            local_work,
         })
     }
 

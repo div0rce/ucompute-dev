@@ -1,0 +1,10 @@
+{
+ "text": " Keep the plant away from cold drafts and direct sunlight. The second tip is to water the plant only when the soil is dry. The third tip is to place the plant in a room with a temperature of 65-75 degrees Fahrenheit. The first tip is to keep the plant away from cold drafts and direct sunlight",
+ "usage": {
+  "completion_tokens": 65,
+  "prompt_tokens": 47,
+  "total_tokens": 112
+ },
+ "ttft_ms": 112.2,
+ "tpot_ms": 18.167
+}

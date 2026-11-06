@@ -1,7 +1,7 @@
 # Verify the Windows build of the UCompute desktop app on the exact installer, end to end.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File apps\desktop\scripts\verify_windows_app.ps1 `
-#       -Installer <...\nsis\UCompute_0.1.0_x64-setup.exe> -Work <empty folder>
+#       -Installer <...\nsis\UCompute_0.1.1_x64-setup.exe> -Work <empty folder>
 #
 # 1. Silent per-user install into <Work>\app (NSIS /S /D=...), never over an existing install; THIRD_PARTY_NOTICES.txt
 #    next to the exe names rustls and react.

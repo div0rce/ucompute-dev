@@ -25,6 +25,7 @@
 
 pub mod discovery;
 pub mod health;
+pub mod local_priority;
 pub mod pairing;
 pub mod proto;
 pub mod remote;
