@@ -94,7 +94,7 @@ external distribution.
 | 4 | Tool-call round trip on a pinned tool-capable fixture | F-01-12, B-013 | fixture licence check | Engineering |
 | 5 | Machine-readable compatibility matrix and its validator | U-03 | evidence from 1 and 2 | Engineering |
 | 6 | Candidate 3 with the runtime fixes: Gates A and B, promotion record | WP-08 | 2 | Engineering, then the owner |
-| 7 | Security contact tested end to end | spec §31 | — | Owner, then Engineering |
+| 7 | Security contact tested end to end: address exists, process written (D-036); delivery, reply and a backup responder open | spec §31 | — | Owner, then Engineering |
 | 8 | U-04 study: three independent developers | U-04 | 1, 2, 6, 7 | Owner recruits; Website & DevEx supports |
 
 Advertised platforms for this cohort are macOS on Apple Silicon and Linux x86_64 (CPU). Windows joins when the laptop

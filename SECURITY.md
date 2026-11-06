@@ -4,9 +4,9 @@ UCompute runs AI models on your own hardware and, when you choose, on devices yo
 
 ## Reporting a vulnerability
 
-- Email the maintainers (see the repository's GitHub profile) or open a **private** GitHub security advisory on `div0rce/ucompute`. Do not open a public issue for an unpatched vulnerability.
+- Email `security@ucompute.org`, or open a **private** GitHub security advisory on `div0rce/ucompute` once the source is public. Do not open a public issue for an unpatched vulnerability.
 - Include: affected version or commit, platform, steps to reproduce, impact, and any proof-of-concept.
-- Maintainer response targets are acknowledgement within 7 days and a status update at least every 14 days; these are volunteer targets, not a contracted SLA. Before external beta, maintainers must verify the private reporting route and name a responsible responder.
+- Maintainer response targets are acknowledgement within 7 days and a status update at least every 14 days; these are volunteer targets, not a contracted SLA. The route's end-to-end verification is in progress, and the process and its state are in `docs/security/REPORTING.md`; no external build is distributed until it is complete.
 - Please give us 90 days before public disclosure unless we agree otherwise.
 
 ## Scope
