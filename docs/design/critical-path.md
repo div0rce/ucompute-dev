@@ -10,7 +10,7 @@ nothing here is complete unless its evidence exists. The lab's WP-04 view is uco
 |---|---|---|
 | Engineering | Finish P1: memory, capture, failure cases, configuration C | The extended driver, then a run with this Mac on AC; records in `pool-two-machine-2026-11-06.md` |
 | Core Lab | Help WP-04: drop-ins, pre-registered numbers, scoring | Review the C2 and C5 diffs read-only; score P1 when its evidence exists |
-| Website | Candidate 2 published and verified (ce71dc1, 4441b78); D-032 recorded in its `docs/DEPLOYMENT.md` | Idle until the next promotion record, the WP-04 verdict or the capability snapshot; coordinate with Growth as D-032 says |
+| Website & DevEx | Developer onboarding on the approved build | First-run guide; reads SDK and install facts from `platform-engineering.md` |
 | Growth (D-032) | Its own repository and environment; consumes the handoff below | No engineering dependency and no request pending |
 
 ## Cross-workstream handoff (D-032)
